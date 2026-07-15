@@ -57,6 +57,14 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
+        # Permite el frontend desplegado en Cloudflare: el dominio propio
+        # lactis.maroa.co, los subdominios *.maroa.co, los *.pages.dev y los
+        # *.workers.dev (previews de Cloudflare Workers/Pages).
+        allow_origin_regex=(
+            r"https://([a-z0-9-]+\.)*maroa\.co"
+            r"|https://([a-z0-9-]+\.)+pages\.dev"
+            r"|https://([a-z0-9-]+\.)+workers\.dev"
+        ),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
