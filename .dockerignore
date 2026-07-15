@@ -1,0 +1,40 @@
+# Todo lo que NO debe entrar al contexto de build de la imagen.
+# Mantiene la imagen pequeña y evita filtrar secretos o cachés locales.
+
+# ---- Control de versiones ----
+.git
+.gitignore
+.dockerignore
+
+# ---- Entornos virtuales locales (la imagen instala sus propias dependencias) ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Cachés de Python / herramientas ----
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Pruebas (no se necesitan en la imagen de ejecución) ----
+tests/
+pytest.ini
+
+# ---- Variables de entorno y secretos (se inyectan por docker-compose) ----
+.env
+.env.*
+
+# ---- Archivos subidos por los usuarios (se persisten en un volumen) ----
+uploads/
+
+# ---- Documentación / IDE / SO ----
+*.md
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
