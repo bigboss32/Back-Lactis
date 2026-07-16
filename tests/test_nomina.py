@@ -64,3 +64,21 @@ def test_listar_pagos_por_empleado(client, base_datos):
         )
     lista = client.get(f"/api/v1/nomina?empleado_id={emp['id']}", headers=headers).json()
     assert lista["total"] == 2
+
+
+def test_nomina_entra_en_estado_de_resultados(client, base_datos):
+    """La nómina pagada aparece como gasto en el estado de resultados."""
+    headers = auth_headers(client, "admin.a")
+    emp = _crear_empleado(client, headers, valor_dia="50000")
+    client.post(
+        "/api/v1/nomina",
+        json={"empleado_id": emp["id"], "fecha": "2026-07-15", "dias_trabajados": "5"},
+        headers=headers,
+    )  # total = 250.000
+    er = client.get(
+        "/api/v1/contabilidad/estado-resultados?desde=2026-07-01&hasta=2026-07-31",
+        headers=headers,
+    ).json()
+    lineas = {linea["categoria"]: float(linea["total"]) for linea in er["gastos_por_categoria"]}
+    assert lineas.get("Nómina (empleados)") == 250000
+    assert float(er["total_gastos"]) >= 250000

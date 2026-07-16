@@ -18,6 +18,7 @@ from app.modules.contabilidad.schemas import (
     LibroDiarioResponse,
     LineaCategoria,
 )
+from app.modules.empleados.models import PagoEmpleado
 from app.modules.gastos.repository import GastoRepository
 from app.modules.liquidaciones.models import Liquidacion
 from app.modules.recepcion.models import RecepcionLeche
@@ -122,8 +123,19 @@ class ContabilidadService:
             )
         ) or CERO
 
+        # Nómina pagada a empleados en el período (jornales). Es un gasto operativo.
+        nomina = self.db.scalar(
+            select(func.coalesce(func.sum(PagoEmpleado.total), 0)).where(
+                PagoEmpleado.empresa_id == empresa,
+                PagoEmpleado.deleted_at.is_(None),
+                PagoEmpleado.fecha.between(desde, hasta),
+            )
+        ) or CERO
+
         gastos_categorias = GastoRepository(self.db, empresa).total_por_categoria(desde, hasta)
         lineas = [LineaCategoria(categoria=g.nombre, total=g.total or CERO) for g in gastos_categorias]
+        if nomina > CERO:
+            lineas.append(LineaCategoria(categoria="Nómina (empleados)", total=nomina))
         total_gastos = sum((linea.total for linea in lineas), CERO)
 
         utilidad_bruta = ingresos_ventas - costo_leche - costo_transporte
