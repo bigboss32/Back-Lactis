@@ -144,3 +144,47 @@ def test_venta_subtotal_cuadra_con_detalles(client, base_datos):
     ).json()
     suma_detalles = sum(float(d["total"]) for d in venta["detalles"])
     assert abs(float(venta["subtotal"]) - suma_detalles) < 0.001
+
+
+def test_libro_diario_solo_cuenta_caja_y_bancos(client, base_datos):
+    """El libro diario NO debe contar los pagos de venta (solo caja/bancos): así
+    se evita el doble conteo del mismo dinero (pago + ingreso de caja)."""
+    headers = auth_headers(client, "admin.a")
+    producto, cliente = _setup_venta(client, headers)
+    venta = client.post(
+        "/api/v1/ventas",
+        json={
+            "cliente_id": cliente["id"],
+            "fecha": "2026-06-10",
+            "detalles": [
+                {"producto_id": producto["id"], "cantidad": "10", "precio_unitario": "17000"}
+            ],
+        },
+        headers=headers,
+    ).json()
+    # Pago de la venta (antes se contaba en el libro diario -> doble conteo)
+    client.post(
+        "/api/v1/pagos",
+        json={"venta_id": venta["id"], "fecha": "2026-06-11", "valor": "170000", "metodo": "efectivo"},
+        headers=headers,
+    )
+    # Ingreso de caja por ese mismo cobro (lo que sí debe contar el libro diario)
+    caja = client.post(
+        "/api/v1/caja/abrir", json={"fecha": "2026-06-11", "saldo_inicial": "0"}, headers=headers
+    ).json()
+    client.post(
+        "/api/v1/caja/movimientos",
+        json={"caja_id": caja["id"], "tipo": "ingreso", "concepto": "Cobro venta", "valor": "170000"},
+        headers=headers,
+    )
+
+    libro = client.get(
+        "/api/v1/contabilidad/libro-diario",
+        params={"desde": "2026-06-01", "hasta": "2026-06-30"},
+        headers=headers,
+    ).json()
+    origenes = {a["origen"] for a in libro["asientos"]}
+    assert "pago" not in origenes
+    assert origenes <= {"caja", "banco"}
+    # Solo el ingreso de caja (170.000), no el pago -> sin doble conteo
+    assert float(libro["total_ingresos"]) == 170000

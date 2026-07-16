@@ -18,11 +18,10 @@ from app.modules.contabilidad.schemas import (
     LibroDiarioResponse,
     LineaCategoria,
 )
-from app.modules.gastos.models import Gasto
 from app.modules.gastos.repository import GastoRepository
 from app.modules.liquidaciones.models import Liquidacion
 from app.modules.recepcion.models import RecepcionLeche
-from app.modules.ventas.models import Pago, Venta
+from app.modules.ventas.models import Venta
 
 CERO = Decimal("0")
 
@@ -38,55 +37,14 @@ class ContabilidadService:
 
     # ------------------------------------------------------------ libro diario
     def libro_diario(self, desde: date, hasta: date) -> LibroDiarioResponse:
+        """Flujo de caja real: SOLO movimientos de caja y bancos del período.
+
+        No se suman por separado los pagos de venta, gastos ni recepciones: son
+        documentos cuyo dinero se refleja cuando se mueve por caja/banco. Contarlos
+        además de los movimientos de tesorería contaría el mismo dinero dos veces.
+        """
         asientos: list[AsientoLibroDiario] = []
         empresa = self.ctx.empresa_id
-
-        pagos = self.db.scalars(
-            select(Pago).where(
-                Pago.empresa_id == empresa,
-                Pago.deleted_at.is_(None),
-                Pago.fecha.between(desde, hasta),
-            )
-        ).all()
-        asientos += [
-            AsientoLibroDiario(
-                fecha=p.fecha, origen="pago", concepto=f"Pago venta ({p.metodo})",
-                ingreso=p.valor, egreso=CERO, referencia=str(p.venta_id),
-            )
-            for p in pagos
-        ]
-
-        gastos = self.db.scalars(
-            select(Gasto).where(
-                Gasto.empresa_id == empresa,
-                Gasto.deleted_at.is_(None),
-                Gasto.estado == "activo",
-                Gasto.fecha.between(desde, hasta),
-            )
-        ).all()
-        asientos += [
-            AsientoLibroDiario(
-                fecha=g.fecha, origen="gasto", concepto=g.concepto,
-                ingreso=CERO, egreso=g.valor, referencia=g.numero_factura,
-            )
-            for g in gastos
-        ]
-
-        recepciones = self.db.scalars(
-            select(RecepcionLeche).where(
-                RecepcionLeche.empresa_id == empresa,
-                RecepcionLeche.deleted_at.is_(None),
-                RecepcionLeche.estado == "activo",
-                RecepcionLeche.fecha.between(desde, hasta),
-            )
-        ).all()
-        asientos += [
-            AsientoLibroDiario(
-                fecha=r.fecha, origen="recepcion", concepto="Compra de leche",
-                ingreso=CERO, egreso=r.valor_neto, referencia=str(r.proveedor_id),
-            )
-            for r in recepciones
-        ]
 
         movimientos_caja = self.db.scalars(
             select(MovimientoCaja)
