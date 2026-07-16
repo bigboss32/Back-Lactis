@@ -102,3 +102,45 @@ def test_alerta_stock_bajo(client, base_datos):
 
     notificaciones = client.get("/api/v1/notificaciones", headers=headers).json()
     assert any(n["tipo"] == "stock_bajo" for n in notificaciones["items"])
+
+
+def test_venta_con_descuento_total_nace_pagada(client, base_datos):
+    """Descuento igual al subtotal -> total 0 -> estado pagada, fuera de cartera."""
+    headers = auth_headers(client, "admin.a")
+    producto, cliente = _setup_venta(client, headers)
+    venta = client.post(
+        "/api/v1/ventas",
+        json={
+            "cliente_id": cliente["id"],
+            "fecha": "2026-06-10",
+            "descuento": "51000",
+            "detalles": [
+                {"producto_id": producto["id"], "cantidad": "3", "precio_unitario": "17000"}
+            ],
+        },
+        headers=headers,
+    ).json()
+    assert float(venta["total"]) == 0
+    assert venta["estado"] == "pagada"
+    cartera = client.get("/api/v1/ventas/cartera", headers=headers).json()
+    assert all(c["id"] != venta["id"] for c in cartera)
+
+
+def test_venta_subtotal_cuadra_con_detalles(client, base_datos):
+    """El subtotal es la suma exacta de los totales de línea (redondeados a 2 dec)."""
+    headers = auth_headers(client, "admin.a")
+    producto, cliente = _setup_venta(client, headers)
+    venta = client.post(
+        "/api/v1/ventas",
+        json={
+            "cliente_id": cliente["id"],
+            "fecha": "2026-06-10",
+            "detalles": [
+                {"producto_id": producto["id"], "cantidad": "1.5", "precio_unitario": "0.15"},
+                {"producto_id": producto["id"], "cantidad": "1.5", "precio_unitario": "0.15"},
+            ],
+        },
+        headers=headers,
+    ).json()
+    suma_detalles = sum(float(d["total"]) for d in venta["detalles"])
+    assert abs(float(venta["subtotal"]) - suma_detalles) < 0.001

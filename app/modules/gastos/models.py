@@ -8,14 +8,15 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.common.models import AuditMixin, TenantMixin
 from app.core.database import Base
 
-# Categorías sembradas por defecto para cada empresa
+# Categorías sembradas por defecto para cada empresa.
+# NO se incluyen "Compra de leche" ni "Transporte": esos costos ya se contabilizan
+# vía recepciones/liquidaciones; cargarlos también como gasto duplicaría el costo
+# en el estado de resultados.
 CATEGORIAS_DEFECTO = (
     "Combustible",
     "Servicios",
     "Nómina",
     "Mantenimiento",
-    "Compra de leche",
-    "Transporte",
     "Papelería",
     "Insumos",
     "Otros",

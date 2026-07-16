@@ -40,7 +40,9 @@ class VentaService(BaseService[Venta]):
         subtotal = CERO
         for d in detalles_data:
             producto = productos_repo.get_or_fail(d["producto_id"])
-            total_linea = Decimal(d["cantidad"]) * Decimal(d["precio_unitario"])
+            total_linea = (Decimal(d["cantidad"]) * Decimal(d["precio_unitario"])).quantize(
+                Decimal("0.01")
+            )
             subtotal += total_linea
             detalles.append(
                 VentaDetalle(
@@ -61,15 +63,18 @@ class VentaService(BaseService[Venta]):
         descuento = Decimal(data.get("descuento") or CERO)
         if descuento > subtotal:
             raise BusinessError("El descuento no puede superar el subtotal")
+        total = (subtotal - descuento).quantize(Decimal("0.01"))
 
         venta = Venta(
             **data,
             empresa_id=self.ctx.empresa_id,
             numero=self.repo.siguiente_numero(),
             subtotal=subtotal,
-            total=subtotal - descuento,
+            total=total,
             pagado=CERO,
-            estado=ESTADO_PENDIENTE,
+            # Una venta sin saldo (p.ej. descuento del 100%) nace PAGADA para no
+            # quedar atrapada como pendiente en la cartera sin poder cerrarse.
+            estado=ESTADO_PAGADA if total <= CERO else ESTADO_PENDIENTE,
             created_by=self.ctx.user_id,
             updated_by=self.ctx.user_id,
         )
