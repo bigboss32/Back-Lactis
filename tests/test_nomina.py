@@ -82,3 +82,22 @@ def test_nomina_entra_en_estado_de_resultados(client, base_datos):
     lineas = {linea["categoria"]: float(linea["total"]) for linea in er["gastos_por_categoria"]}
     assert lineas.get("Nómina (empleados)") == 250000
     assert float(er["total_gastos"]) >= 250000
+
+
+def test_nomina_aparece_como_egreso_en_libro_diario(client, base_datos):
+    """El pago de nómina se registra como egreso en el libro diario."""
+    headers = auth_headers(client, "admin.a")
+    emp = _crear_empleado(client, headers, valor_dia="50000")
+    client.post(
+        "/api/v1/nomina",
+        json={"empleado_id": emp["id"], "fecha": "2026-07-15", "dias_trabajados": "4"},
+        headers=headers,
+    )  # total = 200.000
+    libro = client.get(
+        "/api/v1/contabilidad/libro-diario?desde=2026-07-01&hasta=2026-07-31",
+        headers=headers,
+    ).json()
+    nomina = [a for a in libro["asientos"] if a["origen"] == "nomina"]
+    assert len(nomina) == 1
+    assert float(nomina[0]["egreso"]) == 200000
+    assert float(libro["total_egresos"]) >= 200000

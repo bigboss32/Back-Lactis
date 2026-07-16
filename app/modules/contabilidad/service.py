@@ -38,11 +38,13 @@ class ContabilidadService:
 
     # ------------------------------------------------------------ libro diario
     def libro_diario(self, desde: date, hasta: date) -> LibroDiarioResponse:
-        """Flujo de caja real: SOLO movimientos de caja y bancos del período.
+        """Flujo de caja real del período: movimientos de caja y bancos, más los
+        pagos de NÓMINA (que se pagan directo al empleado, no por caja).
 
-        No se suman por separado los pagos de venta, gastos ni recepciones: son
-        documentos cuyo dinero se refleja cuando se mueve por caja/banco. Contarlos
-        además de los movimientos de tesorería contaría el mismo dinero dos veces.
+        No se suman los pagos de venta, gastos ni recepciones: son documentos cuyo
+        dinero se refleja cuando se mueve por caja/banco; contarlos además de la
+        tesorería duplicaría el mismo dinero. (La nómina se incluye porque no pasa
+        por caja: si además se registra en caja, se contaría doble.)
         """
         asientos: list[AsientoLibroDiario] = []
         empresa = self.ctx.empresa_id
@@ -81,6 +83,22 @@ class ContabilidadService:
                 referencia=m.referencia,
             )
             for m in movimientos_banco
+        ]
+
+        pagos_nomina = self.db.scalars(
+            select(PagoEmpleado).where(
+                PagoEmpleado.empresa_id == empresa,
+                PagoEmpleado.deleted_at.is_(None),
+                PagoEmpleado.fecha.between(desde, hasta),
+            )
+        ).all()
+        asientos += [
+            AsientoLibroDiario(
+                fecha=p.fecha, origen="nomina",
+                concepto=f"Nómina: {p.empleado_nombre or 'empleado'}",
+                ingreso=CERO, egreso=p.total, referencia=str(p.empleado_id),
+            )
+            for p in pagos_nomina
         ]
 
         asientos.sort(key=lambda a: a.fecha)
