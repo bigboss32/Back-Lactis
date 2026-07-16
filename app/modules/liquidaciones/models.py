@@ -79,3 +79,9 @@ class Anticipo(TenantMixin, AuditMixin, Base):
     )
 
     proveedor = relationship("Proveedor", lazy="joined")
+
+    @property
+    def proveedor_nombre(self) -> str | None:
+        # Se expone en AnticipoRead. La relación carga el proveedor aunque esté
+        # eliminado (soft delete), por lo que el nombre se conserva en el listado.
+        return self.proveedor.nombre if self.proveedor else None
