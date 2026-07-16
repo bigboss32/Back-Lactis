@@ -3,10 +3,13 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import select
+
 from app.common.service import BaseService, serialize_entity
-from app.core.exceptions import BusinessError
+from app.core.exceptions import BusinessError, NotFoundError
 from app.core.pagination import PageParams
 from app.modules.clientes.repository import ClienteRepository
+from app.modules.empresas.models import Empresa
 from app.modules.inventario.repository import ProductoRepository
 from app.modules.inventario.models import MovimientoInventario
 from app.modules.ventas.models import (
@@ -33,6 +36,11 @@ class VentaService(BaseService[Venta]):
         detalles_data = data.pop("detalles")
         descontar_inventario = data.pop("descontar_inventario", True)
 
+        # Serializa la numeración por empresa: evita números de venta duplicados
+        # (y el error 500 del índice único) cuando dos ventas se crean a la vez.
+        self.db.execute(
+            select(Empresa.id).where(Empresa.id == self.ctx.empresa_id).with_for_update()
+        )
         ClienteRepository(self.db, self.ctx.empresa_id).get_or_fail(data["cliente_id"])
         productos_repo = ProductoRepository(self.db, self.ctx.empresa_id)
 
@@ -166,7 +174,18 @@ class PagoService(BaseService[Pago]):
 
     def crear(self, payload: Any) -> Pago:
         data = payload.model_dump(exclude_unset=True)
-        venta = VentaRepository(self.db, self.ctx.empresa_id).get_or_fail(data["venta_id"])
+        # Bloquea la fila de la venta para evitar sobrepagos en pagos concurrentes.
+        venta = self.db.scalars(
+            select(Venta)
+            .where(
+                Venta.id == data["venta_id"],
+                Venta.empresa_id == self.ctx.empresa_id,
+                Venta.deleted_at.is_(None),
+            )
+            .with_for_update()
+        ).first()
+        if venta is None:
+            raise NotFoundError("Venta no encontrada")
         if venta.estado == ESTADO_ANULADA:
             raise BusinessError("No se pueden registrar pagos sobre una venta anulada")
         if venta.estado == ESTADO_PAGADA:

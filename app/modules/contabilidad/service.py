@@ -150,13 +150,18 @@ class ContabilidadService:
     def balance(self) -> BalanceResponse:
         empresa = self.ctx.empresa_id
 
-        saldo_cajas = self.db.scalar(
-            select(func.coalesce(func.sum(CajaDiaria.saldo_final), 0)).where(
-                CajaDiaria.empresa_id == empresa,
-                CajaDiaria.deleted_at.is_(None),
-                CajaDiaria.estado == "abierta",
-            )
-        ) or CERO
+        # Efectivo disponible = saldo_final de la ÚLTIMA caja de cada sucursal
+        # (esté abierta o cerrada). Así el efectivo de días ya cerrados no
+        # desaparece, y no se suman saldos de días distintos (evita doble conteo).
+        cajas = self.db.scalars(
+            select(CajaDiaria)
+            .where(CajaDiaria.empresa_id == empresa, CajaDiaria.deleted_at.is_(None))
+            .order_by(CajaDiaria.fecha.desc(), CajaDiaria.created_at.desc())
+        ).all()
+        ultima_por_sucursal: dict = {}
+        for c in cajas:
+            ultima_por_sucursal.setdefault(c.sucursal_id, c)
+        saldo_cajas = sum((c.saldo_final for c in ultima_por_sucursal.values()), CERO)
 
         cuentas = self.db.scalars(
             select(CuentaBancaria).where(

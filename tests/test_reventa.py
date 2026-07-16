@@ -171,6 +171,35 @@ def test_borona_ciclo_completo(client, base_datos):
     assert "borona" in r.json()["error"]["detail"].lower()
 
 
+def test_no_anular_compra_ni_venta_con_abonos(client, base_datos):
+    """Anular un documento con abonos borraría dinero real del resumen: se bloquea."""
+    headers = auth_headers(client, "admin.a")
+    compra = client.post(
+        "/api/v1/reventa/compras",
+        json={"fecha": "2026-07-12", "productor": "Sebastián",
+              "kilos_brutos": "100", "merma_kilos": "0", "precio_kilo": "18000"},
+        headers=headers,
+    ).json()
+    client.post(
+        f"/api/v1/reventa/compras/{compra['id']}/abonos",
+        json={"fecha": "2026-07-12", "valor": "100000"},
+        headers=headers,
+    )
+    r = client.post(f"/api/v1/reventa/compras/{compra['id']}/anular", headers=headers)
+    assert r.status_code == 422
+    assert "abono" in r.json()["error"]["detail"].lower()
+
+    venta = client.post(
+        "/api/v1/reventa/ventas",
+        json={"fecha": "2026-07-13", "cliente": "Alba", "kilos": "40",
+              "precio_kilo": "19500", "pagada_de_contado": True},
+        headers=headers,
+    ).json()
+    r = client.post(f"/api/v1/reventa/ventas/{venta['id']}/anular", headers=headers)
+    assert r.status_code == 422
+    assert "abono" in r.json()["error"]["detail"].lower()
+
+
 def test_no_vender_mas_queso_del_disponible(client, base_datos):
     headers = auth_headers(client, "admin.a")
     client.post(

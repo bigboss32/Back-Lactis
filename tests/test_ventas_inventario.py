@@ -188,3 +188,42 @@ def test_libro_diario_solo_cuenta_caja_y_bancos(client, base_datos):
     assert origenes <= {"caja", "banco"}
     # Solo el ingreso de caja (170.000), no el pago -> sin doble conteo
     assert float(libro["total_ingresos"]) == 170000
+
+
+def test_precio_con_mas_de_dos_decimales_se_rechaza(client, base_datos):
+    """El precio_unitario no admite más de 2 decimales (evita descuadres)."""
+    headers = auth_headers(client, "admin.a")
+    producto, cliente = _setup_venta(client, headers)
+    r = client.post(
+        "/api/v1/ventas",
+        json={
+            "cliente_id": cliente["id"],
+            "fecha": "2026-06-10",
+            "detalles": [
+                {"producto_id": producto["id"], "cantidad": "1", "precio_unitario": "3.333"}
+            ],
+        },
+        headers=headers,
+    )
+    assert r.status_code == 422
+
+
+def test_balance_incluye_efectivo_de_caja_cerrada(client, base_datos):
+    """El disponible en caja incluye el efectivo de cajas ya cerradas (arqueo)."""
+    headers = auth_headers(client, "admin.a")
+    caja = client.post(
+        "/api/v1/caja/abrir", json={"fecha": "2026-06-01", "saldo_inicial": "0"}, headers=headers
+    ).json()
+    client.post(
+        "/api/v1/caja/movimientos",
+        json={"caja_id": caja["id"], "tipo": "ingreso", "concepto": "Cobro", "valor": "800000"},
+        headers=headers,
+    )
+    cerrada = client.post(
+        f"/api/v1/caja/{caja['id']}/cerrar",
+        json={"efectivo_contado": "800000"},
+        headers=headers,
+    )
+    assert cerrada.status_code == 200, cerrada.text
+    balance = client.get("/api/v1/contabilidad/balance", headers=headers).json()
+    assert float(balance["saldo_cajas"]) == 800000

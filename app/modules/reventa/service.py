@@ -103,6 +103,10 @@ class CompraQuesoService(BaseService[CompraQueso]):
 
     def anular(self, compra_id: uuid.UUID) -> CompraQueso:
         compra = self.repo.get_or_fail(compra_id)
+        if compra.abonado > CERO:
+            raise BusinessError(
+                "No se puede anular una compra con abonos registrados"
+            )
         antes = compra.estado
         compra.estado = ESTADO_ANULADA
         compra.updated_by = self.ctx.user_id
@@ -194,6 +198,10 @@ class VentaQuesoService(BaseService[VentaQueso]):
 
     def anular(self, venta_id: uuid.UUID) -> VentaQueso:
         venta = self.repo.get_or_fail(venta_id)
+        if venta.abonado > CERO:
+            raise BusinessError(
+                "No se puede anular una venta con abonos registrados"
+            )
         antes = venta.estado
         venta.estado = ESTADO_ANULADA
         venta.updated_by = self.ctx.user_id

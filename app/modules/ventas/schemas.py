@@ -11,8 +11,8 @@ from app.common.schemas import BaseSchema, TenantRead
 class VentaDetalleCreate(BaseSchema):
     producto_id: uuid.UUID
     descripcion: str | None = None
-    cantidad: Decimal = Field(gt=0)
-    precio_unitario: Decimal = Field(ge=0)
+    cantidad: Decimal = Field(gt=0, decimal_places=2)
+    precio_unitario: Decimal = Field(ge=0, decimal_places=2)
 
 
 class VentaCreate(BaseSchema):
