@@ -4,7 +4,7 @@ replicando el proceso que la quesera llevaba en Excel.
 """
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -26,7 +26,7 @@ from app.modules.liquidaciones.models import (
 from app.modules.liquidaciones.repository import AnticipoRepository, LiquidacionRepository
 from app.modules.recepcion.models import RecepcionLeche
 from app.modules.recepcion.repository import RecepcionRepository
-from app.utils.export import build_pdf, rows_to_excel
+from app.utils.export import build_liquidacion_pdf, build_pdf, rows_to_excel
 
 CERO = Decimal("0")
 
@@ -263,33 +263,76 @@ class LiquidacionService(BaseService[Liquidacion]):
         liquidacion = self.repo.get_or_fail(entity_id)
         empresa = EmpresaRepository(self.db).get(self.ctx.empresa_id)
         nombre_empresa = empresa.nombre if empresa else "Quesera"
+        nit = empresa.nit if empresa else None
+        ubicacion = (
+            ", ".join(p for p in [empresa.ciudad, empresa.departamento] if p) or None
+            if empresa
+            else None
+        )
         tercero = self._nombre_tercero(liquidacion)
+        es_proveedor = liquidacion.tipo == TIPO_PROVEEDOR
+        tercero_detalle = (
+            getattr(liquidacion.proveedor, "vereda", None)
+            if es_proveedor and liquidacion.proveedor
+            else None
+        )
 
         detalle_rows = [
             [d.fecha.strftime("%d/%m/%Y"), f"{d.litros:,.1f}", f"${d.precio_litro:,.0f}", f"${d.valor:,.0f}"]
             for d in liquidacion.detalles
         ]
-        resumen_rows = [
-            ["Total litros", f"{liquidacion.total_litros:,.1f}"],
-            ["Precio promedio", f"${liquidacion.precio_promedio:,.2f}"],
-            ["Valor bruto", f"${liquidacion.valor_bruto:,.0f}"],
-            ["Bonificaciones", f"${liquidacion.bonificaciones:,.0f}"],
-            ["Descuentos", f"${liquidacion.descuentos:,.0f}"],
-            ["Anticipos aplicados", f"${liquidacion.anticipos:,.0f}"],
-            ["VALOR TOTAL", f"${liquidacion.valor_total:,.0f}"],
-            ["SALDO A PAGAR", f"${liquidacion.saldo:,.0f}"],
-        ]
-        pdf = build_pdf(
-            title=nombre_empresa,
-            subtitle=(
-                f"Liquidación de {liquidacion.tipo} — {tercero} | "
-                f"Período {liquidacion.periodo_inicio.strftime('%d/%m/%Y')} al "
-                f"{liquidacion.periodo_fin.strftime('%d/%m/%Y')} | Estado: {liquidacion.estado.upper()}"
-            ),
-            sections=[
-                {"heading": "Detalle diario", "headers": ["Fecha", "Litros", "Precio/L", "Valor"], "rows": detalle_rows},
-                {"heading": "Resumen", "headers": ["Concepto", "Valor"], "rows": resumen_rows},
-            ],
+
+        if es_proveedor:
+            resumen_rows = [
+                ("Total litros", f"{liquidacion.total_litros:,.1f}", False),
+                ("Precio promedio", f"${liquidacion.precio_promedio:,.2f}", False),
+                ("Valor bruto", f"${liquidacion.valor_bruto:,.0f}", False),
+                ("Bonificaciones", f"+ ${liquidacion.bonificaciones:,.0f}", False),
+                ("Descuentos", f"- ${liquidacion.descuentos:,.0f}", False),
+                ("Anticipos aplicados", f"- ${liquidacion.anticipos:,.0f}", False),
+                ("VALOR TOTAL", f"${liquidacion.valor_total:,.0f}", True),
+                ("SALDO A PAGAR", f"${liquidacion.saldo:,.0f}", True),
+            ]
+        else:
+            resumen_rows = [
+                ("Total litros", f"{liquidacion.total_litros:,.1f}", False),
+                ("Valor transporte", f"${liquidacion.valor_transporte:,.0f}", False),
+                ("VALOR TOTAL", f"${liquidacion.valor_total:,.0f}", True),
+                ("SALDO A PAGAR", f"${liquidacion.saldo:,.0f}", True),
+            ]
+
+        anticipos_rows: list[list[Any]] = []
+        if es_proveedor:
+            anticipos = self.db.scalars(
+                AnticipoRepository(self.db, self.ctx.empresa_id)
+                .base_query()
+                .where(Anticipo.liquidacion_id == liquidacion.id)
+            ).all()
+            anticipos_rows = [
+                [a.fecha.strftime("%d/%m/%Y"), f"${a.valor:,.0f}", a.observaciones or "—"]
+                for a in anticipos
+            ]
+
+        periodo = (
+            f"{liquidacion.periodo_inicio.strftime('%d/%m/%Y')} al "
+            f"{liquidacion.periodo_fin.strftime('%d/%m/%Y')}"
+        )
+        pdf = build_liquidacion_pdf(
+            empresa_nombre=nombre_empresa,
+            empresa_nit=nit,
+            empresa_ubicacion=ubicacion,
+            folio=str(liquidacion.id)[:8].upper(),
+            estado=liquidacion.estado,
+            emitido=datetime.now().strftime("%d/%m/%Y %H:%M"),
+            tercero_label="Proveedor" if es_proveedor else "Transportador",
+            tercero_nombre=tercero,
+            tercero_detalle=tercero_detalle,
+            periodo=periodo,
+            detalle_headers=["Fecha", "Litros", "Precio/L", "Valor"],
+            detalle_rows=detalle_rows,
+            resumen_rows=resumen_rows,
+            anticipos_rows=anticipos_rows,
+            observaciones=liquidacion.observaciones,
         )
         filename = f"liquidacion_{tercero}_{liquidacion.periodo_inicio.isoformat()}.pdf".replace(" ", "_")
         return pdf, filename
