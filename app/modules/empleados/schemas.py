@@ -1,3 +1,4 @@
+import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -15,6 +16,7 @@ class EmpleadoCreate(BaseSchema):
     direccion: str | None = None
     fecha_ingreso: date | None = None
     salario: Decimal | None = Field(default=None, ge=0)
+    valor_dia: Decimal | None = Field(default=None, ge=0)
 
 
 class EmpleadoUpdate(BaseSchema):
@@ -26,6 +28,7 @@ class EmpleadoUpdate(BaseSchema):
     direccion: str | None = None
     fecha_ingreso: date | None = None
     salario: Decimal | None = Field(default=None, ge=0)
+    valor_dia: Decimal | None = Field(default=None, ge=0)
     estado: str | None = None
 
 
@@ -38,3 +41,25 @@ class EmpleadoRead(TenantRead):
     direccion: str | None
     fecha_ingreso: date | None
     salario: Decimal | None
+    valor_dia: Decimal | None
+
+
+class PagoEmpleadoCreate(BaseSchema):
+    empleado_id: uuid.UUID
+    fecha: date
+    dias_trabajados: Decimal = Field(gt=0, decimal_places=2)
+    # Si no se envía, se toma el valor_dia del empleado.
+    valor_dia: Decimal | None = Field(default=None, ge=0)
+    periodo: str | None = None
+    observaciones: str | None = None
+
+
+class PagoEmpleadoRead(TenantRead):
+    empleado_id: uuid.UUID
+    empleado_nombre: str | None = None
+    fecha: date
+    periodo: str | None
+    dias_trabajados: Decimal
+    valor_dia: Decimal
+    total: Decimal
+    observaciones: str | None

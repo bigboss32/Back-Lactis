@@ -15,6 +15,7 @@ from app.modules.bancos.router import router as bancos_router
 from app.modules.caja.router import router as caja_router
 from app.modules.clientes.router import router as clientes_router
 from app.modules.contabilidad.router import router as contabilidad_router
+from app.modules.empleados.router import pagos_router as nomina_router
 from app.modules.empleados.router import router as empleados_router
 from app.modules.empresas.router import router as empresas_router
 from app.modules.gastos.router import categorias_router as categorias_gasto_router
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(mov_inventario_router, prefix=f"{prefix}/inventario/movimientos")
     app.include_router(clientes_router, prefix=f"{prefix}/clientes")
     app.include_router(empleados_router, prefix=f"{prefix}/empleados")
+    app.include_router(nomina_router, prefix=f"{prefix}/nomina")
     app.include_router(ventas_router, prefix=f"{prefix}/ventas")
     app.include_router(pagos_router, prefix=f"{prefix}/pagos")
     app.include_router(gastos_router, prefix=f"{prefix}/gastos")

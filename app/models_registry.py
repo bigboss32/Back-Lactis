@@ -7,7 +7,7 @@ from app.modules.auditoria.models import Auditoria  # noqa: F401
 from app.modules.bancos.models import CuentaBancaria, MovimientoBancario  # noqa: F401
 from app.modules.caja.models import CajaDiaria, MovimientoCaja  # noqa: F401
 from app.modules.clientes.models import Cliente  # noqa: F401
-from app.modules.empleados.models import Empleado  # noqa: F401
+from app.modules.empleados.models import Empleado, PagoEmpleado  # noqa: F401
 from app.modules.empresas.models import Empresa  # noqa: F401
 from app.modules.gastos.models import CategoriaGasto, Gasto  # noqa: F401
 from app.modules.inventario.models import MovimientoInventario, Producto  # noqa: F401
