@@ -26,6 +26,12 @@ class EmpresaUpdate(BaseSchema):
     estado: str | None = None
 
 
+class ReinicioEmpresa(BaseSchema):
+    """Confirmación para reiniciar (borrar) los datos de una empresa."""
+
+    confirmacion: str = Field(min_length=1, description="Debe coincidir con el nombre de la empresa")
+
+
 class EmpresaRead(AuditRead):
     nombre: str
     nit: str
