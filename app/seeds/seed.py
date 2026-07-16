@@ -6,7 +6,7 @@ Ejecutar:  python -m app.seeds.seed
 """
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 import app.models_registry  # noqa: F401
@@ -237,6 +237,37 @@ def seed_empresa_demo(db: Session, roles: dict[str, Rol]) -> None:
     logger.info("Empresa demo creada: %s", empresa.nombre)
 
 
+# Catálogos por defecto que recibe TODA empresa (editables/eliminables después).
+TIPOS_QUESO_DEFECTO = ["Queso Costeño", "Queso Criollo", "Queso Doble Crema", "Queso Campesino"]
+
+
+def ensure_catalogos_empresas(db: Session) -> None:
+    """Garantiza que cada empresa tenga catálogos mínimos (tipos de queso y
+    categorías de gasto) para que los formularios no queden con selects vacíos.
+    Idempotente: solo agrega si la empresa no tiene ninguno activo.
+    """
+    empresas = db.scalars(select(Empresa).where(Empresa.deleted_at.is_(None))).all()
+    for empresa in empresas:
+        tiene_tipos = db.scalar(
+            select(func.count())
+            .select_from(TipoQueso)
+            .where(TipoQueso.empresa_id == empresa.id, TipoQueso.deleted_at.is_(None))
+        )
+        if not tiene_tipos:
+            for nombre in TIPOS_QUESO_DEFECTO:
+                db.add(TipoQueso(empresa_id=empresa.id, nombre=nombre))
+
+        tiene_categorias = db.scalar(
+            select(func.count())
+            .select_from(CategoriaGasto)
+            .where(CategoriaGasto.empresa_id == empresa.id, CategoriaGasto.deleted_at.is_(None))
+        )
+        if not tiene_categorias:
+            for nombre in CATEGORIAS_DEFECTO:
+                db.add(CategoriaGasto(empresa_id=empresa.id, nombre=nombre))
+    db.flush()
+
+
 def run() -> None:
     db = SessionLocal()
     try:
@@ -245,6 +276,7 @@ def run() -> None:
         seed_superadmin(db, roles)
         if settings.SEED_DEMO_DATA:
             seed_empresa_demo(db, roles)
+        ensure_catalogos_empresas(db)
         db.commit()
         logger.info("Seed completado")
     except Exception:
