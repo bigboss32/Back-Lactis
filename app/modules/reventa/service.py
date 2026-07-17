@@ -28,7 +28,6 @@ from app.modules.reventa.repository import (
     VentaQuesoRepository,
 )
 from app.modules.reventa.schemas import ResumenReventa
-from app.utils.export import rows_to_excel
 
 CERO = Decimal("0")
 DOS_DECIMALES = Decimal("0.01")
@@ -308,37 +307,3 @@ class ReventaResumenService:
             por_pagar_productores=por_pagar,
             por_cobrar_clientes=por_cobrar,
         )
-
-    def exportar_excel(self, desde: date, hasta: date) -> tuple[bytes, str]:
-        compras, _ = self.compras.list_paginated(
-            PageParams(page=1, page_size=200),
-            extra_criteria=[CompraQueso.fecha.between(desde, hasta)],
-        )
-        ventas, _ = self.ventas.list_paginated(
-            PageParams(page=1, page_size=200),
-            extra_criteria=[VentaQueso.fecha.between(desde, hasta)],
-        )
-        conversiones, _ = self.conversiones.list_paginated(
-            PageParams(page=1, page_size=200),
-            extra_criteria=[ConversionBorona.fecha.between(desde, hasta)],
-        )
-        filas = [
-            ["COMPRA", c.fecha, c.productor, c.kilos_netos, c.precio_kilo,
-             c.valor_total, c.abonado, c.saldo, c.estado]
-            for c in compras
-        ] + [
-            [f"VENTA {v.tipo.upper()}", v.fecha, v.cliente, v.kilos, v.precio_kilo,
-             v.valor_total, v.abonado, v.saldo, v.estado]
-            for v in ventas
-        ] + [
-            ["QUESO → BORONA", cv.fecha, cv.observaciones or "", cv.kilos, "", "", "", "", ""]
-            for cv in conversiones
-        ]
-        excel = rows_to_excel(
-            title=f"Compra y venta de queso del {desde.isoformat()} al {hasta.isoformat()}",
-            headers=["Tipo", "Fecha", "Tercero", "Kilos", "Precio/kg", "Total", "Abonado", "Saldo", "Estado"],
-            rows=filas,
-            sheet_name="Reventa",
-            money_columns=(5, 6, 7, 8),
-        )
-        return excel, f"reventa_{desde.isoformat()}_{hasta.isoformat()}.xlsx"

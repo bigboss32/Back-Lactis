@@ -1,4 +1,4 @@
-"""Dashboard ejecutivo y exportaciones a Excel de los módulos principales."""
+"""Dashboard ejecutivo con indicadores del negocio."""
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.exceptions import BusinessError
-from app.modules.gastos.models import CategoriaGasto, Gasto
+from app.modules.gastos.models import Gasto
 from app.modules.gastos.repository import GastoRepository
 from app.modules.liquidaciones.models import Liquidacion
 from app.modules.notificaciones.models import Notificacion
@@ -16,7 +16,6 @@ from app.modules.proveedores.models import Proveedor
 from app.modules.recepcion.models import RecepcionLeche
 from app.modules.reportes.schemas import DashboardResponse, SerieCategoria, SerieDia
 from app.modules.ventas.models import Venta
-from app.utils.export import rows_to_excel
 
 CERO = Decimal("0")
 
@@ -150,122 +149,3 @@ class ReporteService:
             produccion_por_tipo=produccion_por_tipo,
             top_proveedores=top_proveedores,
         )
-
-    # ------------------------------------------------------- export recepciones
-    def exportar_recepciones_quincena(self, desde: date, hasta: date) -> tuple[bytes, str]:
-        """Grilla proveedor × día, como la hoja 'LITROS Y TRANSPORTE' del Excel original."""
-        recepciones = self.db.scalars(
-            select(RecepcionLeche).where(
-                RecepcionLeche.empresa_id == self.ctx.empresa_id,
-                RecepcionLeche.deleted_at.is_(None),
-                RecepcionLeche.fecha.between(desde, hasta),
-            )
-        ).all()
-
-        dias = []
-        d = desde
-        while d <= hasta:
-            dias.append(d)
-            d += timedelta(days=1)
-
-        por_proveedor: dict = {}
-        for r in recepciones:
-            info = por_proveedor.setdefault(
-                r.proveedor_id,
-                {
-                    "nombre": r.proveedor.nombre if r.proveedor else "-",
-                    "vereda": r.proveedor.vereda if r.proveedor else "",
-                    "litros": {},
-                    "precio": r.precio_litro,
-                    "bruto": CERO,
-                    "descuentos": CERO,
-                    "bonificaciones": CERO,
-                    "neto": CERO,
-                    "transporte": CERO,
-                },
-            )
-            info["litros"][r.fecha] = info["litros"].get(r.fecha, CERO) + r.cantidad_litros
-            info["bruto"] += r.valor_bruto
-            info["descuentos"] += r.descuentos
-            info["bonificaciones"] += r.bonificaciones
-            info["neto"] += r.valor_neto
-            info["transporte"] += r.valor_transporte
-
-        headers = (
-            ["Proveedor", "Vereda"]
-            + [d.strftime("%d/%m") for d in dias]
-            + ["Total Litros", "Precio/L", "Valor Bruto", "Descuentos", "Bonificaciones", "Valor Neto", "Transporte"]
-        )
-        rows = []
-        for info in sorted(por_proveedor.values(), key=lambda x: x["nombre"]):
-            litros_dia = [info["litros"].get(d, CERO) for d in dias]
-            rows.append(
-                [info["nombre"], info["vereda"]]
-                + litros_dia
-                + [
-                    sum(litros_dia, CERO), info["precio"], info["bruto"],
-                    info["descuentos"], info["bonificaciones"], info["neto"], info["transporte"],
-                ]
-            )
-        money_start = len(dias) + 4
-        excel = rows_to_excel(
-            title=f"Litros y transporte del {desde.strftime('%d/%m/%Y')} al {hasta.strftime('%d/%m/%Y')}",
-            headers=headers,
-            rows=rows,
-            sheet_name="Litros y Transporte",
-            money_columns=tuple(range(money_start, money_start + 6)),
-        )
-        return excel, f"recepciones_{desde.isoformat()}_{hasta.isoformat()}.xlsx"
-
-    # ------------------------------------------------------------ export ventas
-    def exportar_ventas(self, desde: date, hasta: date) -> tuple[bytes, str]:
-        ventas = self.db.scalars(
-            select(Venta).where(
-                Venta.empresa_id == self.ctx.empresa_id,
-                Venta.deleted_at.is_(None),
-                Venta.fecha.between(desde, hasta),
-            ).order_by(Venta.fecha)
-        ).all()
-        rows = [
-            [
-                v.numero, v.fecha, v.tipo, v.cliente.nombre if v.cliente else "-",
-                v.subtotal, v.descuento, v.total, v.pagado, v.saldo, v.estado,
-            ]
-            for v in ventas
-        ]
-        excel = rows_to_excel(
-            title=f"Ventas del {desde.isoformat()} al {hasta.isoformat()}",
-            headers=["N°", "Fecha", "Tipo", "Cliente", "Subtotal", "Descuento", "Total", "Pagado", "Saldo", "Estado"],
-            rows=rows,
-            sheet_name="Ventas",
-            money_columns=(5, 6, 7, 8, 9),
-        )
-        return excel, f"ventas_{desde.isoformat()}_{hasta.isoformat()}.xlsx"
-
-    # ------------------------------------------------------------ export gastos
-    def exportar_gastos(self, desde: date, hasta: date) -> tuple[bytes, str]:
-        gastos = self.db.scalars(
-            select(Gasto)
-            .join(CategoriaGasto, CategoriaGasto.id == Gasto.categoria_id)
-            .where(
-                Gasto.empresa_id == self.ctx.empresa_id,
-                Gasto.deleted_at.is_(None),
-                Gasto.fecha.between(desde, hasta),
-            )
-            .order_by(Gasto.fecha)
-        ).all()
-        rows = [
-            [
-                g.fecha, g.categoria.nombre if g.categoria else "-", g.concepto,
-                g.proveedor or "", g.numero_factura or "", g.valor,
-            ]
-            for g in gastos
-        ]
-        excel = rows_to_excel(
-            title=f"Gastos del {desde.isoformat()} al {hasta.isoformat()}",
-            headers=["Fecha", "Categoría", "Concepto", "Proveedor", "Factura", "Valor"],
-            rows=rows,
-            sheet_name="Gastos",
-            money_columns=(6,),
-        )
-        return excel, f"gastos_{desde.isoformat()}_{hasta.isoformat()}.xlsx"

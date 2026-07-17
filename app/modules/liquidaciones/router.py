@@ -56,21 +56,6 @@ def listar(
     return Page.build([_to_read(liq) for liq in items], total, params)
 
 
-@router.get("/export/excel", summary="Exportar liquidaciones del período a Excel")
-def exportar_excel(
-    db: DbSession,
-    desde: date = Query(...),
-    hasta: date = Query(...),
-    ctx: RequestContext = Depends(require_permission("liquidaciones", "exportar")),
-) -> Response:
-    contenido, filename = LiquidacionService(db, ctx).exportar_excel(desde, hasta)
-    return Response(
-        content=contenido,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
 @router.get("/{entity_id}", response_model=LiquidacionRead, summary="Obtener liquidación")
 def obtener(
     entity_id: uuid.UUID,

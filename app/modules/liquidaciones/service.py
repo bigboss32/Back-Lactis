@@ -26,7 +26,7 @@ from app.modules.liquidaciones.models import (
 from app.modules.liquidaciones.repository import AnticipoRepository, LiquidacionRepository
 from app.modules.recepcion.models import RecepcionLeche
 from app.modules.recepcion.repository import RecepcionRepository
-from app.utils.export import build_liquidacion_pdf, build_pdf, rows_to_excel
+from app.utils.export import build_liquidacion_pdf
 
 CERO = Decimal("0")
 
@@ -342,34 +342,6 @@ class LiquidacionService(BaseService[Liquidacion]):
         )
         filename = f"liquidacion_{tercero}_{liquidacion.periodo_inicio.isoformat()}.pdf".replace(" ", "_")
         return pdf, filename
-
-    def exportar_excel(self, desde: date, hasta: date) -> tuple[bytes, str]:
-        items, _ = self.repo.list_paginated(
-            PageParams(page=1, page_size=200),
-            extra_criteria=[Liquidacion.periodo_fin >= desde, Liquidacion.periodo_inicio <= hasta],
-        )
-        if not items:
-            raise NotFoundError("No hay liquidaciones en el período indicado")
-        headers = [
-            "Tipo", "Tercero", "Inicio", "Fin", "Litros", "Precio Prom.", "Valor Bruto",
-            "Bonificaciones", "Descuentos", "Transporte", "Anticipos", "Valor Total", "Saldo", "Estado",
-        ]
-        rows = [
-            [
-                liq.tipo, self._nombre_tercero(liq), liq.periodo_inicio, liq.periodo_fin,
-                liq.total_litros, liq.precio_promedio, liq.valor_bruto, liq.bonificaciones,
-                liq.descuentos, liq.valor_transporte, liq.anticipos, liq.valor_total, liq.saldo, liq.estado,
-            ]
-            for liq in items
-        ]
-        excel = rows_to_excel(
-            title=f"Liquidaciones del {desde.isoformat()} al {hasta.isoformat()}",
-            headers=headers,
-            rows=rows,
-            sheet_name="Liquidaciones",
-            money_columns=(7, 8, 9, 10, 11, 12, 13),
-        )
-        return excel, f"liquidaciones_{desde.isoformat()}_{hasta.isoformat()}.xlsx"
 
 
 class AnticipoService(BaseService[Anticipo]):

@@ -1,7 +1,7 @@
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, status
 
 from app.core.context import RequestContext
 from app.core.deps import DbSession, require_permission
@@ -36,21 +36,6 @@ def resumen(
     ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
 ) -> ResumenReventa:
     return ReventaResumenService(db, ctx).resumen(desde, hasta)
-
-
-@router.get("/export/excel", summary="Exportar compras y ventas del período")
-def exportar(
-    db: DbSession,
-    desde: date = Query(...),
-    hasta: date = Query(...),
-    ctx: RequestContext = Depends(require_permission("reventa", "exportar")),
-) -> Response:
-    contenido, filename = ReventaResumenService(db, ctx).exportar_excel(desde, hasta)
-    return Response(
-        content=contenido,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
 
 
 # ------------------------------------------------------------------- compras

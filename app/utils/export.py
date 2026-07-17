@@ -1,13 +1,10 @@
-"""Utilidades de exportación a Excel (openpyxl) y PDF (reportlab)."""
+"""Utilidades de exportación a PDF (reportlab)."""
 import io
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Sequence
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import letter
@@ -30,11 +27,6 @@ GOLD = colors.HexColor("#E39B1B")
 GREY = colors.HexColor("#666666")
 LOGO_PATH = Path(__file__).resolve().parent.parent / "assets" / "lactis-logo.png"
 
-HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
-HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-BODY_FONT = Font(name="Arial", size=10)
-THIN_BORDER = Border(*[Side(style="thin")] * 4)
-
 
 def _cell_value(value: Any) -> Any:
     if isinstance(value, Decimal):
@@ -42,49 +34,6 @@ def _cell_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.replace(tzinfo=None)
     return value
-
-
-def rows_to_excel(
-    *,
-    title: str,
-    headers: Sequence[str],
-    rows: Sequence[Sequence[Any]],
-    sheet_name: str = "Datos",
-    money_columns: Sequence[int] = (),
-) -> bytes:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name[:31]
-
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(len(headers), 1))
-    title_cell = ws.cell(row=1, column=1, value=title)
-    title_cell.font = Font(name="Arial", bold=True, size=13)
-    title_cell.alignment = Alignment(horizontal="center")
-
-    for col, header in enumerate(headers, start=1):
-        cell = ws.cell(row=3, column=col, value=header)
-        cell.font = HEADER_FONT
-        cell.fill = HEADER_FILL
-        cell.border = THIN_BORDER
-        cell.alignment = Alignment(horizontal="center", wrap_text=True)
-
-    for r, row in enumerate(rows, start=4):
-        for c, value in enumerate(row, start=1):
-            cell = ws.cell(row=r, column=c, value=_cell_value(value))
-            cell.font = BODY_FONT
-            cell.border = THIN_BORDER
-            if c in money_columns:
-                cell.number_format = "$#,##0"
-
-    for col in range(1, len(headers) + 1):
-        max_len = max(
-            [len(str(headers[col - 1]))] + [len(str(row[col - 1])) for row in rows if col <= len(row)] or [10]
-        )
-        ws.column_dimensions[get_column_letter(col)].width = min(max_len + 4, 40)
-
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
 
 
 def build_pdf(
