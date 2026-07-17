@@ -121,11 +121,19 @@ class RecepcionService(BaseService[RecepcionLeche]):
             extra.append(RecepcionLeche.proveedor_id.in_(proveedores))
         return self.repo.list_paginated(params, filters=filters, extra_criteria=extra)
 
-    def grilla_quincena(self, desde: date, hasta: date) -> GrillaQuincena:
+    def grilla_quincena(
+        self,
+        desde: date,
+        hasta: date,
+        *,
+        search: str | None = None,
+        ruta_id: uuid.UUID | None = None,
+    ) -> GrillaQuincena:
         """Grilla proveedores × días como la hoja 'LITROS Y TRANSPORTE' del Excel.
 
         Incluye todos los proveedores activos (aunque no tengan recepciones)
         para que la grilla sirva también como superficie de registro diario.
+        Se puede filtrar por nombre de proveedor (search) y por ruta (ruta_id).
         """
         if hasta < desde:
             raise BusinessError("El fin del período no puede ser anterior al inicio")
@@ -156,6 +164,15 @@ class RecepcionService(BaseService[RecepcionLeche]):
             if r.proveedor_id not in proveedores and r.proveedor:
                 proveedores[r.proveedor_id] = r.proveedor
 
+        # Filtros opcionales: por ruta y por nombre de proveedor
+        if ruta_id is not None:
+            proveedores = {pid: p for pid, p in proveedores.items() if p.ruta_id == ruta_id}
+        if search and search.strip():
+            texto = search.strip().lower()
+            proveedores = {
+                pid: p for pid, p in proveedores.items() if texto in (p.nombre or "").lower()
+            }
+
         filas_map: dict = {
             pid: FilaGrilla(
                 proveedor_id=pid,
@@ -175,7 +192,9 @@ class RecepcionService(BaseService[RecepcionLeche]):
 
         totales_dia: dict[str, Decimal] = {f.isoformat(): CERO for f in fechas}
         for r in recepciones:
-            fila = filas_map[r.proveedor_id]
+            fila = filas_map.get(r.proveedor_id)
+            if fila is None:  # proveedor excluido por el filtro
+                continue
             clave = r.fecha.isoformat()
             fila.celdas[clave] = CeldaGrilla(
                 recepcion_id=r.id, litros=r.cantidad_litros, liquidada=r.liquidacion_id is not None

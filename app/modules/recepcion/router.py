@@ -66,9 +66,11 @@ def grilla_quincena(
     db: DbSession,
     desde: date = Query(...),
     hasta: date = Query(...),
+    search: str | None = Query(None, description="Buscar por nombre de proveedor"),
+    ruta_id: uuid.UUID | None = Query(None),
     ctx: RequestContext = Depends(require_permission("recepcion", "consultar")),
 ) -> GrillaQuincena:
-    return RecepcionService(db, ctx).grilla_quincena(desde, hasta)
+    return RecepcionService(db, ctx).grilla_quincena(desde, hasta, search=search, ruta_id=ruta_id)
 
 
 @router.get("/resumen/periodo", response_model=ResumenPeriodo, summary="Totales diarios de un período")

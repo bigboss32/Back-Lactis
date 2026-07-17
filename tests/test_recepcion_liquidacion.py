@@ -86,6 +86,52 @@ def test_filtro_por_ruta_y_busqueda_por_nombre(client, base_datos):
     assert r["items"][0]["proveedor_nombre"] == "Bernardo"
 
 
+def test_grilla_filtra_por_ruta_y_nombre(client, base_datos):
+    headers = auth_headers(client, "admin.a")
+    ruta1 = client.post(
+        "/api/v1/rutas", json={"nombre": "Ruta A", "municipio": "A"}, headers=headers
+    ).json()
+    ruta2 = client.post(
+        "/api/v1/rutas", json={"nombre": "Ruta B", "municipio": "B"}, headers=headers
+    ).json()
+    p1 = client.post(
+        "/api/v1/proveedores",
+        json={"nombre": "Aurelio", "vereda": "A", "precio_litro": "1800", "ruta_id": ruta1["id"]},
+        headers=headers,
+    ).json()
+    p2 = client.post(
+        "/api/v1/proveedores",
+        json={"nombre": "Bruno", "vereda": "B", "precio_litro": "1800", "ruta_id": ruta2["id"]},
+        headers=headers,
+    ).json()
+    client.post(
+        "/api/v1/recepciones",
+        json={"fecha": "2026-06-01", "proveedor_id": p1["id"], "cantidad_litros": "10"},
+        headers=headers,
+    )
+    client.post(
+        "/api/v1/recepciones",
+        json={"fecha": "2026-06-01", "proveedor_id": p2["id"], "cantidad_litros": "20"},
+        headers=headers,
+    )
+
+    # Buscar por nombre en la grilla -> solo Aurelio
+    g = client.get(
+        "/api/v1/recepciones/grilla/quincena?desde=2026-06-01&hasta=2026-06-15&search=aur",
+        headers=headers,
+    ).json()
+    assert [f["proveedor_nombre"] for f in g["filas"]] == ["Aurelio"]
+    assert float(g["total_litros"]) == 10
+
+    # Filtrar por Ruta B -> solo Bruno
+    g = client.get(
+        f"/api/v1/recepciones/grilla/quincena?desde=2026-06-01&hasta=2026-06-15&ruta_id={ruta2['id']}",
+        headers=headers,
+    ).json()
+    assert [f["proveedor_nombre"] for f in g["filas"]] == ["Bruno"]
+    assert float(g["total_litros"]) == 20
+
+
 def test_no_permite_duplicar_dia_proveedor(client, base_datos):
     headers = auth_headers(client, "admin.a")
     _, _, proveedor = _setup_leche(client, headers)
