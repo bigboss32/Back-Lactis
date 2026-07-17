@@ -44,6 +44,48 @@ def test_recepcion_calcula_valores(client, base_datos):
     assert float(recepcion["valor_neto"]) == 227 * 1800 - 10000
 
 
+def test_filtro_por_ruta_y_busqueda_por_nombre(client, base_datos):
+    headers = auth_headers(client, "admin.a")
+    ruta1 = client.post(
+        "/api/v1/rutas", json={"nombre": "Ruta Norte", "municipio": "Norte"}, headers=headers
+    ).json()
+    ruta2 = client.post(
+        "/api/v1/rutas", json={"nombre": "Ruta Sur", "municipio": "Sur"}, headers=headers
+    ).json()
+    prov1 = client.post(
+        "/api/v1/proveedores",
+        json={"nombre": "Alberto", "vereda": "Norte", "precio_litro": "1800", "ruta_id": ruta1["id"]},
+        headers=headers,
+    ).json()
+    prov2 = client.post(
+        "/api/v1/proveedores",
+        json={"nombre": "Bernardo", "vereda": "Sur", "precio_litro": "1800", "ruta_id": ruta2["id"]},
+        headers=headers,
+    ).json()
+    client.post(
+        "/api/v1/recepciones",
+        json={"fecha": "2026-06-01", "proveedor_id": prov1["id"], "cantidad_litros": "100"},
+        headers=headers,
+    )
+    client.post(
+        "/api/v1/recepciones",
+        json={"fecha": "2026-06-01", "proveedor_id": prov2["id"], "cantidad_litros": "80"},
+        headers=headers,
+    )
+
+    # Buscar por nombre "alb" (parcial, sin importar mayúsculas) -> solo Alberto
+    r = client.get("/api/v1/recepciones/filtrar/avanzado?search=alb", headers=headers).json()
+    assert r["total"] == 1
+    assert r["items"][0]["proveedor_nombre"] == "Alberto"
+
+    # Filtrar por Ruta Sur -> solo la recepción de Bernardo
+    r = client.get(
+        f"/api/v1/recepciones/filtrar/avanzado?ruta_id={ruta2['id']}", headers=headers
+    ).json()
+    assert r["total"] == 1
+    assert r["items"][0]["proveedor_nombre"] == "Bernardo"
+
+
 def test_no_permite_duplicar_dia_proveedor(client, base_datos):
     headers = auth_headers(client, "admin.a")
     _, _, proveedor = _setup_leche(client, headers)

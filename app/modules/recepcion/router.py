@@ -43,6 +43,7 @@ def filtrar(
     transportador_id: uuid.UUID | None = Query(None),
     desde: date | None = Query(None),
     hasta: date | None = Query(None),
+    search: str | None = Query(None, description="Buscar por nombre de proveedor"),
 ) -> Page[RecepcionRead]:
     items, total = RecepcionService(db, ctx).listar_filtrado(
         params,
@@ -51,6 +52,7 @@ def filtrar(
         transportador_id=transportador_id,
         desde=desde,
         hasta=hasta,
+        search=search,
     )
     return Page.build([_to_read(r) for r in items], total, params)
 

@@ -3,9 +3,12 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import select
+
 from app.common.service import BaseService
 from app.core.exceptions import BusinessError, ConflictError
 from app.core.pagination import PageParams
+from app.modules.proveedores.models import Proveedor
 from app.modules.proveedores.repository import ProveedorRepository
 from app.modules.recepcion.models import RecepcionLeche
 from app.modules.recepcion.repository import RecepcionRepository
@@ -100,6 +103,7 @@ class RecepcionService(BaseService[RecepcionLeche]):
         transportador_id: uuid.UUID | None = None,
         desde: date | None = None,
         hasta: date | None = None,
+        search: str | None = None,
     ) -> tuple[list[RecepcionLeche], int]:
         filters = {
             "proveedor_id": proveedor_id,
@@ -107,6 +111,14 @@ class RecepcionService(BaseService[RecepcionLeche]):
             "transportador_id": transportador_id,
         }
         extra = self.repo.rango_criteria(desde, hasta)
+        # Búsqueda por NOMBRE de proveedor: filtra por los proveedores de la
+        # empresa cuyo nombre coincide, sin necesitar el id exacto.
+        if search and search.strip():
+            proveedores = select(Proveedor.id).where(
+                Proveedor.empresa_id == self.ctx.empresa_id,
+                Proveedor.nombre.ilike(f"%{search.strip()}%"),
+            )
+            extra.append(RecepcionLeche.proveedor_id.in_(proveedores))
         return self.repo.list_paginated(params, filters=filters, extra_criteria=extra)
 
     def grilla_quincena(self, desde: date, hasta: date) -> GrillaQuincena:
