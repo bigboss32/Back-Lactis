@@ -101,3 +101,30 @@ def test_nomina_aparece_como_egreso_en_libro_diario(client, base_datos):
     assert len(nomina) == 1
     assert float(nomina[0]["egreso"]) == 200000
     assert float(libro["total_egresos"]) >= 200000
+
+
+def test_anticipo_empleado_se_descuenta_en_la_nomina(client, base_datos):
+    """Un anticipo al empleado se resta de su próximo pago y no se vuelve a restar."""
+    headers = auth_headers(client, "admin.a")
+    emp = _crear_empleado(client, headers, valor_dia="50000")
+    client.post(
+        "/api/v1/anticipos",
+        json={"tipo": "empleado", "empleado_id": emp["id"], "fecha": "2026-07-01", "valor": "80000"},
+        headers=headers,
+    )
+    # 5 días × 50.000 = 250.000 - anticipo 80.000 = 170.000
+    pago = client.post(
+        "/api/v1/nomina",
+        json={"empleado_id": emp["id"], "fecha": "2026-07-15", "dias_trabajados": "5"},
+        headers=headers,
+    ).json()
+    assert float(pago["anticipos"]) == 80000
+    assert float(pago["total"]) == 170000
+    # El anticipo ya quedó aplicado: no se descuenta de nuevo
+    pago2 = client.post(
+        "/api/v1/nomina",
+        json={"empleado_id": emp["id"], "fecha": "2026-07-31", "dias_trabajados": "5"},
+        headers=headers,
+    ).json()
+    assert float(pago2["anticipos"]) == 0
+    assert float(pago2["total"]) == 250000

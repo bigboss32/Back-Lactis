@@ -61,5 +61,6 @@ class PagoEmpleadoRead(TenantRead):
     periodo: str | None
     dias_trabajados: Decimal
     valor_dia: Decimal
+    anticipos: Decimal
     total: Decimal
     observaciones: str | None

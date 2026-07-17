@@ -132,6 +132,36 @@ def test_grilla_filtra_por_ruta_y_nombre(client, base_datos):
     assert float(g["total_litros"]) == 20
 
 
+def test_anticipo_transportador_se_descuenta_en_su_liquidacion(client, base_datos):
+    headers = auth_headers(client, "admin.a")
+    _, transportador, proveedor = _setup_leche(client, headers)
+    client.post(
+        "/api/v1/recepciones",
+        json={
+            "fecha": "2026-06-01", "proveedor_id": proveedor["id"],
+            "transportador_id": transportador["id"], "cantidad_litros": "100",
+        },
+        headers=headers,
+    )
+    # Anticipo AL TRANSPORTADOR
+    client.post(
+        "/api/v1/anticipos",
+        json={"tipo": "transportador", "transportador_id": transportador["id"],
+              "fecha": "2026-06-03", "valor": "5000"},
+        headers=headers,
+    )
+    liqs = client.post(
+        "/api/v1/liquidaciones/generar",
+        json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "ambos"},
+        headers=headers,
+    ).json()
+    liq_t = {liq["tipo"]: liq for liq in liqs}["transportador"]
+    # valor_transporte = 100 L × $100 = 10.000; anticipo 5.000; saldo 5.000
+    assert float(liq_t["valor_total"]) == 100 * 100
+    assert float(liq_t["anticipos"]) == 5000
+    assert float(liq_t["saldo"]) == 100 * 100 - 5000
+
+
 def test_no_permite_duplicar_dia_proveedor(client, base_datos):
     headers = auth_headers(client, "admin.a")
     _, _, proveedor = _setup_leche(client, headers)

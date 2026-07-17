@@ -48,7 +48,10 @@ class LiquidacionUpdate(BaseSchema):
 
 
 class AnticipoCreate(BaseSchema):
-    proveedor_id: uuid.UUID
+    tipo: Literal["proveedor", "transportador", "empleado"] = "proveedor"
+    proveedor_id: uuid.UUID | None = None
+    transportador_id: uuid.UUID | None = None
+    empleado_id: uuid.UUID | None = None
     fecha: date
     valor: Decimal = Field(gt=0)
     observaciones: str | None = None
@@ -61,9 +64,15 @@ class AnticipoUpdate(BaseSchema):
 
 
 class AnticipoRead(TenantRead):
-    proveedor_id: uuid.UUID
+    tipo: str
+    proveedor_id: uuid.UUID | None
+    transportador_id: uuid.UUID | None
+    empleado_id: uuid.UUID | None
     proveedor_nombre: str | None = None
+    tercero_nombre: str | None = None
     fecha: date
     valor: Decimal
     observaciones: str | None
     liquidacion_id: uuid.UUID | None
+    pago_empleado_id: uuid.UUID | None
+    aplicado: bool = False

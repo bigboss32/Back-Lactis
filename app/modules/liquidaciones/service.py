@@ -135,12 +135,15 @@ class LiquidacionService(BaseService[Liquidacion]):
         for r in pendientes:
             por_transportador[r.transportador_id].append(r)
 
+        anticipos_repo = AnticipoRepository(self.db, self.ctx.empresa_id)
         generadas = []
         for trans_id, recepciones in por_transportador.items():
             total_litros = sum((r.cantidad_litros for r in recepciones), CERO)
             valor_transporte = sum((r.valor_transporte for r in recepciones), CERO)
             if valor_transporte == CERO:
                 continue
+            anticipos = anticipos_repo.pendientes_transportador(trans_id, fin)
+            total_anticipos = sum((a.valor for a in anticipos), CERO)
             # El transportador cobra por día la suma de litros de su ruta
             por_dia: dict[date, list[RecepcionLeche]] = defaultdict(list)
             for r in recepciones:
@@ -157,8 +160,9 @@ class LiquidacionService(BaseService[Liquidacion]):
                 if total_litros
                 else CERO,
                 valor_transporte=valor_transporte,
+                anticipos=total_anticipos,
                 valor_total=valor_transporte,
-                saldo=valor_transporte,
+                saldo=valor_transporte - total_anticipos,
                 estado=ESTADO_BORRADOR,
                 created_by=self.ctx.user_id,
                 updated_by=self.ctx.user_id,
@@ -176,6 +180,8 @@ class LiquidacionService(BaseService[Liquidacion]):
             self.db.flush()
             for r in recepciones:
                 r.liquidacion_transporte_id = liquidacion.id
+            for a in anticipos:
+                a.liquidacion_id = liquidacion.id
             self.db.flush()
             self._audit("crear", liquidacion.id, None, serialize_entity(liquidacion))
             generadas.append(liquidacion)
@@ -370,10 +376,31 @@ class AnticipoService(BaseService[Anticipo]):
     repository_cls = AnticipoRepository
     modulo = "liquidaciones"
 
+    _CAMPO_POR_TIPO = {
+        "proveedor": "proveedor_id",
+        "transportador": "transportador_id",
+        "empleado": "empleado_id",
+    }
+
+    def crear(self, payload: Any) -> Anticipo:
+        data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
+        tipo = data.get("tipo") or TIPO_PROVEEDOR
+        campo = self._CAMPO_POR_TIPO.get(tipo)
+        if campo is None:
+            raise BusinessError(f"Tipo de anticipo inválido: {tipo}")
+        if not data.get(campo):
+            raise BusinessError(f"Debe indicar el {tipo} del anticipo")
+        data["tipo"] = tipo
+        # Deja solo el id del beneficiario que corresponde al tipo
+        for otro in self._CAMPO_POR_TIPO.values():
+            if otro != campo:
+                data[otro] = None
+        return super().crear(data)
+
     def validar_actualizar(self, obj: Anticipo, data: dict[str, Any]) -> None:
-        if obj.liquidacion_id is not None:
-            raise BusinessError("No se puede modificar un anticipo ya aplicado a una liquidación")
+        if obj.aplicado:
+            raise BusinessError("No se puede modificar un anticipo ya aplicado")
 
     def validar_eliminar(self, obj: Anticipo) -> None:
-        if obj.liquidacion_id is not None:
-            raise BusinessError("No se puede eliminar un anticipo ya aplicado a una liquidación")
+        if obj.aplicado:
+            raise BusinessError("No se puede eliminar un anticipo ya aplicado")

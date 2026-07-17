@@ -66,19 +66,52 @@ class LiquidacionDetalle(AuditMixin, Base):
 
 
 class Anticipo(TenantMixin, AuditMixin, Base):
-    """Anticipo entregado a un proveedor; se descuenta en su próxima liquidación."""
+    """Anticipo a un proveedor, transportador o empleado. Se descuenta en su
+    próxima liquidación (proveedor/transportador) o pago de nómina (empleado)."""
 
     __tablename__ = "anticipos"
 
-    proveedor_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("proveedores.id"), index=True)
+    # Beneficiario: uno de los tres según 'tipo'
+    tipo: Mapped[str] = mapped_column(
+        String(20), default=TIPO_PROVEEDOR, server_default=TIPO_PROVEEDOR, index=True
+    )
+    proveedor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("proveedores.id"), index=True)
+    transportador_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("transportadores.id"), index=True
+    )
+    empleado_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("empleados.id"), index=True)
+
     fecha: Mapped[date] = mapped_column(Date, nullable=False)
     valor: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     observaciones: Mapped[str | None] = mapped_column(String(300))
+
+    # Marcas de aplicado: liquidación (proveedor/transportador) o nómina (empleado)
     liquidacion_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("liquidaciones.id"), index=True
     )
+    pago_empleado_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("pagos_empleado.id"), index=True
+    )
 
     proveedor = relationship("Proveedor", lazy="joined")
+    transportador = relationship("Transportador", lazy="joined")
+    empleado = relationship("Empleado", lazy="joined")
+
+    @property
+    def aplicado(self) -> bool:
+        return self.liquidacion_id is not None or self.pago_empleado_id is not None
+
+    @property
+    def tercero_nombre(self) -> str | None:
+        if self.tipo == TIPO_TRANSPORTADOR:
+            return self.transportador.nombre if self.transportador else None
+        if self.tipo == "empleado":
+            return (
+                f"{self.empleado.nombre} {self.empleado.apellido}".strip()
+                if self.empleado
+                else None
+            )
+        return self.proveedor.nombre if self.proveedor else None
 
     @property
     def proveedor_nombre(self) -> str | None:

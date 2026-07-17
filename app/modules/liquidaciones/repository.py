@@ -33,3 +33,19 @@ class AnticipoRepository(BaseRepository[Anticipo]):
             Anticipo.fecha <= hasta,
         )
         return list(self.db.scalars(stmt).all())
+
+    def pendientes_transportador(self, transportador_id: uuid.UUID, hasta: date) -> list[Anticipo]:
+        stmt = self.base_query().where(
+            Anticipo.transportador_id == transportador_id,
+            Anticipo.liquidacion_id.is_(None),
+            Anticipo.fecha <= hasta,
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def pendientes_empleado(self, empleado_id: uuid.UUID, hasta: date) -> list[Anticipo]:
+        stmt = self.base_query().where(
+            Anticipo.empleado_id == empleado_id,
+            Anticipo.pago_empleado_id.is_(None),
+            Anticipo.fecha <= hasta,
+        )
+        return list(self.db.scalars(stmt).all())

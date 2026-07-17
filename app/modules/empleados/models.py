@@ -36,6 +36,8 @@ class PagoEmpleado(TenantMixin, AuditMixin, Base):
     periodo: Mapped[str | None] = mapped_column(String(100))
     dias_trabajados: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
     valor_dia: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    # Anticipos del empleado descontados en este pago
+    anticipos: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0")
     total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     observaciones: Mapped[str | None] = mapped_column(String(300))
 

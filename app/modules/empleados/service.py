@@ -29,6 +29,8 @@ class PagoEmpleadoService(BaseService[PagoEmpleado]):
     modulo = "empleados"
 
     def crear(self, payload: Any) -> PagoEmpleado:
+        from app.modules.liquidaciones.repository import AnticipoRepository
+
         data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
         empleado = EmpleadoRepository(self.db, self.ctx.empresa_id).get_or_fail(data["empleado_id"])
 
@@ -42,6 +44,26 @@ class PagoEmpleadoService(BaseService[PagoEmpleado]):
 
         valor_dia = Decimal(valor_dia)
         dias = Decimal(data["dias_trabajados"])
+        bruto = (dias * valor_dia).quantize(Decimal("0.01"))
+
+        # Descuenta los anticipos pendientes del empleado (los que quepan enteros
+        # dentro del pago). Los que no quepan quedan para el siguiente pago.
+        pendientes = AnticipoRepository(self.db, self.ctx.empresa_id).pendientes_empleado(
+            data["empleado_id"], data["fecha"]
+        )
+        descontado = CERO
+        aplicados = []
+        for anticipo in pendientes:
+            if descontado + anticipo.valor <= bruto:
+                descontado += anticipo.valor
+                aplicados.append(anticipo)
+
         data["valor_dia"] = valor_dia
-        data["total"] = (dias * valor_dia).quantize(Decimal("0.01"))
-        return super().crear(data)
+        data["anticipos"] = descontado
+        data["total"] = bruto - descontado
+        pago = super().crear(data)
+        for anticipo in aplicados:
+            anticipo.pago_empleado_id = pago.id
+        if aplicados:
+            self.db.flush()
+        return pago
