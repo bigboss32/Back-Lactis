@@ -22,6 +22,11 @@ class DashboardResponse(BaseSchema):
     produccion_kg_mes: Decimal
     ventas_mes: Decimal
     gastos_mes: Decimal
+    # Valores del período anterior, para el comparativo (▲▼ %).
+    litros_quincena_anterior: Decimal
+    produccion_kg_mes_anterior: Decimal
+    ventas_mes_anterior: Decimal
+    gastos_mes_anterior: Decimal
     cartera_pendiente: Decimal
     liquidaciones_por_pagar: Decimal
     alertas_no_leidas: int

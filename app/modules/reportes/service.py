@@ -50,6 +50,12 @@ class ReporteService:
         hace_30 = hoy - timedelta(days=30)
         empresa = self.ctx.empresa_id
 
+        # Rangos del período anterior (para el comparativo ▲▼).
+        fin_quincena_anterior = inicio_quincena - timedelta(days=1)
+        inicio_quincena_anterior = _inicio_quincena(fin_quincena_anterior)
+        fin_mes_anterior = inicio_mes - timedelta(days=1)
+        inicio_mes_anterior = fin_mes_anterior.replace(day=1)
+
         litros_por_dia = [
             SerieDia(fecha=f, valor=v or CERO)
             for f, v in self.db.execute(
@@ -135,6 +141,23 @@ class ReporteService:
             ),
             gastos_mes=self._sum(
                 Gasto.valor, Gasto, Gasto.estado == "activo", Gasto.fecha >= inicio_mes
+            ),
+            litros_quincena_anterior=self._sum(
+                RecepcionLeche.cantidad_litros, RecepcionLeche,
+                RecepcionLeche.fecha >= inicio_quincena_anterior,
+                RecepcionLeche.fecha <= fin_quincena_anterior,
+            ),
+            produccion_kg_mes_anterior=self._sum(
+                Produccion.peso_kg, Produccion,
+                Produccion.fecha >= inicio_mes_anterior, Produccion.fecha <= fin_mes_anterior,
+            ),
+            ventas_mes_anterior=self._sum(
+                Venta.total, Venta, Venta.estado != "anulada",
+                Venta.fecha >= inicio_mes_anterior, Venta.fecha <= fin_mes_anterior,
+            ),
+            gastos_mes_anterior=self._sum(
+                Gasto.valor, Gasto, Gasto.estado == "activo",
+                Gasto.fecha >= inicio_mes_anterior, Gasto.fecha <= fin_mes_anterior,
             ),
             cartera_pendiente=self._sum(
                 Venta.total - Venta.pagado, Venta, Venta.estado.in_(["pendiente", "parcial"])
