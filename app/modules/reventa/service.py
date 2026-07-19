@@ -65,12 +65,13 @@ class CompraQuesoService(BaseService[CompraQueso]):
 
     def actualizar(self, entity_id: uuid.UUID, payload: Any) -> CompraQueso:
         actual = self.repo.get_or_fail(entity_id)
-        if actual.abonado > CERO:
-            raise BusinessError(
-                "No se puede modificar una compra con abonos registrados; anúlela si es necesario"
-            )
+        if actual.estado == ESTADO_ANULADA:
+            raise BusinessError("No se puede modificar una compra anulada")
         data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
         data = self._calcular(data, actual)
+        # Se puede editar aunque tenga abonos (incluida una pagada): se recalcula el
+        # estado con los abonos ya registrados y el saldo queda al día.
+        data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, data)
 
     def validar_eliminar(self, obj: CompraQueso) -> None:
@@ -161,14 +162,14 @@ class VentaQuesoService(BaseService[VentaQueso]):
 
     def actualizar(self, entity_id: uuid.UUID, payload: Any) -> VentaQueso:
         actual = self.repo.get_or_fail(entity_id)
-        if actual.abonado > CERO:
-            raise BusinessError(
-                "No se puede modificar una venta con abonos registrados; anúlela si es necesario"
-            )
+        if actual.estado == ESTADO_ANULADA:
+            raise BusinessError("No se puede modificar una venta anulada")
         data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
         kilos = Decimal(data.get("kilos") or actual.kilos)
         precio = Decimal(data.get("precio_kilo") or actual.precio_kilo)
         data["valor_total"] = (kilos * precio).quantize(DOS_DECIMALES)
+        # Se puede editar aunque tenga abonos (incluida una pagada): se recalcula el estado.
+        data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, data)
 
     def validar_eliminar(self, obj: VentaQueso) -> None:
