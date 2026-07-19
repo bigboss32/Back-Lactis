@@ -103,14 +103,25 @@ class VentaQueso(TenantMixin, AuditMixin, Base):
         return self.valor_total - self.abonado
 
 
+# Destino de un ajuste del queso disponible de reventa
+DESTINO_BORONA = "borona"  # pasa a borona (subproducto vendible)
+DESTINO_MERMA = "merma"  # pérdida (no se vende ni suma a ningún inventario)
+
+
 class ConversionBorona(TenantMixin, AuditMixin, Base):
-    """Queso del inventario de reventa que se pasa a borona
-    (se devolvió o ya no se puede vender como queso entero)."""
+    """Ajuste que reduce el queso disponible de reventa. Según `destino`:
+    - borona: el queso se pasa a borona (devuelto o ya no vendible como entero)
+      y suma al inventario de borona para venderse como subproducto.
+    - merma: pérdida de peso (se pesó menos al vender); no suma a ningún lado.
+    """
 
     __tablename__ = "conversiones_borona"
 
     fecha: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     kilos: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    destino: Mapped[str] = mapped_column(
+        String(20), default=DESTINO_BORONA, server_default=DESTINO_BORONA, index=True
+    )
     observaciones: Mapped[str | None] = mapped_column(String(300))
 
 

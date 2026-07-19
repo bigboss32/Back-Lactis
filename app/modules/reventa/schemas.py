@@ -98,12 +98,14 @@ class VentaQuesoRead(TenantRead):
 class ConversionCreate(BaseSchema):
     fecha: date
     kilos: Decimal = Field(gt=0)
+    destino: Literal["borona", "merma"] = "borona"
     observaciones: str | None = None
 
 
 class ConversionRead(TenantRead):
     fecha: date
     kilos: Decimal
+    destino: str
     observaciones: str | None
 
 

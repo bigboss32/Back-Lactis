@@ -4,7 +4,13 @@ from decimal import Decimal
 from sqlalchemy import func, select
 
 from app.common.repository import BaseRepository
-from app.modules.reventa.models import CompraQueso, ConversionBorona, VentaQueso
+from app.modules.reventa.models import (
+    DESTINO_BORONA,
+    DESTINO_MERMA,
+    CompraQueso,
+    ConversionBorona,
+    VentaQueso,
+)
 
 CERO = Decimal("0")
 
@@ -104,14 +110,29 @@ class ConversionBoronaRepository(BaseRepository[ConversionBorona]):
     model = ConversionBorona
     default_order_by = "fecha"
 
-    def total_convertido(self) -> Decimal:
+    def _total(self, destino: str | None = None) -> Decimal:
+        criterios = [
+            ConversionBorona.empresa_id == self.empresa_id,
+            ConversionBorona.deleted_at.is_(None),
+            ConversionBorona.estado == "activo",
+        ]
+        if destino is not None:
+            criterios.append(ConversionBorona.destino == destino)
         return Decimal(
             self.db.scalar(
-                select(func.coalesce(func.sum(ConversionBorona.kilos), 0)).where(
-                    ConversionBorona.empresa_id == self.empresa_id,
-                    ConversionBorona.deleted_at.is_(None),
-                    ConversionBorona.estado == "activo",
-                )
+                select(func.coalesce(func.sum(ConversionBorona.kilos), 0)).where(*criterios)
             )
             or CERO
         )
+
+    def total_convertido(self) -> Decimal:
+        """Todo lo que sale del queso disponible (borona + merma)."""
+        return self._total()
+
+    def total_a_borona(self) -> Decimal:
+        """Solo lo que se pasó a borona (suma al inventario de borona)."""
+        return self._total(DESTINO_BORONA)
+
+    def total_merma(self) -> Decimal:
+        """Solo lo registrado como merma (pérdida)."""
+        return self._total(DESTINO_MERMA)

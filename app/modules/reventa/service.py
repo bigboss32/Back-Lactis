@@ -237,9 +237,7 @@ class ConversionBoronaService(BaseService[ConversionBorona]):
         data = payload.model_dump(exclude_unset=True)
         disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
         if Decimal(data["kilos"]) > disponible:
-            raise BusinessError(
-                f"Solo hay {disponible} kg de queso disponibles para pasar a borona"
-            )
+            raise BusinessError(f"Solo hay {disponible} kg de queso disponibles")
         return super().crear(data)
 
 
@@ -269,7 +267,7 @@ class ReventaResumenService:
         conversiones = ConversionBoronaRepository(db, ctx.empresa_id)
         _, borona_de_compras, _ = compras.acumulados()
         _, borona_vendida, _ = ventas.acumulados()
-        return borona_de_compras + conversiones.total_convertido() - borona_vendida
+        return borona_de_compras + conversiones.total_a_borona() - borona_vendida
 
     def resumen(self, desde: date, hasta: date) -> ResumenReventa:
         kilos_comprados, total_compras = self.compras.totales_periodo(desde, hasta)
@@ -280,7 +278,10 @@ class ReventaResumenService:
 
         kilos_hist_comprados, borona_de_compras, por_pagar = self.compras.acumulados()
         hist_queso_vendido, hist_borona_vendida, por_cobrar = self.ventas.acumulados()
+        # `convertido` = todo lo que salió del queso disponible (borona + merma);
+        # `a_borona` = solo lo que se pasó a borona (suma al inventario de borona).
         convertido = self.conversiones.total_convertido()
+        a_borona = self.conversiones.total_a_borona()
 
         precio_prom_compra = (
             (total_compras / kilos_comprados).quantize(DOS_DECIMALES) if kilos_comprados else CERO
@@ -288,16 +289,12 @@ class ReventaResumenService:
         precio_prom_venta = (
             (ventas_queso / kilos_queso).quantize(DOS_DECIMALES) if kilos_queso else CERO
         )
-        # Costo del queso vendido al precio promedio de compra del período
-        # (si no hubo compras en el período, usa el histórico). La borona se
-        # considera subproducto sin costo: su venta suma completa a la ganancia.
-        costo_kilo = precio_prom_compra
-        if costo_kilo == CERO and kilos_hist_comprados:
-            _, total_hist = self.compras.totales_periodo(date(2000, 1, 1), date(2100, 1, 1))
-            costo_kilo = (total_hist / kilos_hist_comprados).quantize(DOS_DECIMALES)
-        # Ganancia neta = ventas totales − costo del queso vendido − gastos de venta.
-        ganancia = (total_ventas - kilos_queso * costo_kilo - total_gastos).quantize(DOS_DECIMALES)
-        # Margen neto por kilo de queso vendido (ya incluye borona y gastos).
+        # Ganancia neta EXACTA del período = lo que se vendió − lo que se compró
+        # − los gastos de venta. Al restar TODA la compra (no solo el costo de lo
+        # vendido) queda contada la merma: se pagó por el lote completo aunque al
+        # vender pese menos. La borona vendida suma como bono (llega sin costo).
+        ganancia = (total_ventas - total_compras - total_gastos).quantize(DOS_DECIMALES)
+        # Ganancia promedio por kilo de queso vendido (ya con compra, merma y gastos).
         margen = (ganancia / kilos_queso).quantize(DOS_DECIMALES) if kilos_queso else CERO
 
         return ResumenReventa(
@@ -316,7 +313,7 @@ class ReventaResumenService:
             kilos_borona_vendidos=kilos_borona,
             total_ventas_borona=ventas_borona,
             kilos_disponibles=kilos_hist_comprados - hist_queso_vendido - convertido,
-            borona_disponible=borona_de_compras + convertido - hist_borona_vendida,
+            borona_disponible=borona_de_compras + a_borona - hist_borona_vendida,
             por_pagar_productores=por_pagar,
             por_cobrar_clientes=por_cobrar,
         )
