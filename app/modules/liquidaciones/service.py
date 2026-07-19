@@ -24,8 +24,15 @@ from app.modules.liquidaciones.models import (
     LiquidacionDetalle,
 )
 from app.modules.liquidaciones.repository import AnticipoRepository, LiquidacionRepository
+from app.modules.liquidaciones.schemas import (
+    PreLiquidacionAnticipo,
+    PreLiquidacionDetalle,
+    PreLiquidacionRead,
+)
+from app.modules.proveedores.repository import ProveedorRepository
 from app.modules.recepcion.models import RecepcionLeche
 from app.modules.recepcion.repository import RecepcionRepository
+from app.modules.transportadores.repository import TransportadorRepository
 from app.utils.export import build_liquidacion_pdf
 
 CERO = Decimal("0")
@@ -187,6 +194,126 @@ class LiquidacionService(BaseService[Liquidacion]):
             generadas.append(liquidacion)
         return generadas
 
+    # -------------------------------------------------------- previsualización
+    def previsualizar(
+        self, inicio: date, fin: date, tipo: str, tercero_id: uuid.UUID
+    ) -> list[PreLiquidacionRead]:
+        """Calcula cómo va un tercero en el período SIN generar ni guardar nada.
+
+        Sirve para mostrarle a un proveedor/transportador su avance ("¿cómo voy?")
+        antes de la liquidación oficial. No toca recepciones ni anticipos.
+        """
+        if fin < inicio:
+            raise BusinessError("El fin del período no puede ser anterior al inicio")
+        recepciones_repo = RecepcionRepository(self.db, self.ctx.empresa_id)
+        if tipo == TIPO_PROVEEDOR:
+            pre = self._preview_proveedor(recepciones_repo, tercero_id, inicio, fin)
+        elif tipo == TIPO_TRANSPORTADOR:
+            pre = self._preview_transportador(recepciones_repo, tercero_id, inicio, fin)
+        else:
+            raise BusinessError("Tipo inválido para pre-liquidación")
+        return [pre] if pre else []
+
+    def _preview_proveedor(
+        self, recepciones_repo: RecepcionRepository, prov_id: uuid.UUID, inicio: date, fin: date
+    ) -> PreLiquidacionRead | None:
+        recepciones = recepciones_repo.sin_liquidar(inicio, fin, prov_id)
+        if not recepciones:
+            return None
+        total_litros = sum((r.cantidad_litros for r in recepciones), CERO)
+        valor_bruto = sum((r.valor_bruto for r in recepciones), CERO)
+        bonificaciones = sum((r.bonificaciones for r in recepciones), CERO)
+        descuentos = sum((r.descuentos for r in recepciones), CERO)
+        valor_transporte = sum((r.valor_transporte for r in recepciones), CERO)
+        valor_total = valor_bruto + bonificaciones - descuentos
+        anticipos = AnticipoRepository(self.db, self.ctx.empresa_id).pendientes_de(prov_id, fin)
+        total_anticipos = sum((a.valor for a in anticipos), CERO)
+        proveedor = ProveedorRepository(self.db, self.ctx.empresa_id).get(prov_id)
+        return PreLiquidacionRead(
+            tipo=TIPO_PROVEEDOR,
+            tercero_id=prov_id,
+            tercero_nombre=proveedor.nombre if proveedor else "-",
+            tercero_detalle=getattr(proveedor, "vereda", None) if proveedor else None,
+            periodo_inicio=inicio,
+            periodo_fin=fin,
+            total_litros=total_litros,
+            precio_promedio=(valor_bruto / total_litros).quantize(Decimal("0.01"))
+            if total_litros
+            else CERO,
+            valor_bruto=valor_bruto,
+            bonificaciones=bonificaciones,
+            descuentos=descuentos,
+            valor_transporte=valor_transporte,
+            anticipos=total_anticipos,
+            valor_total=valor_total,
+            saldo=valor_total - total_anticipos,
+            detalles=[
+                PreLiquidacionDetalle(
+                    fecha=r.fecha, litros=r.cantidad_litros, precio_litro=r.precio_litro, valor=r.valor_neto
+                )
+                for r in sorted(recepciones, key=lambda x: x.fecha)
+            ],
+            anticipos_detalle=[
+                PreLiquidacionAnticipo(fecha=a.fecha, valor=a.valor, observaciones=a.observaciones)
+                for a in anticipos
+            ],
+        )
+
+    def _preview_transportador(
+        self, recepciones_repo: RecepcionRepository, trans_id: uuid.UUID, inicio: date, fin: date
+    ) -> PreLiquidacionRead | None:
+        stmt = recepciones_repo.base_query().where(
+            RecepcionLeche.fecha >= inicio,
+            RecepcionLeche.fecha <= fin,
+            RecepcionLeche.liquidacion_transporte_id.is_(None),
+            RecepcionLeche.transportador_id == trans_id,
+            RecepcionLeche.estado == "activo",
+        )
+        recepciones = list(self.db.scalars(stmt).all())
+        if not recepciones:
+            return None
+        total_litros = sum((r.cantidad_litros for r in recepciones), CERO)
+        valor_transporte = sum((r.valor_transporte for r in recepciones), CERO)
+        anticipos = AnticipoRepository(self.db, self.ctx.empresa_id).pendientes_transportador(
+            trans_id, fin
+        )
+        total_anticipos = sum((a.valor for a in anticipos), CERO)
+        transportador = TransportadorRepository(self.db, self.ctx.empresa_id).get(trans_id)
+        por_dia: dict[date, list[RecepcionLeche]] = defaultdict(list)
+        for r in recepciones:
+            por_dia[r.fecha].append(r)
+        return PreLiquidacionRead(
+            tipo=TIPO_TRANSPORTADOR,
+            tercero_id=trans_id,
+            tercero_nombre=transportador.nombre if transportador else "-",
+            periodo_inicio=inicio,
+            periodo_fin=fin,
+            total_litros=total_litros,
+            precio_promedio=(valor_transporte / total_litros).quantize(Decimal("0.01"))
+            if total_litros
+            else CERO,
+            valor_bruto=CERO,
+            bonificaciones=CERO,
+            descuentos=CERO,
+            valor_transporte=valor_transporte,
+            anticipos=total_anticipos,
+            valor_total=valor_transporte,
+            saldo=valor_transporte - total_anticipos,
+            detalles=[
+                PreLiquidacionDetalle(
+                    fecha=fecha,
+                    litros=sum((r.cantidad_litros for r in rs), CERO),
+                    precio_litro=rs[0].transportador.valor_transporte if rs[0].transportador else CERO,
+                    valor=sum((r.valor_transporte for r in rs), CERO),
+                )
+                for fecha, rs in sorted(por_dia.items())
+            ],
+            anticipos_detalle=[
+                PreLiquidacionAnticipo(fecha=a.fecha, valor=a.valor, observaciones=a.observaciones)
+                for a in anticipos
+            ],
+        )
+
     # ------------------------------------------------------------ transiciones
     def _transicionar(self, entity_id: uuid.UUID, desde: tuple[str, ...], hacia: str) -> Liquidacion:
         liquidacion = self.repo.get_or_fail(entity_id)
@@ -341,6 +468,75 @@ class LiquidacionService(BaseService[Liquidacion]):
             observaciones=liquidacion.observaciones,
         )
         filename = f"liquidacion_{tercero}_{liquidacion.periodo_inicio.isoformat()}.pdf".replace(" ", "_")
+        return pdf, filename
+
+    def previsualizar_pdf(
+        self, inicio: date, fin: date, tipo: str, tercero_id: uuid.UUID
+    ) -> tuple[bytes, str]:
+        """PDF preliminar (marcado como no oficial) del avance de un tercero."""
+        previews = self.previsualizar(inicio, fin, tipo, tercero_id)
+        if not previews:
+            raise BusinessError(
+                "No hay recepciones sin liquidar para ese tercero en el período"
+            )
+        pre = previews[0]
+        empresa = EmpresaRepository(self.db).get(self.ctx.empresa_id)
+        nombre_empresa = empresa.nombre if empresa else "Quesera"
+        nit = empresa.nit if empresa else None
+        ubicacion = (
+            (", ".join(p for p in [empresa.ciudad, empresa.departamento] if p) or None)
+            if empresa
+            else None
+        )
+        es_proveedor = pre.tipo == TIPO_PROVEEDOR
+        detalle_rows = [
+            [d.fecha.strftime("%d/%m/%Y"), f"{d.litros:,.1f}", f"${d.precio_litro:,.0f}", f"${d.valor:,.0f}"]
+            for d in pre.detalles
+        ]
+        if es_proveedor:
+            resumen_rows = [
+                ("Total litros", f"{pre.total_litros:,.1f}", False),
+                ("Precio promedio", f"${pre.precio_promedio:,.2f}", False),
+                ("Valor bruto", f"${pre.valor_bruto:,.0f}", False),
+                ("Bonificaciones", f"+ ${pre.bonificaciones:,.0f}", False),
+                ("Descuentos", f"- ${pre.descuentos:,.0f}", False),
+                ("Anticipos aplicados", f"- ${pre.anticipos:,.0f}", False),
+                ("VALOR TOTAL", f"${pre.valor_total:,.0f}", True),
+                ("SALDO ESTIMADO", f"${pre.saldo:,.0f}", True),
+            ]
+        else:
+            resumen_rows = [
+                ("Total litros", f"{pre.total_litros:,.1f}", False),
+                ("Valor transporte", f"${pre.valor_transporte:,.0f}", False),
+                ("Anticipos aplicados", f"- ${pre.anticipos:,.0f}", False),
+                ("VALOR TOTAL", f"${pre.valor_total:,.0f}", True),
+                ("SALDO ESTIMADO", f"${pre.saldo:,.0f}", True),
+            ]
+        anticipos_rows = [
+            [a.fecha.strftime("%d/%m/%Y"), f"${a.valor:,.0f}", a.observaciones or "—"]
+            for a in pre.anticipos_detalle
+        ]
+        periodo = f"{inicio.strftime('%d/%m/%Y')} al {fin.strftime('%d/%m/%Y')}"
+        pdf = build_liquidacion_pdf(
+            empresa_nombre=nombre_empresa,
+            empresa_nit=nit,
+            empresa_ubicacion=ubicacion,
+            folio="PRELIMINAR",
+            estado="preliminar",
+            emitido=datetime.now().strftime("%d/%m/%Y %H:%M"),
+            tercero_label="Proveedor" if es_proveedor else "Transportador",
+            tercero_nombre=pre.tercero_nombre,
+            tercero_detalle=pre.tercero_detalle,
+            periodo=periodo,
+            detalle_headers=["Fecha", "Litros", "Precio/L", "Valor"],
+            detalle_rows=detalle_rows,
+            resumen_rows=resumen_rows,
+            anticipos_rows=anticipos_rows,
+            observaciones="PRE-LIQUIDACIÓN — documento informativo del avance; no constituye pago.",
+        )
+        filename = (
+            f"preliquidacion_{pre.tercero_nombre}_{inicio.isoformat()}.pdf".replace(" ", "_")
+        )
         return pdf, filename
 
 

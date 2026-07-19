@@ -14,6 +14,8 @@ from app.modules.liquidaciones.schemas import (
     GenerarLiquidaciones,
     LiquidacionRead,
     LiquidacionUpdate,
+    PreLiquidacionRead,
+    PrevisualizarLiquidacion,
 )
 from app.modules.liquidaciones.service import AnticipoService, LiquidacionService
 
@@ -37,6 +39,37 @@ def generar(
         payload.periodo_inicio, payload.periodo_fin, payload.tipo, payload.proveedor_id
     )
     return [_to_read(liq) for liq in liquidaciones]
+
+
+@router.post(
+    "/previsualizar",
+    response_model=list[PreLiquidacionRead],
+    summary="Pre-liquidación: calcular cómo va un tercero (sin generar)",
+)
+def previsualizar(
+    payload: PrevisualizarLiquidacion,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "consultar")),
+) -> list[PreLiquidacionRead]:
+    return LiquidacionService(db, ctx).previsualizar(
+        payload.periodo_inicio, payload.periodo_fin, payload.tipo, payload.tercero_id
+    )
+
+
+@router.post("/previsualizar/pdf", summary="PDF preliminar de una pre-liquidación")
+def previsualizar_pdf(
+    payload: PrevisualizarLiquidacion,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "imprimir")),
+) -> Response:
+    contenido, filename = LiquidacionService(db, ctx).previsualizar_pdf(
+        payload.periodo_inicio, payload.periodo_fin, payload.tipo, payload.tercero_id
+    )
+    return Response(
+        content=contenido,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("", response_model=Page[LiquidacionRead], summary="Listar liquidaciones")

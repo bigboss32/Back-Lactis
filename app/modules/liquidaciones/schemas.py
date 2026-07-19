@@ -15,6 +15,50 @@ class GenerarLiquidaciones(BaseSchema):
     proveedor_id: uuid.UUID | None = None
 
 
+class PrevisualizarLiquidacion(BaseSchema):
+    """Pre-liquidación: calcula cómo va un tercero SIN generar ni guardar nada."""
+
+    periodo_inicio: date
+    periodo_fin: date
+    tipo: Literal["proveedor", "transportador"] = "proveedor"
+    tercero_id: uuid.UUID
+
+
+class PreLiquidacionDetalle(BaseSchema):
+    fecha: date
+    litros: Decimal
+    precio_litro: Decimal
+    valor: Decimal
+
+
+class PreLiquidacionAnticipo(BaseSchema):
+    fecha: date
+    valor: Decimal
+    observaciones: str | None = None
+
+
+class PreLiquidacionRead(BaseSchema):
+    """Resultado de una pre-liquidación (no persistida)."""
+
+    tipo: str
+    tercero_id: uuid.UUID
+    tercero_nombre: str
+    tercero_detalle: str | None = None
+    periodo_inicio: date
+    periodo_fin: date
+    total_litros: Decimal
+    precio_promedio: Decimal
+    valor_bruto: Decimal
+    bonificaciones: Decimal
+    descuentos: Decimal
+    valor_transporte: Decimal
+    anticipos: Decimal
+    valor_total: Decimal
+    saldo: Decimal
+    detalles: list[PreLiquidacionDetalle] = []
+    anticipos_detalle: list[PreLiquidacionAnticipo] = []
+
+
 class LiquidacionDetalleRead(BaseSchema):
     fecha: date
     litros: Decimal
