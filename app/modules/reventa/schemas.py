@@ -26,7 +26,6 @@ class CompraQuesoCreate(BaseSchema):
     fecha: date
     productor: str = Field(min_length=2, max_length=150)
     kilos_brutos: Decimal = Field(gt=0)
-    merma_kilos: Decimal = Field(default=Decimal("0"), ge=0)
     borona_kilos: Decimal = Field(default=Decimal("0"), ge=0)
     precio_kilo: Decimal = Field(gt=0)
     observaciones: str | None = None
@@ -36,7 +35,6 @@ class CompraQuesoUpdate(BaseSchema):
     fecha: date | None = None
     productor: str | None = Field(default=None, min_length=2, max_length=150)
     kilos_brutos: Decimal | None = Field(default=None, gt=0)
-    merma_kilos: Decimal | None = Field(default=None, ge=0)
     borona_kilos: Decimal | None = Field(default=None, ge=0)
     precio_kilo: Decimal | None = Field(default=None, gt=0)
     observaciones: str | None = None
@@ -46,7 +44,6 @@ class CompraQuesoRead(TenantRead):
     fecha: date
     productor: str
     kilos_brutos: Decimal
-    merma_kilos: Decimal
     borona_kilos: Decimal
     kilos_netos: Decimal
     precio_kilo: Decimal
@@ -64,6 +61,8 @@ class VentaQuesoCreate(BaseSchema):
     tipo: Literal["queso", "borona"] = "queso"
     kilos: Decimal = Field(gt=0)
     precio_kilo: Decimal = Field(gt=0)
+    gasto_concepto: str | None = Field(default=None, max_length=150)
+    gasto_por_kilo: Decimal = Field(default=Decimal("0"), ge=0)
     observaciones: str | None = None
     # Pago inmediato: registra la venta ya pagada por completo
     pagada_de_contado: bool = False
@@ -74,6 +73,8 @@ class VentaQuesoUpdate(BaseSchema):
     cliente: str | None = Field(default=None, min_length=2, max_length=150)
     kilos: Decimal | None = Field(default=None, gt=0)
     precio_kilo: Decimal | None = Field(default=None, gt=0)
+    gasto_concepto: str | None = Field(default=None, max_length=150)
+    gasto_por_kilo: Decimal | None = Field(default=None, ge=0)
     observaciones: str | None = None
 
 
@@ -84,6 +85,9 @@ class VentaQuesoRead(TenantRead):
     kilos: Decimal
     precio_kilo: Decimal
     valor_total: Decimal
+    gasto_concepto: str | None
+    gasto_por_kilo: Decimal
+    gasto_monto: Decimal
     abonado: Decimal
     saldo: Decimal
     observaciones: str | None
@@ -114,8 +118,10 @@ class ResumenReventa(BaseSchema):
     total_ventas: Decimal  # queso + borona
     precio_promedio_compra: Decimal
     precio_promedio_venta: Decimal  # solo queso
-    ganancia_estimada: Decimal  # ventas totales - costo del queso vendido
-    margen_por_kilo: Decimal  # sobre el queso
+    total_gastos: Decimal  # gastos de venta del período (transporte, etc.)
+    merma_estimada: Decimal  # kilos comprados - kilos vendidos (queso) del período
+    ganancia_estimada: Decimal  # ventas totales - costo del queso vendido - gastos
+    margen_por_kilo: Decimal  # ganancia neta por kilo de queso vendido
     # Del período (borona)
     kilos_borona_vendidos: Decimal
     total_ventas_borona: Decimal

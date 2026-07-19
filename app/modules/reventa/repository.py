@@ -87,6 +87,18 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
         ).one()
         return Decimal(fila[0]), Decimal(fila[1]), Decimal(fila[2])
 
+    def gastos_periodo(self, desde: date, hasta: date) -> Decimal:
+        """Suma de gastos de venta (transporte, etc.) del período."""
+        total = self.db.scalar(
+            select(func.coalesce(func.sum(VentaQueso.gasto_monto), 0)).where(
+                VentaQueso.empresa_id == self.empresa_id,
+                VentaQueso.deleted_at.is_(None),
+                VentaQueso.estado != "anulada",
+                VentaQueso.fecha.between(desde, hasta),
+            )
+        )
+        return Decimal(total or 0)
+
 
 class ConversionBoronaRepository(BaseRepository[ConversionBorona]):
     model = ConversionBorona

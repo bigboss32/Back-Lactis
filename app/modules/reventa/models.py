@@ -27,11 +27,14 @@ class CompraQueso(TenantMixin, AuditMixin, Base):
     fecha: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     productor: Mapped[str] = mapped_column(String(150), nullable=False)
     kilos_brutos: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Merma en la compra quedó obsoleta: al comprar se paga por todo lo que se
+    # recibe. La merma real se ve al vender (se pesa menos). Se conserva la
+    # columna (siempre 0) por compatibilidad con datos históricos.
     merma_kilos: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     # Borona que llega con el lote: no se paga, pero entra al inventario
     # de borona para venderse como subproducto
     borona_kilos: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
-    # Se paga por kilos netos = brutos - merma
+    # Kilos por los que se paga (= kilos_brutos ahora que no hay merma)
     kilos_netos: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     precio_kilo: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     valor_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
@@ -77,6 +80,16 @@ class VentaQueso(TenantMixin, AuditMixin, Base):
     kilos: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     precio_kilo: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     valor_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
+    # Gastos que conlleva vender el lote (ej. transporte por kilo). NO cambian lo
+    # que paga el cliente (valor_total); solo reducen la ganancia de la reventa.
+    gasto_concepto: Mapped[str | None] = mapped_column(String(150))
+    gasto_por_kilo: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), default=Decimal("0"), server_default="0"
+    )
+    # Total del gasto = gasto_por_kilo * kilos (lo calcula el servicio)
+    gasto_monto: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), default=Decimal("0"), server_default="0"
+    )
     abonado: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
     observaciones: Mapped[str | None] = mapped_column(String(500))
 

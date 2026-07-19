@@ -46,16 +46,12 @@ class CompraQuesoService(BaseService[CompraQueso]):
     @staticmethod
     def _calcular(data: dict[str, Any], actual: CompraQueso | None = None) -> dict[str, Any]:
         brutos = Decimal(data.get("kilos_brutos") or (actual.kilos_brutos if actual else CERO))
-        merma = Decimal(
-            data.get("merma_kilos")
-            if data.get("merma_kilos") is not None
-            else (actual.merma_kilos if actual else CERO)
-        )
         precio = Decimal(data.get("precio_kilo") or (actual.precio_kilo if actual else CERO))
-        if merma >= brutos:
-            raise BusinessError("La merma no puede ser mayor o igual a los kilos brutos")
-        data["kilos_netos"] = brutos - merma
-        data["valor_total"] = (data["kilos_netos"] * precio).quantize(DOS_DECIMALES)
+        # Ya no hay merma en la compra: se paga por todo lo recibido. La merma
+        # real se refleja al vender (se pesa menos). Se guarda merma 0.
+        data["merma_kilos"] = CERO
+        data["kilos_netos"] = brutos
+        data["valor_total"] = (brutos * precio).quantize(DOS_DECIMALES)
         return data
 
     def crear(self, payload: Any) -> CompraQueso:
@@ -145,6 +141,9 @@ class VentaQuesoService(BaseService[VentaQueso]):
             if kilos > disponible:
                 raise BusinessError(f"Solo hay {disponible} kg de queso disponibles")
         data["valor_total"] = (kilos * Decimal(data["precio_kilo"])).quantize(DOS_DECIMALES)
+        # Gasto de venta por kilo (ej. transporte): el total es por_kilo * kilos.
+        por_kilo = Decimal(data.get("gasto_por_kilo") or CERO)
+        data["gasto_monto"] = (por_kilo * kilos).quantize(DOS_DECIMALES)
         data["estado"] = ESTADO_PENDIENTE
         if de_contado:
             data["abonado"] = data["valor_total"]
@@ -168,6 +167,13 @@ class VentaQuesoService(BaseService[VentaQueso]):
         kilos = Decimal(data.get("kilos") or actual.kilos)
         precio = Decimal(data.get("precio_kilo") or actual.precio_kilo)
         data["valor_total"] = (kilos * precio).quantize(DOS_DECIMALES)
+        # Recalcula el gasto total (por_kilo * kilos) si cambió cualquiera de los dos.
+        por_kilo = Decimal(
+            data["gasto_por_kilo"]
+            if data.get("gasto_por_kilo") is not None
+            else actual.gasto_por_kilo
+        )
+        data["gasto_monto"] = (por_kilo * kilos).quantize(DOS_DECIMALES)
         # Se puede editar aunque tenga abonos (incluida una pagada): se recalcula el estado.
         data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, data)
@@ -270,6 +276,7 @@ class ReventaResumenService:
         kilos_queso, ventas_queso = self.ventas.totales_periodo(desde, hasta, tipo="queso")
         kilos_borona, ventas_borona = self.ventas.totales_periodo(desde, hasta, tipo="borona")
         total_ventas = ventas_queso + ventas_borona
+        total_gastos = self.ventas.gastos_periodo(desde, hasta)
 
         kilos_hist_comprados, borona_de_compras, por_pagar = self.compras.acumulados()
         hist_queso_vendido, hist_borona_vendida, por_cobrar = self.ventas.acumulados()
@@ -288,7 +295,10 @@ class ReventaResumenService:
         if costo_kilo == CERO and kilos_hist_comprados:
             _, total_hist = self.compras.totales_periodo(date(2000, 1, 1), date(2100, 1, 1))
             costo_kilo = (total_hist / kilos_hist_comprados).quantize(DOS_DECIMALES)
-        ganancia = (total_ventas - kilos_queso * costo_kilo).quantize(DOS_DECIMALES)
+        # Ganancia neta = ventas totales − costo del queso vendido − gastos de venta.
+        ganancia = (total_ventas - kilos_queso * costo_kilo - total_gastos).quantize(DOS_DECIMALES)
+        # Margen neto por kilo de queso vendido (ya incluye borona y gastos).
+        margen = (ganancia / kilos_queso).quantize(DOS_DECIMALES) if kilos_queso else CERO
 
         return ResumenReventa(
             desde=desde,
@@ -299,8 +309,10 @@ class ReventaResumenService:
             total_ventas=total_ventas,
             precio_promedio_compra=precio_prom_compra,
             precio_promedio_venta=precio_prom_venta,
+            total_gastos=total_gastos,
+            merma_estimada=kilos_comprados - kilos_queso,
             ganancia_estimada=ganancia,
-            margen_por_kilo=precio_prom_venta - costo_kilo if kilos_queso else CERO,
+            margen_por_kilo=margen,
             kilos_borona_vendidos=kilos_borona,
             total_ventas_borona=ventas_borona,
             kilos_disponibles=kilos_hist_comprados - hist_queso_vendido - convertido,
