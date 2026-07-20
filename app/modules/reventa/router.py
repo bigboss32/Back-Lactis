@@ -14,6 +14,7 @@ from app.modules.reventa.schemas import (
     ConversionCreate,
     ConversionRead,
     ResumenReventa,
+    SugerenciasReventa,
     VentaQuesoCreate,
     VentaQuesoRead,
     VentaQuesoUpdate,
@@ -36,6 +37,18 @@ def resumen(
     ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
 ) -> ResumenReventa:
     return ReventaResumenService(db, ctx).resumen(desde, hasta)
+
+
+@router.get(
+    "/sugerencias",
+    response_model=SugerenciasReventa,
+    summary="Nombres ya usados de productores y clientes (autocompletar)",
+)
+def sugerencias(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+) -> SugerenciasReventa:
+    return ReventaResumenService(db, ctx).sugerencias()
 
 
 # ------------------------------------------------------------------- compras

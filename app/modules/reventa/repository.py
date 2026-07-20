@@ -49,6 +49,20 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
         ).one()
         return Decimal(fila[0]), Decimal(fila[1]), Decimal(fila[2])
 
+    def nombres_productores(self) -> list[str]:
+        """Nombres de productores ya usados (para autocompletar), sin repetir."""
+        rows = self.db.scalars(
+            select(CompraQueso.productor)
+            .where(
+                CompraQueso.empresa_id == self.empresa_id,
+                CompraQueso.deleted_at.is_(None),
+                CompraQueso.estado != "anulada",
+            )
+            .distinct()
+            .order_by(CompraQueso.productor)
+        ).all()
+        return [r for r in rows if r]
+
 
 class VentaQuesoRepository(BaseRepository[VentaQueso]):
     model = VentaQueso
@@ -104,6 +118,20 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
             )
         )
         return Decimal(total or 0)
+
+    def nombres_clientes(self) -> list[str]:
+        """Nombres de clientes ya usados (para autocompletar), sin repetir."""
+        rows = self.db.scalars(
+            select(VentaQueso.cliente)
+            .where(
+                VentaQueso.empresa_id == self.empresa_id,
+                VentaQueso.deleted_at.is_(None),
+                VentaQueso.estado != "anulada",
+            )
+            .distinct()
+            .order_by(VentaQueso.cliente)
+        ).all()
+        return [r for r in rows if r]
 
 
 class ConversionBoronaRepository(BaseRepository[ConversionBorona]):

@@ -27,7 +27,7 @@ from app.modules.reventa.repository import (
     ConversionBoronaRepository,
     VentaQuesoRepository,
 )
-from app.modules.reventa.schemas import ResumenReventa
+from app.modules.reventa.schemas import ResumenReventa, SugerenciasReventa
 
 CERO = Decimal("0")
 DOS_DECIMALES = Decimal("0.01")
@@ -356,4 +356,11 @@ class ReventaResumenService:
             borona_disponible=borona_de_compras + a_borona - hist_borona_vendida,
             por_pagar_productores=por_pagar,
             por_cobrar_clientes=por_cobrar,
+        )
+
+    def sugerencias(self) -> SugerenciasReventa:
+        """Nombres ya usados de productores y clientes, para autocompletar."""
+        return SugerenciasReventa(
+            productores=self.compras.nombres_productores(),
+            clientes=self.ventas.nombres_clientes(),
         )

@@ -132,3 +132,10 @@ class ResumenReventa(BaseSchema):
     borona_disponible: Decimal  # de compras + conversiones - vendida
     por_pagar_productores: Decimal
     por_cobrar_clientes: Decimal
+
+
+class SugerenciasReventa(BaseSchema):
+    """Nombres ya registrados para autocompletar al crear compras/ventas."""
+
+    productores: list[str]
+    clientes: list[str]
