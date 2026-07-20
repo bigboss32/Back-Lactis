@@ -159,7 +159,9 @@ class RecepcionService(BaseService[RecepcionLeche]):
         proveedores = {
             p.id: p for p in ProveedorRepository(self.db, self.ctx.empresa_id).all(estado="activo")
         }
-        # Proveedores inactivos pero con recepciones en el rango también se muestran
+        activos_ids = set(proveedores.keys())
+        # Proveedores retirados/eliminados pero con recepciones en el rango también
+        # se muestran (marcados como inactivos) para poder liquidarlos.
         for r in recepciones:
             if r.proveedor_id not in proveedores and r.proveedor:
                 proveedores[r.proveedor_id] = r.proveedor
@@ -179,6 +181,7 @@ class RecepcionService(BaseService[RecepcionLeche]):
                 proveedor_nombre=p.nombre,
                 vereda=p.vereda,
                 precio_litro=p.precio_litro,
+                proveedor_activo=pid in activos_ids,
                 celdas={},
                 total_litros=CERO,
                 valor_bruto=CERO,

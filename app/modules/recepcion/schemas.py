@@ -85,6 +85,9 @@ class FilaGrilla(BaseSchema):
     proveedor_nombre: str
     vereda: str | None
     precio_litro: Decimal
+    # False si el proveedor fue retirado/eliminado pero aún tiene recepciones
+    # en el período (se conserva en la grilla para poder liquidarlo).
+    proveedor_activo: bool = True
     celdas: dict[str, CeldaGrilla]  # clave: fecha ISO 'YYYY-MM-DD'
     total_litros: Decimal
     valor_bruto: Decimal
