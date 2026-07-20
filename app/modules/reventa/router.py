@@ -93,6 +93,20 @@ def abonar_compra(
     return CompraQuesoService(db, ctx).registrar_abono(entity_id, payload)
 
 
+@router.delete(
+    "/compras/{entity_id}/abonos/{abono_id}",
+    response_model=CompraQuesoRead,
+    summary="Eliminar un abono mal registrado de la compra",
+)
+def eliminar_abono_compra(
+    entity_id: uuid.UUID,
+    abono_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+) -> CompraQuesoRead:
+    return CompraQuesoService(db, ctx).eliminar_abono(entity_id, abono_id)
+
+
 @router.post("/compras/{entity_id}/anular", response_model=CompraQuesoRead, summary="Anular compra")
 def anular_compra(
     entity_id: uuid.UUID,
@@ -194,6 +208,20 @@ def abonar_venta(
     ctx: RequestContext = Depends(require_permission("reventa", "crear")),
 ) -> VentaQuesoRead:
     return VentaQuesoService(db, ctx).registrar_abono(entity_id, payload)
+
+
+@router.delete(
+    "/ventas/{entity_id}/abonos/{abono_id}",
+    response_model=VentaQuesoRead,
+    summary="Eliminar un abono mal registrado de la venta",
+)
+def eliminar_abono_venta(
+    entity_id: uuid.UUID,
+    abono_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+) -> VentaQuesoRead:
+    return VentaQuesoService(db, ctx).eliminar_abono(entity_id, abono_id)
 
 
 @router.post("/ventas/{entity_id}/anular", response_model=VentaQuesoRead, summary="Anular venta")

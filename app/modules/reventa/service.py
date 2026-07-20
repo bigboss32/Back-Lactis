@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.common.service import BaseService, serialize_entity
-from app.core.exceptions import BusinessError
+from app.core.exceptions import BusinessError, NotFoundError
 from app.core.pagination import PageParams
 from app.modules.reventa.models import (
     ESTADO_ANULADA,
@@ -70,6 +70,12 @@ class CompraQuesoService(BaseService[CompraQueso]):
         data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, data)
 
+    def validar_eliminar(self, obj: CompraQueso) -> None:
+        if obj.abonado > CERO:
+            raise BusinessError(
+                "No se puede eliminar una compra con abonos; elimine primero los abonos o anúlela"
+            )
+
     def registrar_abono(self, compra_id: uuid.UUID, payload: Any) -> CompraQueso:
         compra = self.repo.get_or_fail(compra_id)
         if compra.estado == ESTADO_ANULADA:
@@ -91,6 +97,24 @@ class CompraQuesoService(BaseService[CompraQueso]):
         compra.updated_by = self.ctx.user_id
         self.db.flush()
         self._audit("editar", compra.id, None, {"abono": float(valor), "estado": compra.estado})
+        return compra
+
+    def eliminar_abono(self, compra_id: uuid.UUID, abono_id: uuid.UUID) -> CompraQueso:
+        """Elimina un abono mal registrado: baja el abonado y recalcula el estado."""
+        compra = self.repo.get_or_fail(compra_id)
+        abono = next((a for a in compra.abonos if a.id == abono_id), None)
+        if abono is None:
+            raise NotFoundError("Abono no encontrado")
+        valor = Decimal(abono.valor)
+        compra.abonado = max(compra.abonado - valor, CERO)
+        compra.estado = _estado_pago(compra.valor_total, compra.abonado)
+        compra.updated_by = self.ctx.user_id
+        self.db.delete(abono)
+        self.db.flush()
+        self._audit(
+            "editar", compra.id, None,
+            {"abono_eliminado": float(valor), "estado": compra.estado},
+        )
         return compra
 
     def anular(self, compra_id: uuid.UUID) -> CompraQueso:
@@ -174,6 +198,12 @@ class VentaQuesoService(BaseService[VentaQueso]):
         data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, data)
 
+    def validar_eliminar(self, obj: VentaQueso) -> None:
+        if obj.abonado > CERO:
+            raise BusinessError(
+                "No se puede eliminar una venta con abonos; elimine primero los abonos o anúlela"
+            )
+
     def registrar_abono(self, venta_id: uuid.UUID, payload: Any) -> VentaQueso:
         venta = self.repo.get_or_fail(venta_id)
         if venta.estado == ESTADO_ANULADA:
@@ -192,6 +222,24 @@ class VentaQuesoService(BaseService[VentaQueso]):
         venta.updated_by = self.ctx.user_id
         self.db.flush()
         self._audit("editar", venta.id, None, {"abono": float(valor), "estado": venta.estado})
+        return venta
+
+    def eliminar_abono(self, venta_id: uuid.UUID, abono_id: uuid.UUID) -> VentaQueso:
+        """Elimina un abono mal registrado: baja el abonado y recalcula el estado."""
+        venta = self.repo.get_or_fail(venta_id)
+        abono = next((a for a in venta.abonos if a.id == abono_id), None)
+        if abono is None:
+            raise NotFoundError("Abono no encontrado")
+        valor = Decimal(abono.valor)
+        venta.abonado = max(venta.abonado - valor, CERO)
+        venta.estado = _estado_pago(venta.valor_total, venta.abonado)
+        venta.updated_by = self.ctx.user_id
+        self.db.delete(abono)
+        self.db.flush()
+        self._audit(
+            "editar", venta.id, None,
+            {"abono_eliminado": float(valor), "estado": venta.estado},
+        )
         return venta
 
     def anular(self, venta_id: uuid.UUID) -> VentaQueso:
