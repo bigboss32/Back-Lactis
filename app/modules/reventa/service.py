@@ -70,10 +70,6 @@ class CompraQuesoService(BaseService[CompraQueso]):
         data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, data)
 
-    def validar_eliminar(self, obj: CompraQueso) -> None:
-        if obj.abonado > CERO:
-            raise BusinessError("No se puede eliminar una compra con abonos; anúlela")
-
     def registrar_abono(self, compra_id: uuid.UUID, payload: Any) -> CompraQueso:
         compra = self.repo.get_or_fail(compra_id)
         if compra.estado == ESTADO_ANULADA:
@@ -177,10 +173,6 @@ class VentaQuesoService(BaseService[VentaQueso]):
         # Se puede editar aunque tenga abonos (incluida una pagada): se recalcula el estado.
         data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, data)
-
-    def validar_eliminar(self, obj: VentaQueso) -> None:
-        if obj.abonado > CERO:
-            raise BusinessError("No se puede eliminar una venta con abonos; anúlela")
 
     def registrar_abono(self, venta_id: uuid.UUID, payload: Any) -> VentaQueso:
         venta = self.repo.get_or_fail(venta_id)
