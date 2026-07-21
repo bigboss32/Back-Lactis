@@ -122,6 +122,11 @@ class ConversionBorona(TenantMixin, AuditMixin, Base):
     destino: Mapped[str] = mapped_column(
         String(20), default=DESTINO_BORONA, server_default=DESTINO_BORONA, index=True
     )
+    # Precio por kilo de la borona (solo aplica cuando destino = borona; la merma
+    # es pérdida sin valor). Sirve para valorar la borona generada.
+    precio_kilo: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), default=Decimal("0"), server_default="0"
+    )
     observaciones: Mapped[str | None] = mapped_column(String(300))
 
 

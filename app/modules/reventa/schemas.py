@@ -99,6 +99,7 @@ class ConversionCreate(BaseSchema):
     fecha: date
     kilos: Decimal = Field(gt=0)
     destino: Literal["borona", "merma"] = "borona"
+    precio_kilo: Decimal = Field(default=Decimal("0"), ge=0)
     observaciones: str | None = None
 
 
@@ -106,6 +107,7 @@ class ConversionRead(TenantRead):
     fecha: date
     kilos: Decimal
     destino: str
+    precio_kilo: Decimal
     observaciones: str | None
 
 

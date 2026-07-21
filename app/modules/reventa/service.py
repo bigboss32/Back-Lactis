@@ -10,6 +10,7 @@ from app.common.service import BaseService, serialize_entity
 from app.core.exceptions import BusinessError, NotFoundError
 from app.core.pagination import PageParams
 from app.modules.reventa.models import (
+    DESTINO_MERMA,
     ESTADO_ANULADA,
     ESTADO_PAGADA,
     ESTADO_PARCIAL,
@@ -278,6 +279,9 @@ class ConversionBoronaService(BaseService[ConversionBorona]):
         disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
         if Decimal(data["kilos"]) > disponible:
             raise BusinessError(f"Solo hay {disponible} kg de queso disponibles")
+        # La merma es pérdida sin valor: no lleva precio.
+        if data.get("destino") == DESTINO_MERMA:
+            data["precio_kilo"] = CERO
         return super().crear(data)
 
 
