@@ -109,6 +109,103 @@ class VentaService(BaseService[Venta]):
         self._audit("crear", venta.id, None, serialize_entity(venta))
         return venta
 
+    def actualizar(self, entity_id: uuid.UUID, payload: Any) -> Venta:
+        venta = self.repo.get_or_fail(entity_id)
+        if venta.estado == ESTADO_ANULADA:
+            raise BusinessError("No se puede editar una venta anulada")
+        data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
+        antes = serialize_entity(venta)
+        detalles_data = data.pop("detalles", None)
+
+        # Cambiar productos o descuento afecta importes: solo se permite si la
+        # venta aún no tiene pagos (si los tuviera, hay que anular y rehacer).
+        afecta_importes = detalles_data is not None or "descuento" in data
+        if afecta_importes and venta.pagado > CERO:
+            raise BusinessError(
+                "No se puede cambiar los productos o el descuento de una venta con pagos; "
+                "anúlela y créela de nuevo"
+            )
+
+        if "cliente_id" in data:
+            ClienteRepository(self.db, self.ctx.empresa_id).get_or_fail(data["cliente_id"])
+
+        if detalles_data is not None:
+            productos_repo = ProductoRepository(self.db, self.ctx.empresa_id)
+            # Reintegra el inventario de las líneas actuales (entrada) para dejar el
+            # stock como estaba antes de la venta y poder validar/descontar las nuevas.
+            for detalle in venta.detalles:
+                self.db.add(
+                    MovimientoInventario(
+                        empresa_id=self.ctx.empresa_id,
+                        producto_id=detalle.producto_id,
+                        fecha=date.today(),
+                        tipo="entrada",
+                        cantidad=detalle.cantidad,
+                        costo_unitario=detalle.precio_unitario,
+                        referencia=f"edición venta #{venta.numero}",
+                        created_by=self.ctx.user_id,
+                    )
+                )
+            self.db.flush()
+
+            nuevos = []
+            subtotal = CERO
+            for d in detalles_data:
+                producto = productos_repo.get_or_fail(d["producto_id"])
+                total_linea = (Decimal(d["cantidad"]) * Decimal(d["precio_unitario"])).quantize(
+                    Decimal("0.01")
+                )
+                subtotal += total_linea
+                nuevos.append(
+                    VentaDetalle(
+                        producto_id=producto.id,
+                        descripcion=d.get("descripcion") or producto.nombre,
+                        cantidad=d["cantidad"],
+                        precio_unitario=d["precio_unitario"],
+                        total=total_linea,
+                    )
+                )
+                stock = productos_repo.stock_de(producto.id)
+                if stock < Decimal(d["cantidad"]):
+                    raise BusinessError(
+                        f"Stock insuficiente de '{producto.nombre}': disponible {stock}"
+                    )
+            venta.detalles = nuevos
+            venta.subtotal = subtotal
+            self.db.flush()
+            for detalle in venta.detalles:
+                self.db.add(
+                    MovimientoInventario(
+                        empresa_id=self.ctx.empresa_id,
+                        producto_id=detalle.producto_id,
+                        fecha=venta.fecha,
+                        tipo="salida",
+                        cantidad=detalle.cantidad,
+                        costo_unitario=detalle.precio_unitario,
+                        referencia=f"venta #{venta.numero}",
+                        created_by=self.ctx.user_id,
+                    )
+                )
+
+        if "descuento" in data:
+            venta.descuento = Decimal(data["descuento"])
+
+        if afecta_importes:
+            if venta.descuento > venta.subtotal:
+                raise BusinessError("El descuento no puede superar el subtotal")
+            venta.total = (venta.subtotal - venta.descuento).quantize(Decimal("0.01"))
+            # Sin pagos (validado arriba): pendiente, o pagada si el total quedó en 0.
+            venta.estado = ESTADO_PAGADA if venta.total <= CERO else ESTADO_PENDIENTE
+
+        for campo in ("tipo", "cliente_id", "fecha", "observaciones"):
+            if campo in data:
+                setattr(venta, campo, data[campo])
+
+        venta.updated_by = self.ctx.user_id
+        self.db.flush()
+        self._audit("editar", venta.id, antes, serialize_entity(venta))
+        return venta
+
     def anular(self, entity_id: uuid.UUID) -> Venta:
         venta = self.repo.get_or_fail(entity_id)
         if venta.estado == ESTADO_ANULADA:

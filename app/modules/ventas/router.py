@@ -69,7 +69,7 @@ def crear(
     return _to_read(VentaService(db, ctx).crear(payload))
 
 
-@router.put("/{entity_id}", response_model=VentaRead, summary="Actualizar observaciones de la venta")
+@router.put("/{entity_id}", response_model=VentaRead, summary="Editar venta (productos, descuento, datos)")
 def actualizar(
     entity_id: uuid.UUID,
     payload: VentaUpdate,

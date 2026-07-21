@@ -26,7 +26,13 @@ class VentaCreate(BaseSchema):
 
 
 class VentaUpdate(BaseSchema):
+    tipo: Literal["factura", "remision"] | None = None
+    cliente_id: uuid.UUID | None = None
+    fecha: date | None = None
+    descuento: Decimal | None = Field(default=None, ge=0)
     observaciones: str | None = None
+    # Si viene, reemplaza las líneas de la venta (recalcula totales e inventario).
+    detalles: list[VentaDetalleCreate] | None = Field(default=None, min_length=1)
 
 
 class VentaDetalleRead(BaseSchema):
