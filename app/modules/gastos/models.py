@@ -9,9 +9,10 @@ from app.common.models import AuditMixin, TenantMixin
 from app.core.database import Base
 
 # Categorías sembradas por defecto para cada empresa.
-# NO se incluyen "Compra de leche" ni "Transporte": esos costos ya se contabilizan
-# vía recepciones/liquidaciones; cargarlos también como gasto duplicaría el costo
-# en el estado de resultados.
+# NO se incluyen "Compra de leche" ni el transporte de recepción de leche: esos
+# costos ya se contabilizan vía recepciones/liquidaciones y duplicarlos aquí
+# inflaría el estado de resultados. "Flete de ventas" SÍ va: es el despacho del
+# queso vendido, un costo distinto que no se registra en ningún otro lado.
 CATEGORIAS_DEFECTO = (
     "Combustible",
     "Servicios",
@@ -19,6 +20,7 @@ CATEGORIAS_DEFECTO = (
     "Mantenimiento",
     "Papelería",
     "Insumos",
+    "Flete de ventas",
     "Otros",
 )
 
