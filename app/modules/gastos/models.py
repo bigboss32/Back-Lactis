@@ -11,8 +11,8 @@ from app.core.database import Base
 # Categorías sembradas por defecto para cada empresa.
 # NO se incluyen "Compra de leche" ni el transporte de recepción de leche: esos
 # costos ya se contabilizan vía recepciones/liquidaciones y duplicarlos aquí
-# inflaría el estado de resultados. "Flete de ventas" SÍ va: es el despacho del
-# queso vendido, un costo distinto que no se registra en ningún otro lado.
+# inflaría el estado de resultados. "Fletes" SÍ va: es el despacho del queso
+# vendido (se cobra por kilo), un costo distinto que no se registra en otro lado.
 CATEGORIAS_DEFECTO = (
     "Combustible",
     "Servicios",
@@ -20,7 +20,7 @@ CATEGORIAS_DEFECTO = (
     "Mantenimiento",
     "Papelería",
     "Insumos",
-    "Flete de ventas",
+    "Fletes",
     "Otros",
 )
 
@@ -39,6 +39,10 @@ class Gasto(TenantMixin, AuditMixin, Base):
     categoria_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("categorias_gasto.id"), index=True)
     concepto: Mapped[str] = mapped_column(String(200), nullable=False)
     proveedor: Mapped[str | None] = mapped_column(String(150))
+    # Opcional: gastos cobrados por unidad (ej. flete por kilo). Si vienen ambos,
+    # valor = cantidad * precio_unitario. Si no, el valor se ingresa directo.
+    cantidad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    precio_unitario: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     valor: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     numero_factura: Mapped[str | None] = mapped_column(String(50))
     observaciones: Mapped[str | None] = mapped_column(String(500))

@@ -1,5 +1,6 @@
 import uuid
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from fastapi import UploadFile
@@ -25,10 +26,30 @@ class GastoService(BaseService[Gasto]):
     repository_cls = GastoRepository
     modulo = "gastos"
 
+    @staticmethod
+    def _calcular_valor(data: dict[str, Any], actual: Gasto | None = None) -> dict[str, Any]:
+        """Si el gasto se cobra por unidad (cantidad × precio), calcula el valor."""
+        cantidad = data["cantidad"] if "cantidad" in data else (actual.cantidad if actual else None)
+        precio = (
+            data["precio_unitario"]
+            if "precio_unitario" in data
+            else (actual.precio_unitario if actual else None)
+        )
+        if cantidad is not None and precio is not None:
+            data["valor"] = (Decimal(cantidad) * Decimal(precio)).quantize(Decimal("0.01"))
+        return data
+
     def crear(self, payload: Any) -> Gasto:
         data = payload.model_dump(exclude_unset=True)
         CategoriaGastoRepository(self.db, self.ctx.empresa_id).get_or_fail(data["categoria_id"])
-        return super().crear(data)
+        return super().crear(self._calcular_valor(data))
+
+    def actualizar(self, entity_id: uuid.UUID, payload: Any) -> Gasto:
+        actual = self.repo.get_or_fail(entity_id)
+        data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
+        if data.get("categoria_id"):
+            CategoriaGastoRepository(self.db, self.ctx.empresa_id).get_or_fail(data["categoria_id"])
+        return super().actualizar(entity_id, self._calcular_valor(data, actual))
 
     def listar_filtrado(
         self,
