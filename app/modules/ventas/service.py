@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.orm import lazyload
 
 from app.common.service import BaseService, serialize_entity
 from app.core.exceptions import BusinessError, NotFoundError
@@ -279,6 +280,9 @@ class PagoService(BaseService[Pago]):
                 Venta.empresa_id == self.ctx.empresa_id,
                 Venta.deleted_at.is_(None),
             )
+            # Sin el join del cliente (lazy="joined"): Postgres no admite FOR UPDATE
+            # sobre el lado exterior de un LEFT JOIN. Aquí solo se bloquea la venta.
+            .options(lazyload(Venta.cliente))
             .with_for_update()
         ).first()
         if venta is None:
