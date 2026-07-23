@@ -200,7 +200,10 @@ class RecepcionService(BaseService[RecepcionLeche]):
                 continue
             clave = r.fecha.isoformat()
             fila.celdas[clave] = CeldaGrilla(
-                recepcion_id=r.id, litros=r.cantidad_litros, liquidada=r.liquidacion_id is not None
+                recepcion_id=r.id,
+                litros=r.cantidad_litros,
+                liquidada=r.liquidacion_id is not None,
+                con_transporte=r.transportador_id is not None,
             )
             fila.total_litros += r.cantidad_litros
             fila.valor_bruto += r.valor_bruto

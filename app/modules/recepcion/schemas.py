@@ -78,6 +78,8 @@ class CeldaGrilla(BaseSchema):
     recepcion_id: uuid.UUID
     litros: Decimal
     liquidada: bool
+    # True si la recepción tiene transportador asignado (se marca con un ícono).
+    con_transporte: bool = False
 
 
 class FilaGrilla(BaseSchema):
