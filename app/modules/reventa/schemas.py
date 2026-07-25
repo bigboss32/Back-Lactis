@@ -112,6 +112,44 @@ class ConversionRead(TenantRead):
 
 
 # ----------------------------------------------------------------- resumen
+class GananciaProducto(BaseSchema):
+    """Una línea del desglose de la ganancia del período: a dónde fue el queso
+    comprado (vendido como queso, pasado a borona, perdido como merma o todavía
+    en inventario) y cuánta plata dejó cada destino."""
+
+    producto: str  # 'queso' | 'borona' | 'merma' | 'pendiente' | 'anterior'
+    etiqueta: str  # texto listo para mostrar en la UI
+    nota: str  # sub-texto explicativo corto
+    # Kilos DEL LOTE COMPRADO que fueron a este destino (siempre >= 0). Los
+    # cuatro destinos suman exactamente kilos_comprados.
+    kilos: Decimal
+    # Kilos realmente VENDIDOS de este producto. En el queso es igual a `kilos`;
+    # en la borona puede diferir (se puede vender borona convertida en otro
+    # período, o la que llegó gratis con el lote). En merma/residuo es 0.
+    kilos_vendidos: Decimal
+    ingreso: Decimal
+    costo: Decimal  # negativo solo en la fila 'anterior' (se pagó en otro período)
+    gastos: Decimal
+    ganancia: Decimal  # ingreso - costo - gastos
+    precio_venta_kilo: Decimal  # ingreso / kilos_vendidos (0 si no se vendió)
+    costo_kilo: Decimal  # precio promedio de compra del período
+
+
+class GananciaProductor(BaseSchema):
+    """Ganancia ESTIMADA de lo comprado a un productor en el período: reparte el
+    valor neto que dejó cada kilo comprado entre los kilos de cada productor.
+    La suma de las filas cuadra con la ganancia neta del período."""
+
+    productor: str
+    compras: int  # cuántas compras en el período
+    kilos: Decimal
+    total_comprado: Decimal  # valor de sus compras (NO es lo que se le ha pagado)
+    precio_promedio: Decimal  # total comprado / kilos
+    por_pagar: Decimal  # saldo pendiente con ese productor (histórico)
+    margen_por_kilo: Decimal  # valor realizado por kilo - su precio promedio
+    ganancia_estimada: Decimal
+
+
 class ResumenReventa(BaseSchema):
     desde: date
     hasta: date
@@ -123,14 +161,25 @@ class ResumenReventa(BaseSchema):
     precio_promedio_compra: Decimal
     precio_promedio_venta: Decimal  # solo queso
     total_gastos: Decimal  # gastos de venta del período (transporte, etc.)
-    merma_estimada: Decimal  # kilos comprados - kilos vendidos (queso) del período
-    ganancia_estimada: Decimal  # ventas totales - costo del queso vendido - gastos
-    margen_por_kilo: Decimal  # ganancia neta por kilo de queso vendido
+    ganancia_estimada: Decimal  # ventas totales - compras del período - gastos
+    margen_por_kilo: Decimal  # ganancia neta por kilo vendido (queso + borona)
+    # Lo neto que dejó cada kilo comprado en el período: (ventas - gastos) /
+    # kilos comprados. Es la base para repartir la ganancia entre productores.
+    valor_realizado_kilo: Decimal
     # Del período (borona)
     kilos_borona_vendidos: Decimal
     total_ventas_borona: Decimal
+    # Del período (ajustes del inventario de queso)
+    kilos_a_borona: Decimal  # queso pasado a borona
+    kilos_merma: Decimal  # LA MERMA REAL: ajustes con destino merma
+    # Residuo CON SIGNO del lote comprado: comprado - vendido como queso -
+    # pasado a borona - merma. Negativo = se movió queso de otra temporada.
+    kilos_pendientes: Decimal
+    # Desgloses de la ganancia del período
+    por_producto: list[GananciaProducto] = []
+    por_productor: list[GananciaProductor] = []
     # Acumulados (histórico, sin filtro de fechas)
-    kilos_disponibles: Decimal  # queso: comprados netos - vendidos - pasados a borona
+    kilos_disponibles: Decimal  # queso: comprados netos - vendidos - ajustados
     borona_disponible: Decimal  # de compras + conversiones - vendida
     por_pagar_productores: Decimal
     por_cobrar_clientes: Decimal

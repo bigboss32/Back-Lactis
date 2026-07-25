@@ -77,7 +77,7 @@ def crear_compra(
     return CompraQuesoService(db, ctx).crear(payload)
 
 
-@router.put("/compras/{entity_id}", response_model=CompraQuesoRead, summary="Editar compra (sin abonos)")
+@router.put("/compras/{entity_id}", response_model=CompraQuesoRead, summary="Editar compra (recalcula el estado con los abonos ya hechos)")
 def editar_compra(
     entity_id: uuid.UUID,
     payload: CompraQuesoUpdate,
@@ -194,7 +194,7 @@ def crear_venta(
     return VentaQuesoService(db, ctx).crear(payload)
 
 
-@router.put("/ventas/{entity_id}", response_model=VentaQuesoRead, summary="Editar venta (sin abonos)")
+@router.put("/ventas/{entity_id}", response_model=VentaQuesoRead, summary="Editar venta (recalcula el estado con los abonos ya hechos)")
 def editar_venta(
     entity_id: uuid.UUID,
     payload: VentaQuesoUpdate,
