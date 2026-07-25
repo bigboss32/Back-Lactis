@@ -33,7 +33,7 @@ from app.modules.proveedores.repository import ProveedorRepository
 from app.modules.recepcion.models import RecepcionLeche
 from app.modules.recepcion.repository import RecepcionRepository
 from app.modules.transportadores.repository import TransportadorRepository
-from app.utils.export import build_liquidacion_pdf
+from app.utils.export import build_liquidacion_pdf, litros, pesos
 
 CERO = Decimal("0")
 
@@ -410,28 +410,30 @@ class LiquidacionService(BaseService[Liquidacion]):
             else None
         )
 
+        # Toda la plata y los litros salen por los formateadores colombianos
+        # (pesos / litros): el productor lee $18.525.000, no $18,525,000.
         detalle_rows = [
-            [d.fecha.strftime("%d/%m/%Y"), f"{d.litros:,.1f}", f"${d.precio_litro:,.0f}", f"${d.valor:,.0f}"]
+            [d.fecha.strftime("%d/%m/%Y"), litros(d.litros), pesos(d.precio_litro), pesos(d.valor)]
             for d in liquidacion.detalles
         ]
 
         if es_proveedor:
             resumen_rows = [
-                ("Total litros", f"{liquidacion.total_litros:,.1f}", False),
-                ("Precio promedio", f"${liquidacion.precio_promedio:,.2f}", False),
-                ("Valor bruto", f"${liquidacion.valor_bruto:,.0f}", False),
-                ("Bonificaciones", f"+ ${liquidacion.bonificaciones:,.0f}", False),
-                ("Descuentos", f"- ${liquidacion.descuentos:,.0f}", False),
-                ("Anticipos aplicados", f"- ${liquidacion.anticipos:,.0f}", False),
-                ("VALOR TOTAL", f"${liquidacion.valor_total:,.0f}", True),
-                ("SALDO A PAGAR", f"${liquidacion.saldo:,.0f}", True),
+                ("Total litros", litros(liquidacion.total_litros), False),
+                ("Precio promedio", pesos(liquidacion.precio_promedio), False),
+                ("Valor bruto", pesos(liquidacion.valor_bruto), False),
+                ("Bonificaciones", f"+ {pesos(liquidacion.bonificaciones)}", False),
+                ("Descuentos", f"- {pesos(liquidacion.descuentos)}", False),
+                ("Anticipos aplicados", f"- {pesos(liquidacion.anticipos)}", False),
+                ("VALOR TOTAL", pesos(liquidacion.valor_total), True),
+                ("SALDO A PAGAR", pesos(liquidacion.saldo), True),
             ]
         else:
             resumen_rows = [
-                ("Total litros", f"{liquidacion.total_litros:,.1f}", False),
-                ("Valor transporte", f"${liquidacion.valor_transporte:,.0f}", False),
-                ("VALOR TOTAL", f"${liquidacion.valor_total:,.0f}", True),
-                ("SALDO A PAGAR", f"${liquidacion.saldo:,.0f}", True),
+                ("Total litros", litros(liquidacion.total_litros), False),
+                ("Valor transporte", pesos(liquidacion.valor_transporte), False),
+                ("VALOR TOTAL", pesos(liquidacion.valor_total), True),
+                ("SALDO A PAGAR", pesos(liquidacion.saldo), True),
             ]
 
         anticipos_rows: list[list[Any]] = []
@@ -442,7 +444,7 @@ class LiquidacionService(BaseService[Liquidacion]):
                 .where(Anticipo.liquidacion_id == liquidacion.id)
             ).all()
             anticipos_rows = [
-                [a.fecha.strftime("%d/%m/%Y"), f"${a.valor:,.0f}", a.observaciones or "—"]
+                [a.fecha.strftime("%d/%m/%Y"), pesos(a.valor), a.observaciones or "—"]
                 for a in anticipos
             ]
 
@@ -489,31 +491,33 @@ class LiquidacionService(BaseService[Liquidacion]):
             else None
         )
         es_proveedor = pre.tipo == TIPO_PROVEEDOR
+        # Mismo formato colombiano que el comprobante oficial: el productor recibe
+        # los dos documentos y no pueden leerse distinto.
         detalle_rows = [
-            [d.fecha.strftime("%d/%m/%Y"), f"{d.litros:,.1f}", f"${d.precio_litro:,.0f}", f"${d.valor:,.0f}"]
+            [d.fecha.strftime("%d/%m/%Y"), litros(d.litros), pesos(d.precio_litro), pesos(d.valor)]
             for d in pre.detalles
         ]
         if es_proveedor:
             resumen_rows = [
-                ("Total litros", f"{pre.total_litros:,.1f}", False),
-                ("Precio promedio", f"${pre.precio_promedio:,.2f}", False),
-                ("Valor bruto", f"${pre.valor_bruto:,.0f}", False),
-                ("Bonificaciones", f"+ ${pre.bonificaciones:,.0f}", False),
-                ("Descuentos", f"- ${pre.descuentos:,.0f}", False),
-                ("Anticipos aplicados", f"- ${pre.anticipos:,.0f}", False),
-                ("VALOR TOTAL", f"${pre.valor_total:,.0f}", True),
-                ("SALDO ESTIMADO", f"${pre.saldo:,.0f}", True),
+                ("Total litros", litros(pre.total_litros), False),
+                ("Precio promedio", pesos(pre.precio_promedio), False),
+                ("Valor bruto", pesos(pre.valor_bruto), False),
+                ("Bonificaciones", f"+ {pesos(pre.bonificaciones)}", False),
+                ("Descuentos", f"- {pesos(pre.descuentos)}", False),
+                ("Anticipos aplicados", f"- {pesos(pre.anticipos)}", False),
+                ("VALOR TOTAL", pesos(pre.valor_total), True),
+                ("SALDO ESTIMADO", pesos(pre.saldo), True),
             ]
         else:
             resumen_rows = [
-                ("Total litros", f"{pre.total_litros:,.1f}", False),
-                ("Valor transporte", f"${pre.valor_transporte:,.0f}", False),
-                ("Anticipos aplicados", f"- ${pre.anticipos:,.0f}", False),
-                ("VALOR TOTAL", f"${pre.valor_total:,.0f}", True),
-                ("SALDO ESTIMADO", f"${pre.saldo:,.0f}", True),
+                ("Total litros", litros(pre.total_litros), False),
+                ("Valor transporte", pesos(pre.valor_transporte), False),
+                ("Anticipos aplicados", f"- {pesos(pre.anticipos)}", False),
+                ("VALOR TOTAL", pesos(pre.valor_total), True),
+                ("SALDO ESTIMADO", pesos(pre.saldo), True),
             ]
         anticipos_rows = [
-            [a.fecha.strftime("%d/%m/%Y"), f"${a.valor:,.0f}", a.observaciones or "—"]
+            [a.fecha.strftime("%d/%m/%Y"), pesos(a.valor), a.observaciones or "—"]
             for a in pre.anticipos_detalle
         ]
         periodo = f"{inicio.strftime('%d/%m/%Y')} al {fin.strftime('%d/%m/%Y')}"

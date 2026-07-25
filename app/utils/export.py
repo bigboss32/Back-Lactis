@@ -653,3 +653,16 @@ def build_estado_cuenta_pdf(
     )
     doc.build(elements, onFirstPage=_pie_estado_cuenta, onLaterPages=_pie_estado_cuenta)
     return buffer.getvalue()
+
+
+def litros(valor: Any) -> str:
+    """Litros con la misma precisión que guarda la base (hasta 2 decimales) y sin
+    ceros a la derecha: 250 L, 227,5 L, 1.234,75 L.
+
+    Mismo criterio de `kilogramos`, pero para la leche recibida: recortar la
+    precisión hacía que la columna del comprobante no sumara y el productor no
+    pudiera reproducir su propio total. Los miles van con punto y los decimales
+    con coma, como se escribe en Colombia.
+    """
+    numero = Decimal(valor or 0).quantize(Decimal("0.01"))
+    return f"{_miles(numero, _decimales_utiles(numero, 2))} L"

@@ -40,7 +40,7 @@ from app.modules.reventa.schemas import (
     ResumenReventa,
     SugerenciasReventa,
 )
-from app.utils.export import build_estado_cuenta_pdf
+from app.utils.export import build_estado_cuenta_pdf, pesos
 
 CERO = Decimal("0")
 DOS_DECIMALES = Decimal("0.01")
@@ -161,7 +161,11 @@ class CompraQuesoService(BaseService[CompraQueso]):
             raise BusinessError("La compra está anulada")
         valor = Decimal(payload.valor)
         if valor > compra.saldo:
-            raise BusinessError(f"El abono (${valor:,.0f}) supera el saldo (${compra.saldo:,.0f})")
+            # pesos() y no "{:,.0f}": el formato con coma es gringo y "$1,200,000"
+            # en Colombia se lee como un peso con veinte centavos.
+            raise BusinessError(
+                f"El abono ({pesos(valor)}) supera el saldo ({pesos(compra.saldo)})"
+            )
         self.db.add(
             AbonoCompraQueso(
                 compra_id=compra.id,
@@ -294,7 +298,11 @@ class VentaQuesoService(BaseService[VentaQueso]):
             raise BusinessError("La venta está anulada")
         valor = Decimal(payload.valor)
         if valor > venta.saldo:
-            raise BusinessError(f"El abono (${valor:,.0f}) supera el saldo (${venta.saldo:,.0f})")
+            # Mismo motivo que en el abono de compra: los miles se separan con
+            # punto y los decimales con coma (formato colombiano).
+            raise BusinessError(
+                f"El abono ({pesos(valor)}) supera el saldo ({pesos(venta.saldo)})"
+            )
         self.db.add(
             AbonoVentaQueso(
                 venta_id=venta.id, fecha=payload.fecha, valor=valor,

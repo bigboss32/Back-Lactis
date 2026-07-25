@@ -20,6 +20,7 @@ from app.modules.notificaciones.repository import NotificacionRepository
 from app.modules.recepcion.models import RecepcionLeche
 from app.modules.usuarios.models import Usuario
 from app.modules.ventas.models import Venta
+from app.utils.export import pesos
 
 DIAS_VENCIMIENTO_CARTERA = 30
 DIAS_SIN_LIQUIDAR = 20
@@ -127,7 +128,10 @@ class NotificacionService(BaseService[Notificacion]):
             emitidas += self._emitir(
                 TIPO_PAGOS_PENDIENTES,
                 f"Venta #{venta.numero} con saldo vencido",
-                f"Saldo ${venta.saldo:,.0f} pendiente desde {venta.fecha.isoformat()}",
+                # Plata en pesos colombianos y fecha en dd/mm/aaaa: la alerta la lee
+                # el dueño, no un sistema.
+                f"Saldo {pesos(venta.saldo)} pendiente desde "
+                f"{venta.fecha.strftime('%d/%m/%Y')}",
                 f"venta:{venta.id}",
             )
         return emitidas

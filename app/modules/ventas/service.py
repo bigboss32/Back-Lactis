@@ -24,6 +24,7 @@ from app.modules.ventas.models import (
 )
 from app.modules.ventas.repository import PagoRepository, VentaRepository
 from app.modules.ventas.schemas import CarteraCliente
+from app.utils.export import pesos
 
 CERO = Decimal("0")
 
@@ -293,7 +294,11 @@ class PagoService(BaseService[Pago]):
             raise BusinessError("La venta ya está totalmente pagada")
         valor = Decimal(data["valor"])
         if valor > venta.saldo:
-            raise BusinessError(f"El pago (${valor}) supera el saldo pendiente (${venta.saldo})")
+            # Las cifras van por pesos(): este mensaje lo lee el dueño en el celular
+            # y un Decimal crudo ("150000.00") no se lee como plata colombiana.
+            raise BusinessError(
+                f"El pago ({pesos(valor)}) supera el saldo pendiente ({pesos(venta.saldo)})"
+            )
 
         pago = super().crear(data)
         venta.pagado += valor
