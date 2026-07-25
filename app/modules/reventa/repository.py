@@ -1,7 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select
 
 from app.common.repository import BaseRepository
 from app.modules.reventa.models import (
@@ -184,6 +184,46 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
             select(func.coalesce(func.sum(VentaQueso.gasto_monto), 0)).where(*criterios)
         )
         return Decimal(total or 0)
+
+    def por_cliente(
+        self, cliente: str, desde: date | None = None, hasta: date | None = None
+    ) -> list[VentaQueso]:
+        """Ventas vigentes de un cliente, de la más antigua a la más reciente.
+
+        El nombre se compara NORMALIZADO (misma clave que agrupa el ranking), así
+        un "carlos ricaute " de datos viejos entra en el estado de cuenta de
+        "Carlos Ricaute" y su saldo no queda partido en dos clientes.
+
+        El nombre viaja como PARÁMETRO de la consulta (`literal`), nunca pegado al
+        texto del SQL: es texto libre que escribe el usuario.
+
+        Los espacios internos se colapsan en Python ANTES de bindear, igual que
+        hace _canonizar_nombre al guardar: lower(trim(...)) recorta las puntas
+        pero deja los espacios de la mitad, así que registrar
+        "Sebastián  Ruiz" (guardado como "Sebastián Ruiz") y consultarlo con ese
+        mismo texto daba 404.
+
+        Sin rango de fechas devuelve todo el histórico, que es lo que muestra la
+        deuda real del cliente. Los abonos ya vienen con lazy="selectin".
+        """
+        buscado = " ".join((cliente or "").split())
+        criterios = [
+            VentaQueso.empresa_id == self.empresa_id,
+            VentaQueso.deleted_at.is_(None),
+            VentaQueso.estado != "anulada",
+            clave_nombre(VentaQueso.cliente) == clave_nombre(literal(buscado)),
+        ]
+        if desde:
+            criterios.append(VentaQueso.fecha >= desde)
+        if hasta:
+            criterios.append(VentaQueso.fecha <= hasta)
+        return list(
+            self.db.scalars(
+                select(VentaQueso)
+                .where(*criterios)
+                .order_by(VentaQueso.fecha, VentaQueso.created_at)
+            ).all()
+        )
 
     def nombres_clientes(self) -> list[str]:
         """Nombres de clientes ya usados (para autocompletar), sin repetir.

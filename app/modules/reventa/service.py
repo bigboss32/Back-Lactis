@@ -1,6 +1,8 @@
 """Reventa de queso: compras a productores con merma y abonos, ventas a
 clientes y resumen de ganancia. Contabilidad separada del libro de la quesera.
 """
+import re
+import unicodedata
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -9,6 +11,7 @@ from typing import Any
 from app.common.service import BaseService, serialize_entity
 from app.core.exceptions import BusinessError, NotFoundError
 from app.core.pagination import PageParams
+from app.modules.empresas.repository import EmpresaRepository
 from app.modules.reventa.models import (
     DESTINO_MERMA,
     ESTADO_ANULADA,
@@ -29,11 +32,15 @@ from app.modules.reventa.repository import (
     VentaQuesoRepository,
 )
 from app.modules.reventa.schemas import (
+    EstadoCuentaCliente,
+    EstadoCuentaPago,
+    EstadoCuentaVenta,
     GananciaProducto,
     GananciaProductor,
     ResumenReventa,
     SugerenciasReventa,
 )
+from app.utils.export import build_estado_cuenta_pdf
 
 CERO = Decimal("0")
 DOS_DECIMALES = Decimal("0.01")
@@ -60,6 +67,24 @@ NOTAS_PRODUCTO = {
 # Cuando unos kilos no tienen costo porque la compra cayó fuera del período, no
 # se puede hablar de pérdida en pesos: se dice de dónde vienen.
 NOTA_SIN_COSTO = "se compró en un período anterior: aquí no lleva costo"
+
+# Nombre del producto listo para mostrarle al cliente en su estado de cuenta
+NOMBRE_PRODUCTO = {TIPO_VENTA_QUESO: "Queso", TIPO_VENTA_BORONA: "Borona"}
+
+
+def _nombre_archivo_cliente(cliente: str) -> str:
+    """Nombre de archivo seguro para el estado de cuenta.
+
+    El nombre del cliente es texto libre: si se colara una comilla o un salto de
+    línea en el header Content-Disposition sería una inyección de cabecera HTTP.
+    Se quitan los acentos (para que "Sebastián" siga siendo legible) y se borra
+    todo lo que no sea alfanumérico, guion o guion bajo.
+    """
+    sin_acentos = "".join(
+        c for c in unicodedata.normalize("NFKD", cliente) if not unicodedata.combining(c)
+    )
+    limpio = re.sub(r"[^A-Za-z0-9_-]", "", "_".join(sin_acentos.split()))
+    return f"estado_cuenta_{limpio or 'cliente'}.pdf"
 
 
 def _canonizar_nombre(nombre: str, ya_usados: list[str]) -> str:
@@ -620,3 +645,173 @@ class ReventaResumenService:
             productores=self.compras.nombres_productores(),
             clientes=self.ventas.nombres_clientes(),
         )
+
+    # -------------------------------------------------------- estado de cuenta
+    def estado_cuenta(
+        self, cliente: str, desde: date | None = None, hasta: date | None = None
+    ) -> EstadoCuentaCliente:
+        """Cómo va la facturación de un cliente: sus compras, sus pagos y el saldo.
+
+        CONFIDENCIALIDAD: esto se le entrega AL CLIENTE. De cada venta solo salen
+        fecha, producto, kilos, precio por kilo, total, abonado y saldo, y de cada
+        abono solo fecha y valor. Los gastos de venta (transporte), la "venta
+        libre", los costos de compra, los márgenes y las observaciones (tanto de
+        la venta como del abono) se quedan adentro: son los números de la quesera.
+
+        Sin rango de fechas cubre todo el histórico, que es el saldo real que debe.
+        """
+        ventas = self.ventas.por_cliente(cliente, desde, hasta)
+        if not ventas:
+            # Si tiene ventas pero fuera del rango pedido, decirlo tal cual: no es
+            # lo mismo que no ser cliente.
+            if (desde or hasta) and self.ventas.por_cliente(cliente):
+                raise NotFoundError(
+                    "El cliente no tiene ventas vigentes en el período consultado "
+                    "(las ventas anuladas no cuentan)"
+                )
+            # Se aclara lo de las anuladas porque el usuario puede estar viendo en
+            # pantalla una venta anulada de ese cliente y no entender el error.
+            raise NotFoundError(
+                "El cliente no tiene ventas registradas (las ventas anuladas no "
+                "cuentan para el estado de cuenta)"
+            )
+
+        filas: list[EstadoCuentaVenta] = []
+        pagos: list[EstadoCuentaPago] = []
+        total_kilos = CERO
+        total_facturado = CERO
+        total_abonado = CERO
+        for venta in ventas:
+            kilos = Decimal(venta.kilos)
+            valor = Decimal(venta.valor_total)
+            abonado = Decimal(venta.abonado)
+            total_kilos += kilos
+            total_facturado += valor
+            total_abonado += abonado
+            tipo = venta.tipo or TIPO_VENTA_QUESO
+            filas.append(
+                EstadoCuentaVenta(
+                    fecha=venta.fecha,
+                    tipo=tipo,
+                    producto=NOMBRE_PRODUCTO.get(tipo, tipo.capitalize()),
+                    kilos=kilos,
+                    precio_kilo=Decimal(venta.precio_kilo),
+                    valor_total=valor,
+                    abonado=abonado,
+                    saldo=valor - abonado,
+                    estado=venta.estado,
+                )
+            )
+            # Los pagos son TODOS los abonos de TODAS sus ventas, juntos: el
+            # cliente paga "a la cuenta", no le interesa a qué venta se aplicó.
+            # Del abono solo salen fecha y valor: sus `observaciones` son la nota
+            # interna de la quesera y NO se copian aquí (ver EstadoCuentaPago).
+            pagos += [
+                EstadoCuentaPago(fecha=abono.fecha, valor=Decimal(abono.valor))
+                for abono in venta.abonos
+            ]
+        pagos.sort(key=lambda pago: pago.fecha)
+
+        return EstadoCuentaCliente(
+            # El nombre que se muestra es el GUARDADO (el de su primera venta), no
+            # el que llegó por query: así sale bien escrito aunque se haya
+            # consultado en minúsculas.
+            cliente=ventas[0].cliente,
+            desde=desde,
+            hasta=hasta,
+            emitido=date.today(),
+            compras=len(filas),
+            total_kilos=total_kilos,
+            total_facturado=total_facturado,
+            total_abonado=total_abonado,
+            saldo=total_facturado - total_abonado,
+            ventas=filas,
+            pagos=pagos,
+        )
+
+    def _auditar_exportacion(self, datos: EstadoCuentaCliente) -> None:
+        """Deja registrada la SALIDA de datos: exportar la cartera histórica de un
+        cliente es entregar información afuera y tiene que quedar en la bitácora
+        (quién la sacó, de qué cliente y de qué rango).
+
+        Se escribe la fila a mano porque ReventaResumenService no extiende
+        BaseService (no tiene un repositorio único: cruza compras, ventas y
+        conversiones), así que no hereda el helper _audit.
+        """
+        from app.modules.auditoria.models import Auditoria
+
+        self.db.add(
+            Auditoria(
+                empresa_id=self.ctx.empresa_id,
+                usuario_id=self.ctx.user_id,
+                ip=self.ctx.ip,
+                modulo="reventa",
+                accion="exportar",
+                entidad="EstadoCuentaCliente",
+                entidad_id=None,
+                antes=None,
+                despues={
+                    "documento": "estado_cuenta_pdf",
+                    "cliente": datos.cliente,
+                    "desde": datos.desde.isoformat() if datos.desde else None,
+                    "hasta": datos.hasta.isoformat() if datos.hasta else None,
+                    "compras": datos.compras,
+                    "saldo": float(datos.saldo),
+                },
+            )
+        )
+
+    def estado_cuenta_pdf(
+        self, cliente: str, desde: date | None = None, hasta: date | None = None
+    ) -> tuple[bytes, str]:
+        """Estado de cuenta en PDF, listo para mandárselo al cliente."""
+        datos = self.estado_cuenta(cliente, desde, hasta)
+        self._auditar_exportacion(datos)
+        empresa = EmpresaRepository(self.db).get(self.ctx.empresa_id)
+        nombre_empresa = empresa.nombre if empresa else "Quesera"
+        nit = empresa.nit if empresa else None
+        ubicacion = (
+            (", ".join(p for p in [empresa.ciudad, empresa.departamento] if p) or None)
+            if empresa
+            else None
+        )
+        if datos.desde and datos.hasta:
+            periodo = (
+                f"{datos.desde.strftime('%d/%m/%Y')} al {datos.hasta.strftime('%d/%m/%Y')}"
+            )
+        elif datos.desde:
+            periodo = f"Desde el {datos.desde.strftime('%d/%m/%Y')}"
+        elif datos.hasta:
+            periodo = f"Hasta el {datos.hasta.strftime('%d/%m/%Y')}"
+        else:
+            periodo = "Todo el histórico"
+
+        pdf = build_estado_cuenta_pdf(
+            empresa_nombre=nombre_empresa,
+            empresa_nit=nit,
+            empresa_ubicacion=ubicacion,
+            cliente=datos.cliente,
+            emitido=datos.emitido.strftime("%d/%m/%Y"),
+            periodo=periodo,
+            compras=datos.compras,
+            # Se arman los campos uno por uno a propósito: lo que no se nombre
+            # aquí NO puede llegar al PDF que ve el cliente.
+            ventas=[
+                {
+                    "fecha": v.fecha,
+                    "producto": v.producto,
+                    "kilos": v.kilos,
+                    "precio_kilo": v.precio_kilo,
+                    "valor_total": v.valor_total,
+                    "abonado": v.abonado,
+                    "saldo": v.saldo,
+                }
+                for v in datos.ventas
+            ],
+            pagos=[{"fecha": p.fecha, "valor": p.valor} for p in datos.pagos],
+            total_kilos=datos.total_kilos,
+            total_facturado=datos.total_facturado,
+            total_abonado=datos.total_abonado,
+            saldo=datos.saldo,
+        )
+        return pdf, _nombre_archivo_cliente(datos.cliente)

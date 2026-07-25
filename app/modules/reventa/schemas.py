@@ -190,3 +190,53 @@ class SugerenciasReventa(BaseSchema):
 
     productores: list[str]
     clientes: list[str]
+
+
+# ------------------------------------------------------- estado de cuenta
+# CONFIDENCIALIDAD: el estado de cuenta SE LE ENTREGA AL CLIENTE (se le manda por
+# WhatsApp). Por eso estos esquemas NO llevan gasto_concepto, gasto_por_kilo,
+# gasto_monto, "venta libre", costos de compra, productores, márgenes ni las
+# observaciones de la venta o del abono: serían los números internos de la
+# quesera y le revelarían su ganancia al cliente.
+class EstadoCuentaVenta(BaseSchema):
+    """Una compra que le hicimos al cliente, con lo que lleva abonado."""
+
+    fecha: date
+    tipo: str  # 'queso' | 'borona'
+    producto: str  # 'Queso' | 'Borona' (listo para mostrar)
+    kilos: Decimal
+    precio_kilo: Decimal
+    valor_total: Decimal
+    abonado: Decimal
+    saldo: Decimal
+    estado: str  # pendiente | parcial | pagada
+
+
+class EstadoCuentaPago(BaseSchema):
+    """Un abono recibido del cliente (sin importar a qué venta se aplicó).
+
+    NO lleva `observaciones` A PROPÓSITO: la observación del abono es la nota
+    INTERNA que la quesera se escribe a sí misma ("le rebajé el flete", "a tal
+    productor le pagamos tanto el kilo"), y este esquema se le entrega al
+    cliente. Se filtraba el flete, el nombre del productor y el precio de compra.
+    Si algún día se quiere mostrarle al cliente una referencia del pago (número
+    de consignación, banco), va en un campo NUEVO pensado para eso y llenado
+    para él, nunca reutilizando el interno.
+    """
+
+    fecha: date
+    valor: Decimal
+
+
+class EstadoCuentaCliente(BaseSchema):
+    cliente: str
+    desde: date | None
+    hasta: date | None
+    emitido: date  # fecha de generación
+    compras: int  # cuántas ventas se le hicieron
+    total_kilos: Decimal
+    total_facturado: Decimal
+    total_abonado: Decimal
+    saldo: Decimal  # total_facturado - total_abonado
+    ventas: list[EstadoCuentaVenta] = []
+    pagos: list[EstadoCuentaPago] = []

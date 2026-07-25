@@ -70,6 +70,12 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Sin esto el navegador NO le deja leer Content-Disposition al JavaScript
+        # cuando la petición es cross-origin (Cloudflare -> Render), y todas las
+        # descargas se guardan con el nombre de respaldo: dos estados de cuenta
+        # distintos quedarían como "estado_cuenta.pdf" y "estado_cuenta (1).pdf",
+        # listos para mandarle a un cliente la cartera de otro.
+        expose_headers=["Content-Disposition"],
     )
     register_exception_handlers(app)
 

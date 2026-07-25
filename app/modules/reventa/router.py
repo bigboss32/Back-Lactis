@@ -1,7 +1,7 @@
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.core.context import RequestContext
 from app.core.deps import DbSession, require_permission
@@ -13,6 +13,7 @@ from app.modules.reventa.schemas import (
     CompraQuesoUpdate,
     ConversionCreate,
     ConversionRead,
+    EstadoCuentaCliente,
     ResumenReventa,
     SugerenciasReventa,
     VentaQuesoCreate,
@@ -37,6 +38,46 @@ def resumen(
     ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
 ) -> ResumenReventa:
     return ReventaResumenService(db, ctx).resumen(desde, hasta)
+
+
+@router.get(
+    "/estado-cuenta",
+    response_model=EstadoCuentaCliente,
+    summary="Estado de cuenta de un cliente (compras, pagos y saldo)",
+)
+def estado_cuenta(
+    db: DbSession,
+    # max_length igual al de la columna (String(150)): un nombre más largo no
+    # puede existir en la base, así que se rechaza antes de tocar la consulta.
+    cliente: str = Query(..., min_length=2, max_length=150),
+    desde: date | None = Query(None),
+    hasta: date | None = Query(None),
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+) -> EstadoCuentaCliente:
+    """Sin desde/hasta cubre todo el histórico del cliente: el saldo real que debe."""
+    return ReventaResumenService(db, ctx).estado_cuenta(cliente, desde, hasta)
+
+
+@router.get(
+    "/estado-cuenta/pdf",
+    summary="Descargar el estado de cuenta del cliente en PDF (para enviárselo)",
+)
+def estado_cuenta_pdf(
+    db: DbSession,
+    # Mismo tope que la columna String(150), igual que en la ruta del JSON.
+    cliente: str = Query(..., min_length=2, max_length=150),
+    desde: date | None = Query(None),
+    hasta: date | None = Query(None),
+    ctx: RequestContext = Depends(require_permission("reventa", "imprimir")),
+) -> Response:
+    contenido, filename = ReventaResumenService(db, ctx).estado_cuenta_pdf(
+        cliente, desde, hasta
+    )
+    return Response(
+        content=contenido,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get(
