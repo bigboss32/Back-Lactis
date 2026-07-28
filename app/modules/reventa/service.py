@@ -18,22 +18,28 @@ from app.modules.reventa.models import (
     ESTADO_PAGADA,
     ESTADO_PARCIAL,
     ESTADO_PENDIENTE,
+    TIPO_SALDO_COBRAR,
+    TIPO_SALDO_PAGAR,
     TIPO_VENTA_BORONA,
     TIPO_VENTA_QUESO,
     AbonoCompraQueso,
+    AbonoSaldoAnterior,
     AbonoVentaQueso,
     CompraQueso,
     ConversionBorona,
+    SaldoAnterior,
     VentaQueso,
 )
 from app.modules.reventa.repository import (
     CompraQuesoRepository,
     ConversionBoronaRepository,
+    SaldoAnteriorRepository,
     VentaQuesoRepository,
 )
 from app.modules.reventa.schemas import (
     EstadoCuentaCliente,
     EstadoCuentaPago,
+    EstadoCuentaSaldoAnterior,
     EstadoCuentaVenta,
     GananciaProducto,
     GananciaProductor,
@@ -105,6 +111,54 @@ def _canonizar_nombre(nombre: str, ya_usados: list[str]) -> str:
     return limpio
 
 
+def _clave_tercero(nombre: str) -> str:
+    """Misma clave con la que _canonizar_nombre decide que dos escrituras son el
+    mismo tercero: sin mayúsculas y sin espacios de sobra.
+
+    Se calcula EN PYTHON a propósito, igual que la canonización: el lower() de
+    SQLite no baja los acentos y el de Postgres sí, así que agrupar en SQL daría
+    resultados distintos según la base.
+    """
+    return " ".join((nombre or "").split()).lower()
+
+
+def _agrupar_pendientes(
+    filas: list[tuple[str, Decimal]],
+) -> dict[str, tuple[str, Decimal]]:
+    """Agrupa filas (nombre del tercero, saldo) por tercero:
+    clave normalizada -> (nombre como está escrito, saldo sumado).
+
+    Las variantes de escritura que la base pudo dejar en grupos distintos se
+    SUMAN en una sola entrada (el lower() de SQLite no baja acentos y el de
+    Postgres sí). Los saldos en cero se descartan: no son plata pendiente y no
+    merecen una fila propia en el detalle.
+    """
+    agrupados: dict[str, tuple[str, Decimal]] = {}
+    for nombre, saldo in filas:
+        if not saldo:
+            continue
+        clave = _clave_tercero(nombre)
+        primero, acumulado = agrupados.get(clave, (nombre, CERO))
+        agrupados[clave] = (primero, acumulado + saldo)
+    return agrupados
+
+
+def _unir_nombres(*listas: list[str]) -> list[str]:
+    """Une listas de nombres de terceros sin repetir el mismo escrito de otra
+    forma. Gana la escritura de la PRIMERA lista, que es la del sistema: es la
+    que agrupa el ranking y el estado de cuenta.
+
+    El resultado va ordenado por la misma clave con la que se comparan, para que
+    el autocompletado salga alfabético y no en dos bloques pegados.
+    """
+    unicos: dict[str, str] = {}
+    for lista in listas:
+        for nombre in lista:
+            if nombre:
+                unicos.setdefault(_clave_tercero(nombre), nombre)
+    return [unicos[clave] for clave in sorted(unicos)]
+
+
 def _estado_pago(valor_total: Decimal, abonado: Decimal) -> str:
     if abonado <= CERO:
         return ESTADO_PENDIENTE
@@ -126,10 +180,26 @@ class CompraQuesoService(BaseService[CompraQueso]):
         data["valor_total"] = (brutos * precio).quantize(DOS_DECIMALES)
         return data
 
+    def _nombres_para_canonizar(self) -> list[str]:
+        """Contra qué lista se canoniza el nombre del productor: los que ya usan
+        las compras MÁS los terceros del libro anterior de tipo 'pagar'.
+
+        Un productor que por ahora SOLO existe en el libro anterior ya tiene una
+        escritura guardada, y la primera compra que se le registre tiene que
+        adoptarla: si no, su deuda vieja y la nueva quedan en dos productores
+        distintos y el detalle muestra dos filas de la misma persona.
+
+        Primero van los de las compras: si el nombre está en los dos lados manda
+        la escritura del sistema, que es la que agrupa el detalle por productor.
+        """
+        return self.repo.nombres_productores() + SaldoAnteriorRepository(
+            self.db, self.ctx.empresa_id
+        ).nombres_terceros(TIPO_SALDO_PAGAR)
+
     def _canonizar(self, data: dict[str, Any]) -> dict[str, Any]:
         if data.get("productor"):
             data["productor"] = _canonizar_nombre(
-                data["productor"], self.repo.nombres_productores()
+                data["productor"], self._nombres_para_canonizar()
             )
         return data
 
@@ -145,7 +215,15 @@ class CompraQuesoService(BaseService[CompraQueso]):
         data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
         data = self._calcular(data, actual)
         # Se puede editar aunque tenga abonos (incluida una pagada): se recalcula el
-        # estado con los abonos ya registrados y el saldo queda al día.
+        # estado con los abonos ya registrados y el saldo queda al día. Lo que NO
+        # se permite es dejar el total por debajo de lo ya abonado: el saldo se
+        # vuelve NEGATIVO y ese negativo RESTA de la tarjeta "Por pagar a
+        # productores", que mostraría menos deuda de la que el negocio tiene.
+        if data["valor_total"] < Decimal(actual.abonado):
+            raise BusinessError(
+                f"El total no puede quedar por debajo de lo ya abonado "
+                f"({pesos(actual.abonado)}); elimine primero los abonos que sobren"
+            )
         data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, self._canonizar(data))
 
@@ -229,9 +307,27 @@ class VentaQuesoService(BaseService[VentaQueso]):
     repository_cls = VentaQuesoRepository
     modulo = "reventa"
 
+    def _nombres_para_canonizar(self) -> list[str]:
+        """Contra qué lista se canoniza el nombre del cliente: los que ya usan
+        las ventas MÁS los terceros del libro anterior de tipo 'cobrar'.
+
+        Un cliente que por ahora SOLO existe en el libro anterior es justo el
+        caso que motivó esa pantalla: su primera venta aquí tiene que adoptar la
+        escritura ya guardada, o su deuda vieja y la nueva quedan partidas en dos
+        clientes y el estado de cuenta no muestra todo lo que debe.
+
+        Primero van los de las ventas: si el nombre está en los dos lados manda
+        la escritura del sistema, que es la que agrupa el estado de cuenta.
+        """
+        return self.repo.nombres_clientes() + SaldoAnteriorRepository(
+            self.db, self.ctx.empresa_id
+        ).nombres_terceros(TIPO_SALDO_COBRAR)
+
     def _canonizar(self, data: dict[str, Any]) -> dict[str, Any]:
         if data.get("cliente"):
-            data["cliente"] = _canonizar_nombre(data["cliente"], self.repo.nombres_clientes())
+            data["cliente"] = _canonizar_nombre(
+                data["cliente"], self._nombres_para_canonizar()
+            )
         return data
 
     def crear(self, payload: Any) -> VentaQueso:
@@ -283,6 +379,16 @@ class VentaQuesoService(BaseService[VentaQueso]):
         )
         data["gasto_monto"] = (por_kilo * kilos).quantize(DOS_DECIMALES)
         # Se puede editar aunque tenga abonos (incluida una pagada): se recalcula el estado.
+        # OJO: aquí NO va el guardia de "el total no puede quedar por debajo de lo
+        # abonado" que sí tienen las compras y los saldos de la cuenta anterior.
+        # Rebajarle una venta ya pagada deja SALDO A FAVOR del cliente, que es un
+        # caso contemplado a propósito en el estado de cuenta (rótulo y signo
+        # propios) y cubierto por test_estado_cuenta_saldo_a_favor.
+        # Ese saldo negativo tampoco se le resta a la cartera: los agregados suman
+        # el saldo de cada fila ACOTADO EN CERO (ver saldo_pendiente en el
+        # repositorio), porque lo que un cliente pagó de más no reduce lo que le
+        # deben los OTROS. Por eso se puede permitir la edición sin que la tarjeta
+        # "Por cobrar a clientes" mienta.
         data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, self._canonizar(data))
 
@@ -359,6 +465,186 @@ class VentaQuesoService(BaseService[VentaQueso]):
         return self.repo.list_paginated(params, search=search, estado=estado, extra_criteria=extra)
 
 
+class SaldoAnteriorService(BaseService[SaldoAnterior]):
+    """Saldos a medio pagar traídos del sistema anterior.
+
+    Hermano de las compras y las ventas en todo lo que es plata (estado de
+    pago, abonos, anulación), pero SIN kilos: no toca inventario, no mueve la
+    ganancia y no aparece en el desglose por producto. Solo suma en lo que se
+    debe cobrar y en lo que se debe pagar.
+    """
+
+    repository_cls = SaldoAnteriorRepository
+    modulo = "reventa"
+
+    def _nombres_del_tipo(self, tipo: str) -> list[str]:
+        """Contra qué lista se canoniza el nombre del tercero: un saldo por
+        'cobrar' es de un CLIENTE y uno por 'pagar' es de un PRODUCTOR.
+
+        Primero van los nombres que ya usan las ventas o las compras, para
+        adoptar esa escritura: es la que agrupa el estado de cuenta y el detalle
+        por productor, y así "carlos ricaute" no queda como un tercero distinto
+        de "Carlos Ricaute" y su deuda no sale partida en dos.
+        """
+        if tipo == TIPO_SALDO_PAGAR:
+            del_modulo = CompraQuesoRepository(
+                self.db, self.ctx.empresa_id
+            ).nombres_productores()
+        else:
+            del_modulo = VentaQuesoRepository(self.db, self.ctx.empresa_id).nombres_clientes()
+        return del_modulo + self.repo.nombres_terceros(tipo)
+
+    def _canonizar(self, data: dict[str, Any], tipo: str) -> dict[str, Any]:
+        if data.get("tercero"):
+            data["tercero"] = _canonizar_nombre(data["tercero"], self._nombres_del_tipo(tipo))
+        return data
+
+    def crear(self, payload: Any) -> SaldoAnterior:
+        data = payload.model_dump(exclude_unset=True)
+        tipo = data.get("tipo") or TIPO_SALDO_COBRAR
+        data["tipo"] = tipo
+        valor_total = Decimal(data["valor_total"])
+        abonado = Decimal(data.get("abonado") or CERO)
+        if abonado > valor_total:
+            raise BusinessError(
+                f"Lo abonado ({pesos(abonado)}) supera el valor del saldo "
+                f"({pesos(valor_total)})"
+            )
+        data["abonado"] = abonado
+        data["estado"] = _estado_pago(valor_total, abonado)
+        saldo = super().crear(self._canonizar(data, tipo))
+        if abonado > CERO:
+            # Lo que ya venía abonado en el libro viejo queda también como abono,
+            # con la fecha del documento: si no, el historial sale vacío y el
+            # detalle de abonos no cuadra con la columna "abonado".
+            saldo.abonos.append(
+                AbonoSaldoAnterior(
+                    fecha=saldo.fecha,
+                    valor=abonado,
+                    observaciones="Abonado en el libro anterior",
+                    created_by=self.ctx.user_id,
+                )
+            )
+            self.db.flush()
+        return saldo
+
+    def actualizar(self, entity_id: uuid.UUID, payload: Any) -> SaldoAnterior:
+        actual = self.repo.get_or_fail(entity_id)
+        if actual.estado == ESTADO_ANULADA:
+            raise BusinessError("No se puede modificar un saldo anulado")
+        data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
+        # El TIPO no se cambia después de creado: un saldo por 'cobrar' es de un
+        # CLIENTE y uno por 'pagar' de un PRODUCTOR, y el nombre del tercero ya
+        # quedó canonizado contra la lista de ese lado. Cambiarlo por PUT dejaba a
+        # una clienta convertida en fila del detalle por productor y le sacaba su
+        # deuda del estado de cuenta. Re-canonizar el nombre no alcanza: habría
+        # que mover de lado también los abonos y el historial, así que se pide
+        # anular y cargar de nuevo, que además queda en la bitácora. Mandar el
+        # mismo tipo que ya tiene sí se acepta (el formulario envía todo el
+        # objeto).
+        tipo = data.get("tipo") or actual.tipo
+        if tipo != actual.tipo:
+            raise BusinessError(
+                f"No se puede cambiar el tipo de un saldo de la cuenta anterior "
+                f"(está cargado como '{actual.tipo}'): anúlelo y cargue uno nuevo "
+                f"del tipo correcto"
+            )
+        data["tipo"] = tipo
+        valor_total = Decimal(data.get("valor_total") or actual.valor_total)
+        data["valor_total"] = valor_total
+        # Se puede editar aunque tenga abonos: se recalcula el estado con lo ya
+        # abonado y el saldo queda al día (igual que en compras y ventas). Lo que
+        # NO se permite es dejar el total por debajo de lo ya abonado: el saldo se
+        # vuelve NEGATIVO y ese negativo RESTA de la cartera, así que la tarjeta
+        # mostraría menos plata sin cobrar de la que hay y el estado de cuenta le
+        # rebajaría la deuda al cliente.
+        if valor_total < Decimal(actual.abonado):
+            raise BusinessError(
+                f"El total no puede quedar por debajo de lo ya abonado "
+                f"({pesos(actual.abonado)}); elimine primero los abonos que sobren"
+            )
+        data["estado"] = _estado_pago(valor_total, actual.abonado)
+        return super().actualizar(entity_id, self._canonizar(data, tipo))
+
+    def validar_eliminar(self, obj: SaldoAnterior) -> None:
+        if obj.abonado > CERO:
+            raise BusinessError(
+                "No se puede eliminar un saldo con abonos; elimine primero los abonos o anúlelo"
+            )
+
+    def registrar_abono(self, saldo_id: uuid.UUID, payload: Any) -> SaldoAnterior:
+        saldo = self.repo.get_or_fail(saldo_id)
+        if saldo.estado == ESTADO_ANULADA:
+            raise BusinessError("El saldo está anulado")
+        valor = Decimal(payload.valor)
+        if valor > saldo.saldo:
+            # pesos() y no "{:,.0f}": el formato con coma es gringo y "$1,200,000"
+            # en Colombia se lee como un peso con veinte centavos.
+            raise BusinessError(
+                f"El abono ({pesos(valor)}) supera el saldo ({pesos(saldo.saldo)})"
+            )
+        # Se agrega A LA RELACIÓN, no con db.add(): la colección ya viene cargada
+        # (lazy="selectin") y un db.add() suelto la dejaría desactualizada, así
+        # que la respuesta saldría sin el abono que se acaba de registrar.
+        saldo.abonos.append(
+            AbonoSaldoAnterior(
+                fecha=payload.fecha, valor=valor,
+                observaciones=payload.observaciones, created_by=self.ctx.user_id,
+            )
+        )
+        saldo.abonado += valor
+        saldo.estado = _estado_pago(saldo.valor_total, saldo.abonado)
+        saldo.updated_by = self.ctx.user_id
+        self.db.flush()
+        self._audit("editar", saldo.id, None, {"abono": float(valor), "estado": saldo.estado})
+        return saldo
+
+    def eliminar_abono(self, saldo_id: uuid.UUID, abono_id: uuid.UUID) -> SaldoAnterior:
+        """Elimina un abono mal registrado: baja el abonado y recalcula el estado."""
+        saldo = self.repo.get_or_fail(saldo_id)
+        abono = next((a for a in saldo.abonos if a.id == abono_id), None)
+        if abono is None:
+            raise NotFoundError("Abono no encontrado")
+        valor = Decimal(abono.valor)
+        saldo.abonado = max(saldo.abonado - valor, CERO)
+        saldo.estado = _estado_pago(saldo.valor_total, saldo.abonado)
+        saldo.updated_by = self.ctx.user_id
+        # Se saca de la relación (el cascade delete-orphan borra la fila): así la
+        # colección en memoria queda igual que la base y la respuesta ya no lo trae.
+        saldo.abonos.remove(abono)
+        self.db.flush()
+        self._audit(
+            "editar", saldo.id, None,
+            {"abono_eliminado": float(valor), "estado": saldo.estado},
+        )
+        return saldo
+
+    def anular(self, saldo_id: uuid.UUID) -> SaldoAnterior:
+        saldo = self.repo.get_or_fail(saldo_id)
+        if saldo.abonado > CERO:
+            raise BusinessError("No se puede anular un saldo con abonos registrados")
+        antes = saldo.estado
+        saldo.estado = ESTADO_ANULADA
+        saldo.updated_by = self.ctx.user_id
+        self.db.flush()
+        self._audit("editar", saldo.id, {"estado": antes}, {"estado": ESTADO_ANULADA})
+        return saldo
+
+    def listar_filtrado(
+        self, params: PageParams, *, tipo: str | None, search: str | None,
+        estado: str | None, desde: date | None, hasta: date | None,
+    ) -> tuple[list[SaldoAnterior], int]:
+        extra = []
+        if desde:
+            extra.append(SaldoAnterior.fecha >= desde)
+        if hasta:
+            extra.append(SaldoAnterior.fecha <= hasta)
+        return self.repo.list_paginated(
+            params, search=search, estado=estado, filters={"tipo": tipo},
+            extra_criteria=extra,
+        )
+
+
 class ConversionBoronaService(BaseService[ConversionBorona]):
     """Pasar queso del inventario de reventa a borona."""
 
@@ -385,6 +671,7 @@ class ReventaResumenService:
         self.compras = CompraQuesoRepository(db, ctx.empresa_id)
         self.ventas = VentaQuesoRepository(db, ctx.empresa_id)
         self.conversiones = ConversionBoronaRepository(db, ctx.empresa_id)
+        self.saldos = SaldoAnteriorRepository(db, ctx.empresa_id)
 
     @staticmethod
     def queso_disponible(db, ctx) -> Decimal:
@@ -512,23 +799,100 @@ class ReventaResumenService:
         ]
 
     def _filas_por_productor(
-        self, desde: date, hasta: date, valor_realizado_kilo: Decimal
+        self,
+        desde: date,
+        hasta: date,
+        *,
+        valor_realizado_kilo: Decimal,
+        neto_periodo: Decimal,
+        kilos_comprados: Decimal,
     ) -> list[GananciaProductor]:
         """Ganancia ESTIMADA por productor (la UI debe decir que es estimación).
 
-        Reparte el valor neto que dejó cada kilo comprado en el período
-        (`valor_realizado_kilo`) entre los kilos que se le compraron a cada uno.
-        Quien vendió más barato dejó más margen. Como el divisor de ese valor son
-        los kilos COMPRADOS, la suma de las filas cuadra con la ganancia neta del
-        período: no hay forma de que el ranking contradiga la tarjeta de arriba.
+        Reparte el valor neto que dejaron las ventas del período (`neto_periodo`
+        = ventas − gastos) entre los kilos que se le compraron a cada uno. Quien
+        vendió más barato dejó más margen. Como el divisor son los kilos
+        COMPRADOS, la suma de las filas cuadra con la ganancia neta del período:
+        no hay forma de que el ranking contradiga la tarjeta de arriba.
+
+        El reparto NO quantiza el valor por kilo antes de multiplicarlo (se hace
+        kilos × neto / kilos_comprados y se redondea al final) y la diferencia de
+        centavos se le da a la ÚLTIMA fila, igual que `costo_residuo` en
+        _filas_por_producto: repartir con el `valor_realizado_kilo` ya redondeado
+        a dos decimales desviaba la columna unos pesos de la ganancia del período.
+
+        Las filas salen del conjunto HISTÓRICO de productores a los que se les
+        debe, no solo de los que tuvieron compras EN EL PERÍODO: a quien se le
+        compró en mayo y no se le ha pagado se le sigue debiendo en julio, y sin
+        su fila la columna `por_pagar` no sumaba la tarjeta "Por pagar a
+        productores", que sí es histórica. Esas filas van con kilos 0 y comprado
+        0 —no tuvieron compras en el período, así que no inventan plata en el
+        desglose— pero con TODA su deuda: la de las compras del sistema más la
+        del libro anterior.
+
+        La columna `por_pagar` INCLUYE el saldo del libro anterior de cada
+        productor, porque la tarjeta "Por pagar a productores" también lo
+        incluye: si solo lo sumara la tarjeta, la columna dejaría de cuadrar con
+        ella. Los kilos, el costo y la ganancia NO se tocan: los saldos
+        anteriores no son compras de este sistema.
+
+        SIN COMPRAS EN EL PERÍODO no hay a quién repartirle y las filas se quedan
+        con ganancia 0, que es lo correcto: a esa gente no se le compró nada este
+        período. La ganancia salió de queso comprado ANTES (eso lo dice la fila
+        "Salió de inventario anterior" del desglose por producto), así que
+        repartirla entre los deudores históricos sería inventarles un negocio que
+        no hicieron. La consecuencia hay que asumirla de frente: en ese caso la
+        columna "Ganancia estimada" NO suma la tarjeta del período, y la pantalla
+        tiene que decirlo en vez de prometer un cuadre que no existe.
+
+        Cómo lo detecta el frontend: `kilos_comprados == 0` en el mismo resumen.
+        NO se agrega un campo nuevo a propósito: sería un segundo nombre para un
+        hecho que ya viaja en la respuesta y que además es EL MISMO divisor del
+        reparto (`neto_periodo / kilos_comprados`), así que no puede desincronizarse
+        del cálculo. Un `bool` aparte sí podría quedar en desacuerdo con los kilos
+        el día que alguien toque una de las dos ramas.
         """
+        # Deuda HISTÓRICA por productor, agrupada en Python con el mismo criterio
+        # las dos: la de las compras de este sistema y la que quedó del libro
+        # anterior. Se van sacando con pop() a medida que se emiten las filas del
+        # período, así ningún saldo se reparte dos veces y lo que sobra al final
+        # es exactamente lo que falta por mostrar.
+        pendiente_sistema = _agrupar_pendientes(self.compras.pendiente_por_productor())
+        pendiente_libro = _agrupar_pendientes(
+            self.saldos.pendiente_por_tercero(TIPO_SALDO_PAGAR)
+        )
+
+        del_periodo = self.compras.por_productor(desde, hasta)
+        # Valor neto realizado que le corresponde a los kilos de cada productor.
+        # A la última fila se le suma la diferencia de redondeo para que el
+        # reparto sume EXACTAMENTE neto_periodo (los kilos de las filas suman
+        # kilos_comprados, así que sin compras en el período la lista va vacía).
+        realizados = [
+            (kilos * neto_periodo / kilos_comprados).quantize(DOS_DECIMALES)
+            if kilos_comprados
+            else CERO
+            for _, _, kilos, _, _ in del_periodo
+        ]
+        # El ajuste del residuo solo tiene sentido si de verdad hubo kilos que
+        # repartir: sin `kilos_comprados` el reparto es todo ceros y sumarle la
+        # diferencia le daría TODO el neto del período a la última fila, que es
+        # justo la plata que no le corresponde a nadie de la lista.
+        if realizados and kilos_comprados:
+            realizados[-1] += neto_periodo - sum(realizados, CERO)
+
         filas: list[GananciaProductor] = []
-        for productor, compras, kilos, total_comprado, por_pagar in self.compras.por_productor(
-            desde, hasta
+        # El 5.º campo de por_productor (su saldo por grupo de SQL) NO se usa
+        # aquí: la deuda sale de `pendiente_sistema`, que agrupa las variantes de
+        # escritura en Python y así ninguna queda por fuera ni contada dos veces.
+        for (productor, compras, kilos, total_comprado, _), realizado in zip(
+            del_periodo, realizados
         ):
             precio_promedio = (
                 (total_comprado / kilos).quantize(DOS_DECIMALES) if kilos else CERO
             )
+            clave = _clave_tercero(productor)
+            _, del_sistema = pendiente_sistema.pop(clave, ("", CERO))
+            _, del_libro = pendiente_libro.pop(clave, ("", CERO))
             filas.append(
                 GananciaProductor(
                     productor=productor,
@@ -536,12 +900,35 @@ class ReventaResumenService:
                     kilos=kilos,
                     total_comprado=total_comprado,
                     precio_promedio=precio_promedio,
-                    por_pagar=por_pagar,
+                    por_pagar=del_sistema + del_libro,
                     margen_por_kilo=valor_realizado_kilo - precio_promedio,
-                    ganancia_estimada=(
-                        (kilos * valor_realizado_kilo).quantize(DOS_DECIMALES)
-                        - total_comprado
-                    ),
+                    ganancia_estimada=realizado - total_comprado,
+                )
+            )
+        # Productores a los que se les debe pero que NO tuvieron compras en el
+        # período: de una compra vieja del sistema, del libro anterior, o de las
+        # dos. Es el caso normal de quien acaba de migrar, y sin estas filas la
+        # columna no sumaría lo que dice la tarjeta.
+        sobrantes = list(pendiente_sistema) + [
+            clave for clave in pendiente_libro if clave not in pendiente_sistema
+        ]
+        for clave in sobrantes:
+            nombre_sistema, del_sistema = pendiente_sistema.get(clave, ("", CERO))
+            nombre_libro, del_libro = pendiente_libro.get(clave, ("", CERO))
+            filas.append(
+                GananciaProductor(
+                    # Manda la escritura de las compras: es la que ve el usuario
+                    # en el resto del módulo.
+                    productor=nombre_sistema or nombre_libro,
+                    compras=0,
+                    kilos=CERO,
+                    total_comprado=CERO,
+                    precio_promedio=CERO,
+                    por_pagar=del_sistema + del_libro,
+                    # Sin compras en el período no hay precio con qué comparar:
+                    # poner el valor realizado sería inventarle un margen.
+                    margen_por_kilo=CERO,
+                    ganancia_estimada=CERO,
                 )
             )
         filas.sort(key=lambda fila: fila.ganancia_estimada, reverse=True)
@@ -568,6 +955,11 @@ class ReventaResumenService:
 
         kilos_hist_comprados, borona_de_compras, por_pagar = self.compras.acumulados()
         hist_queso_vendido, hist_borona_vendida, por_cobrar = self.ventas.acumulados()
+        # Cartera heredada del sistema anterior. Solo entra en lo que se debe
+        # cobrar y pagar: NO tiene kilos, no se compró ni se vendió aquí, así que
+        # no toca el inventario, ni los totales del período, ni la ganancia.
+        por_cobrar_libro = self.saldos.pendiente(TIPO_SALDO_COBRAR)
+        por_pagar_libro = self.saldos.pendiente(TIPO_SALDO_PAGAR)
         # `convertido` = todo lo que salió del queso disponible (borona + merma);
         # `a_borona` = solo lo que se pasó a borona (suma al inventario de borona).
         convertido = self.conversiones.total_convertido()
@@ -640,18 +1032,46 @@ class ReventaResumenService:
                 kilos_merma=kilos_merma,
                 kilos_pendientes=kilos_pendientes,
             ),
-            por_productor=self._filas_por_productor(desde, hasta, valor_realizado_kilo),
+            por_productor=self._filas_por_productor(
+                desde,
+                hasta,
+                valor_realizado_kilo=valor_realizado_kilo,
+                # El reparto se hace con el neto SIN redondear por kilo, así la
+                # columna suma exacto la ganancia del período.
+                neto_periodo=total_ventas - total_gastos,
+                kilos_comprados=kilos_comprados,
+            ),
             kilos_disponibles=kilos_hist_comprados - hist_queso_vendido - convertido,
             borona_disponible=borona_de_compras + a_borona - hist_borona_vendida,
-            por_pagar_productores=por_pagar,
-            por_cobrar_clientes=por_cobrar,
+            # Las dos tarjetas de cartera suman el sistema MÁS el libro anterior
+            # (es la plata que de verdad se debe hoy), y enseguida va ese pedazo
+            # por separado para poder mostrar el desglose.
+            por_pagar_productores=por_pagar + por_pagar_libro,
+            por_cobrar_clientes=por_cobrar + por_cobrar_libro,
+            por_cobrar_libro_anterior=por_cobrar_libro,
+            por_pagar_libro_anterior=por_pagar_libro,
         )
 
     def sugerencias(self) -> SugerenciasReventa:
-        """Nombres ya usados de productores y clientes, para autocompletar."""
+        """Nombres ya usados de productores y clientes, para autocompletar.
+
+        Incluye los terceros del LIBRO ANTERIOR, cada uno de SU lado: los de tipo
+        'cobrar' son clientes y los de tipo 'pagar' productores (los dos lados no
+        se mezclan). Un cliente que por ahora solo existe en el libro es justo el
+        caso que motivó esa pantalla: sin él, el autocompletado no lo ofrecía, se
+        volvía a teclear el nombre a mano y la deuda vieja quedaba separada de la
+        nueva. Las dos listas van sin repetir el mismo tercero escrito de otra
+        forma (ver _unir_nombres).
+        """
         return SugerenciasReventa(
-            productores=self.compras.nombres_productores(),
-            clientes=self.ventas.nombres_clientes(),
+            productores=_unir_nombres(
+                self.compras.nombres_productores(),
+                self.saldos.nombres_terceros(TIPO_SALDO_PAGAR),
+            ),
+            clientes=_unir_nombres(
+                self.ventas.nombres_clientes(),
+                self.saldos.nombres_terceros(TIPO_SALDO_COBRAR),
+            ),
         )
 
     # -------------------------------------------------------- estado de cuenta
@@ -667,21 +1087,36 @@ class ReventaResumenService:
         la venta como del abono) se quedan adentro: son los números de la quesera.
 
         Sin rango de fechas cubre todo el histórico, que es el saldo real que debe.
+
+        El `saldo` es TODO lo que el cliente debe: lo del sistema MÁS lo que
+        traía del libro anterior, porque esa es la única cifra que le importa a
+        él. `total_facturado` y `total_abonado` siguen siendo solo del sistema y
+        lo del libro va aparte, así que el documento cuadra:
+            (total_facturado - total_abonado) + libro_anterior_saldo = saldo
         """
         ventas = self.ventas.por_cliente(cliente, desde, hasta)
-        if not ventas:
-            # Si tiene ventas pero fuera del rango pedido, decirlo tal cual: no es
-            # lo mismo que no ser cliente.
-            if (desde or hasta) and self.ventas.por_cliente(cliente):
+        # Los saldos del libro anterior se filtran por el MISMO rango que las
+        # ventas, con la fecha original del documento viejo.
+        saldos = self.saldos.por_tercero(TIPO_SALDO_COBRAR, cliente, desde, hasta)
+        # Un cliente que solo arrastra deuda vieja SÍ tiene estado de cuenta: es
+        # justo el caso de quien viene del sistema anterior y todavía no le ha
+        # comprado nada aquí.
+        if not ventas and not saldos:
+            # Si tiene movimientos pero fuera del rango pedido, decirlo tal cual:
+            # no es lo mismo que no ser cliente.
+            if (desde or hasta) and (
+                self.ventas.por_cliente(cliente)
+                or self.saldos.por_tercero(TIPO_SALDO_COBRAR, cliente)
+            ):
                 raise NotFoundError(
-                    "El cliente no tiene ventas vigentes en el período consultado "
-                    "(las ventas anuladas no cuentan)"
+                    "El cliente no tiene ventas ni saldos de la cuenta anterior "
+                    "vigentes en el período consultado (lo anulado no cuenta)"
                 )
             # Se aclara lo de las anuladas porque el usuario puede estar viendo en
             # pantalla una venta anulada de ese cliente y no entender el error.
             raise NotFoundError(
-                "El cliente no tiene ventas registradas (las ventas anuladas no "
-                "cuentan para el estado de cuenta)"
+                "El cliente no tiene ventas registradas ni saldos de la cuenta "
+                "anterior (lo anulado no cuenta para el estado de cuenta)"
             )
 
         filas: list[EstadoCuentaVenta] = []
@@ -720,11 +1155,34 @@ class ReventaResumenService:
             ]
         pagos.sort(key=lambda pago: pago.fecha)
 
+        # Lo que traía debiendo del sistema anterior. Del saldo solo salen fecha,
+        # concepto, valor, abonado y saldo: sus `observaciones` son la nota
+        # interna de la quesera y no se copian (igual que en los abonos).
+        filas_libro: list[EstadoCuentaSaldoAnterior] = []
+        libro_total = CERO
+        libro_abonado = CERO
+        for saldo_anterior in saldos:
+            valor = Decimal(saldo_anterior.valor_total)
+            abonado = Decimal(saldo_anterior.abonado)
+            libro_total += valor
+            libro_abonado += abonado
+            filas_libro.append(
+                EstadoCuentaSaldoAnterior(
+                    fecha=saldo_anterior.fecha,
+                    concepto=saldo_anterior.concepto,
+                    valor_total=valor,
+                    abonado=abonado,
+                    saldo=valor - abonado,
+                )
+            )
+        libro_saldo = libro_total - libro_abonado
+
         return EstadoCuentaCliente(
-            # El nombre que se muestra es el GUARDADO (el de su primera venta), no
-            # el que llegó por query: así sale bien escrito aunque se haya
-            # consultado en minúsculas.
-            cliente=ventas[0].cliente,
+            # El nombre que se muestra es el GUARDADO (el de su primera venta, o
+            # el del saldo viejo si solo tiene deuda del libro), no el que llegó
+            # por query: así sale bien escrito aunque se haya consultado en
+            # minúsculas.
+            cliente=ventas[0].cliente if ventas else saldos[0].tercero,
             desde=desde,
             hasta=hasta,
             emitido=date.today(),
@@ -732,9 +1190,14 @@ class ReventaResumenService:
             total_kilos=total_kilos,
             total_facturado=total_facturado,
             total_abonado=total_abonado,
-            saldo=total_facturado - total_abonado,
+            # TODO lo que debe: lo del sistema más lo del libro anterior.
+            saldo=(total_facturado - total_abonado) + libro_saldo,
             ventas=filas,
             pagos=pagos,
+            saldos_anteriores=filas_libro,
+            libro_anterior_total=libro_total,
+            libro_anterior_abonado=libro_abonado,
+            libro_anterior_saldo=libro_saldo,
         )
 
     def _auditar_exportacion(self, datos: EstadoCuentaCliente) -> None:
@@ -817,9 +1280,24 @@ class ReventaResumenService:
                 for v in datos.ventas
             ],
             pagos=[{"fecha": p.fecha, "valor": p.valor} for p in datos.pagos],
+            # Los saldos del libro anterior, campo por campo: la observación del
+            # saldo es interna y no puede llegar al documento del cliente.
+            saldos_anteriores=[
+                {
+                    "fecha": s.fecha,
+                    "concepto": s.concepto,
+                    "valor_total": s.valor_total,
+                    "abonado": s.abonado,
+                    "saldo": s.saldo,
+                }
+                for s in datos.saldos_anteriores
+            ],
             total_kilos=datos.total_kilos,
             total_facturado=datos.total_facturado,
             total_abonado=datos.total_abonado,
+            libro_anterior_total=datos.libro_anterior_total,
+            libro_anterior_abonado=datos.libro_anterior_abonado,
+            libro_anterior_saldo=datos.libro_anterior_saldo,
             saldo=datos.saldo,
         )
         return pdf, _nombre_archivo_cliente(datos.cliente)

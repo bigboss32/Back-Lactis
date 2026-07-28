@@ -15,6 +15,9 @@ from app.modules.reventa.schemas import (
     ConversionRead,
     EstadoCuentaCliente,
     ResumenReventa,
+    SaldoAnteriorCreate,
+    SaldoAnteriorRead,
+    SaldoAnteriorUpdate,
     SugerenciasReventa,
     VentaQuesoCreate,
     VentaQuesoRead,
@@ -24,6 +27,7 @@ from app.modules.reventa.service import (
     CompraQuesoService,
     ConversionBoronaService,
     ReventaResumenService,
+    SaldoAnteriorService,
     VentaQuesoService,
 )
 
@@ -285,3 +289,107 @@ def anular_venta(
     ctx: RequestContext = Depends(require_permission("reventa", "administrar")),
 ) -> VentaQuesoRead:
     return VentaQuesoService(db, ctx).anular(entity_id)
+
+
+# ---------------------------------------------- saldos de la cuenta anterior
+@router.get(
+    "/saldos-anteriores",
+    response_model=Page[SaldoAnteriorRead],
+    summary="Listar saldos traídos del sistema anterior",
+)
+def listar_saldos_anteriores(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+    params: PageParams = Depends(page_params),
+    tipo: str | None = Query(None, description="'cobrar' (clientes) o 'pagar' (productores)"),
+    search: str | None = Query(None),
+    estado: str | None = Query(None),
+    desde: date | None = Query(None),
+    hasta: date | None = Query(None),
+) -> Page[SaldoAnteriorRead]:
+    items, total = SaldoAnteriorService(db, ctx).listar_filtrado(
+        params, tipo=tipo, search=search, estado=estado, desde=desde, hasta=hasta
+    )
+    return Page.build(items, total, params)
+
+
+@router.post(
+    "/saldos-anteriores",
+    response_model=SaldoAnteriorRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Cargar un saldo del sistema anterior (no toca inventario ni ganancia)",
+)
+def crear_saldo_anterior(
+    payload: SaldoAnteriorCreate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+) -> SaldoAnteriorRead:
+    return SaldoAnteriorService(db, ctx).crear(payload)
+
+
+@router.put(
+    "/saldos-anteriores/{entity_id}",
+    response_model=SaldoAnteriorRead,
+    summary="Editar saldo anterior (recalcula el estado con los abonos ya hechos)",
+)
+def editar_saldo_anterior(
+    entity_id: uuid.UUID,
+    payload: SaldoAnteriorUpdate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "editar")),
+) -> SaldoAnteriorRead:
+    return SaldoAnteriorService(db, ctx).actualizar(entity_id, payload)
+
+
+@router.delete(
+    "/saldos-anteriores/{entity_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Eliminar saldo anterior",
+)
+def eliminar_saldo_anterior(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "eliminar")),
+) -> None:
+    SaldoAnteriorService(db, ctx).eliminar(entity_id)
+
+
+@router.post(
+    "/saldos-anteriores/{entity_id}/abonos",
+    response_model=SaldoAnteriorRead,
+    summary="Registrar un abono sobre un saldo del sistema anterior",
+)
+def abonar_saldo_anterior(
+    entity_id: uuid.UUID,
+    payload: AbonoCreate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+) -> SaldoAnteriorRead:
+    return SaldoAnteriorService(db, ctx).registrar_abono(entity_id, payload)
+
+
+@router.delete(
+    "/saldos-anteriores/{entity_id}/abonos/{abono_id}",
+    response_model=SaldoAnteriorRead,
+    summary="Eliminar un abono mal registrado del saldo anterior",
+)
+def eliminar_abono_saldo_anterior(
+    entity_id: uuid.UUID,
+    abono_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+) -> SaldoAnteriorRead:
+    return SaldoAnteriorService(db, ctx).eliminar_abono(entity_id, abono_id)
+
+
+@router.post(
+    "/saldos-anteriores/{entity_id}/anular",
+    response_model=SaldoAnteriorRead,
+    summary="Anular saldo anterior",
+)
+def anular_saldo_anterior(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "administrar")),
+) -> SaldoAnteriorRead:
+    return SaldoAnteriorService(db, ctx).anular(entity_id)

@@ -141,3 +141,61 @@ class AbonoVentaQueso(AuditMixin, Base):
     observaciones: Mapped[str | None] = mapped_column(String(300))
 
     venta: Mapped[VentaQueso] = relationship(back_populates="abonos")
+
+
+# Saldos que vienen del sistema anterior ("el libro viejo")
+TIPO_SALDO_COBRAR = "cobrar"  # un cliente le quedó debiendo una venta vieja
+TIPO_SALDO_PAGAR = "pagar"  # él le quedó debiendo una compra vieja a un productor
+
+
+class SaldoAnterior(TenantMixin, AuditMixin, Base):
+    """Cuenta a medio pagar heredada del sistema que usaba antes el cliente.
+
+    Es un concepto APARTE de las compras y las ventas a propósito. Suma en
+    "por cobrar a clientes" o en "por pagar a productores", acepta abonos y
+    sale en el estado de cuenta, pero NO toca el inventario, NI los kilos, NI
+    la ganancia: aquí nunca se compró ni se vendió ese queso, así que cargarlo
+    como compra o venta obligaría a inventar kilos y rompería la
+    reconciliación del desglose de la ganancia con la cifra del período.
+
+    El estado (columna del AuditMixin) usa las mismas constantes de pago que
+    las compras y las ventas: pendiente / parcial / pagada / anulada.
+    """
+
+    __tablename__ = "saldos_anteriores"
+
+    tipo: Mapped[str] = mapped_column(
+        String(20), default=TIPO_SALDO_COBRAR, server_default=TIPO_SALDO_COBRAR, index=True
+    )
+    # Nombre del cliente (si el tipo es 'cobrar') o del productor (si es 'pagar')
+    tercero: Mapped[str] = mapped_column(String(150), nullable=False)
+    # Fecha ORIGINAL del documento en el libro viejo, no la de la carga: es la
+    # que el tercero reconoce cuando se le manda el estado de cuenta.
+    fecha: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    # De qué era la deuda: "Venta 120 kg del 3 de mayo", "Factura 045"
+    concepto: Mapped[str] = mapped_column(String(200), nullable=False)
+    valor_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    abonado: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
+    observaciones: Mapped[str | None] = mapped_column(String(500))
+
+    abonos: Mapped[list["AbonoSaldoAnterior"]] = relationship(
+        back_populates="saldo", lazy="selectin", cascade="all, delete-orphan",
+        order_by="AbonoSaldoAnterior.fecha",
+    )
+
+    @property
+    def saldo(self) -> Decimal:
+        return self.valor_total - self.abonado
+
+
+class AbonoSaldoAnterior(AuditMixin, Base):
+    __tablename__ = "abonos_saldo_anterior"
+
+    saldo_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("saldos_anteriores.id", ondelete="CASCADE"), index=True
+    )
+    fecha: Mapped[date] = mapped_column(Date, nullable=False)
+    valor: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    observaciones: Mapped[str | None] = mapped_column(String(300))
+
+    saldo: Mapped[SaldoAnterior] = relationship(back_populates="abonos")

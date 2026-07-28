@@ -94,6 +94,48 @@ class VentaQuesoRead(TenantRead):
     abonos: list[AbonoRead] = []
 
 
+# ------------------------------------------- saldos de la cuenta anterior
+class SaldoAnteriorCreate(BaseSchema):
+    """Una cuenta a medio pagar traída del sistema anterior.
+
+    `abonado` es lo que el tercero ya había pagado en el libro viejo: casi
+    ninguna cuenta llega en ceros. Se guarda además como el primer abono del
+    historial para que el detalle cuadre con el total abonado.
+    """
+
+    tipo: Literal["cobrar", "pagar"]
+    tercero: str = Field(min_length=2, max_length=150)
+    fecha: date
+    concepto: str = Field(min_length=2, max_length=200)
+    valor_total: Decimal = Field(gt=0)
+    abonado: Decimal = Field(default=Decimal("0"), ge=0)
+    observaciones: str | None = Field(default=None, max_length=500)
+
+
+class SaldoAnteriorUpdate(BaseSchema):
+    """`abonado` NO se edita aquí: solo se mueve registrando o eliminando abonos,
+    igual que en las compras y en las ventas."""
+
+    tipo: Literal["cobrar", "pagar"] | None = None
+    tercero: str | None = Field(default=None, min_length=2, max_length=150)
+    fecha: date | None = None
+    concepto: str | None = Field(default=None, min_length=2, max_length=200)
+    valor_total: Decimal | None = Field(default=None, gt=0)
+    observaciones: str | None = Field(default=None, max_length=500)
+
+
+class SaldoAnteriorRead(TenantRead):
+    tipo: str
+    tercero: str
+    fecha: date
+    concepto: str
+    valor_total: Decimal
+    abonado: Decimal
+    saldo: Decimal
+    observaciones: str | None
+    abonos: list[AbonoRead] = []
+
+
 # ------------------------------------------------------------ conversiones
 class ConversionCreate(BaseSchema):
     fecha: date
@@ -181,8 +223,14 @@ class ResumenReventa(BaseSchema):
     # Acumulados (histórico, sin filtro de fechas)
     kilos_disponibles: Decimal  # queso: comprados netos - vendidos - ajustados
     borona_disponible: Decimal  # de compras + conversiones - vendida
+    # Las dos cifras de cartera INCLUYEN los saldos de la cuenta anterior: es lo
+    # que de verdad se debe cobrar y pagar hoy. Los dos campos de abajo son ese
+    # pedazo por separado, para poder mostrar el desglose y que se vea de dónde
+    # sale la suma. Ojo: los saldos anteriores NO tocan kilos ni ganancia.
     por_pagar_productores: Decimal
     por_cobrar_clientes: Decimal
+    por_cobrar_libro_anterior: Decimal = Decimal("0")
+    por_pagar_libro_anterior: Decimal = Decimal("0")
 
 
 class SugerenciasReventa(BaseSchema):
@@ -228,15 +276,40 @@ class EstadoCuentaPago(BaseSchema):
     valor: Decimal
 
 
+class EstadoCuentaSaldoAnterior(BaseSchema):
+    """Una cuenta a medio pagar que el cliente traía del sistema anterior.
+
+    Solo lleva lo que el cliente reconoce de su propia deuda: la fecha del
+    documento viejo, de qué era, cuánto valía, cuánto abonó y cuánto queda. Las
+    `observaciones` del saldo NO salen: son la nota interna de la quesera, igual
+    que en EstadoCuentaPago.
+    """
+
+    fecha: date
+    concepto: str
+    valor_total: Decimal
+    abonado: Decimal
+    saldo: Decimal
+
+
 class EstadoCuentaCliente(BaseSchema):
     cliente: str
     desde: date | None
     hasta: date | None
     emitido: date  # fecha de generación
-    compras: int  # cuántas ventas se le hicieron
+    compras: int  # cuántas ventas se le hicieron (las del sistema, no las del libro)
     total_kilos: Decimal
+    # `total_facturado` y `total_abonado` son SOLO del sistema; lo que venía del
+    # libro anterior va aparte en los tres campos libro_anterior_*.
     total_facturado: Decimal
     total_abonado: Decimal
-    saldo: Decimal  # total_facturado - total_abonado
+    # TODO lo que el cliente debe hoy, que es la única cifra que le importa:
+    #   (total_facturado - total_abonado) + libro_anterior_saldo = saldo
+    saldo: Decimal
     ventas: list[EstadoCuentaVenta] = []
     pagos: list[EstadoCuentaPago] = []
+    # Lo que traía debiendo del sistema anterior (vacío para casi todos)
+    saldos_anteriores: list[EstadoCuentaSaldoAnterior] = []
+    libro_anterior_total: Decimal = Decimal("0")
+    libro_anterior_abonado: Decimal = Decimal("0")
+    libro_anterior_saldo: Decimal = Decimal("0")
