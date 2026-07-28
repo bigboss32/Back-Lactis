@@ -27,6 +27,14 @@ from app.modules.usuarios.models import Permiso, Rol, Usuario
 
 logger = get_logger("seed")
 
+# Roles de un solo módulo: se declaran aquí y no en ROLES_SISTEMA (app/core/
+# permissions.py) porque no forman parte del esquema RBAC general del ERP; son
+# roles para clientes que contratan un módulo suelto. Se siembran igual que los
+# de sistema (es_sistema=True, para que no se puedan renombrar ni borrar).
+ROLES_POR_MODULO: tuple[str, ...] = ("Reventa",)
+
+TODOS_LOS_ROLES: tuple[str, ...] = (*ROLES_SISTEMA, *ROLES_POR_MODULO)
+
 # Permisos por rol de sistema: {rol: {(modulo, accion), ...}} — el superadmin no
 # necesita filas porque el chequeo lo aprueba de forma implícita.
 CONSULTA_TODOS = {(m, "consultar") for m in MODULOS}
@@ -72,6 +80,14 @@ ROLES_PERMISOS: dict[str, set[tuple[str, str]]] = {
     | {("caja", "crear"), ("caja", "consultar"), ("inventario", "consultar"),
        ("notificaciones", "consultar")},
     "Consulta": CONSULTA_TODOS,
+    # Para el cliente que solo compra y revende queso y no usa el resto del ERP.
+    # Lleva TODAS las acciones de 'reventa', incluidas 'eliminar' y 'administrar'
+    # (la que anula compras y ventas): es el dueño de su propio negocio, nadie más
+    # va a corregirle los registros y el daño posible no sale de su módulo y su
+    # empresa. Fuera de 'reventa' solo ve sus notificaciones, como los demás roles
+    # operativos; nada de usuarios, roles, empresas, auditoría, contabilidad ni
+    # reportes (de este último cuelga la pantalla de Estadísticas del ERP).
+    "Reventa": {("reventa", a) for a in ACCIONES} | {("notificaciones", "consultar")},
 }
 
 # Datos reales tomados de la hoja 'LITROS Y TRANSPORTE' de la 1ª quincena de junio
@@ -134,16 +150,84 @@ def seed_permisos(db: Session) -> dict[tuple[str, str], Permiso]:
 
 
 def seed_roles(db: Session, permisos: dict[tuple[str, str], Permiso]) -> dict[str, Rol]:
-    roles = {r.nombre: r for r in db.scalars(select(Rol)).all()}
-    for nombre in ROLES_SISTEMA:
-        if nombre not in roles:
+    """Crea los roles de sistema que falten y les sincroniza sus permisos.
+
+    NUNCA toca un rol que no sea de sistema, aunque se llame igual que uno de la
+    lista de siembra. Los roles son GLOBALES (Rol no tiene empresa_id) y
+    Rol.nombre es UNIQUE en toda la base, así que un nombre que aquí se siembra
+    puede chocar con uno que un administrador de cualquier empresa ya creó a
+    mano —"Reventa" es el ejemplo evidente—. Sincronizarle los permisos de la
+    lista sería una ESCALADA DE PRIVILEGIOS silenciosa: un rol de solo lectura
+    pasaría, en un despliegue cualquiera, a poder anular y eliminar, y con él
+    todos los usuarios que ya lo tuvieran asignado. Cuando pasa, el rol del
+    cliente se deja EXACTAMENTE como está y se avisa por el log.
+
+    Devuelve {nombre: rol} con los roles utilizables (existentes y vivos). Puede
+    faltar algún nombre si el rol está borrado lógicamente, así que quien lo
+    consuma debe usar .get() y no indexar a ciegas.
+    """
+    # Se cargan TODOS los roles, incluidos los borrados lógicamente: el borrado
+    # de roles es SOFT (BaseRepository.soft_delete pone deleted_at y estado
+    # 'inactivo'; la fila se queda) y el UNIQUE de roles.nombre es de columna, no
+    # filtra por deleted_at. O sea: una fila borrada SIGUE ocupando el nombre y
+    # crear otro rol con él reventaría el INSERT. Por eso hay que verlas aquí,
+    # aunque a efectos de sincronizar permisos no cuenten como existentes.
+    existentes: dict[str, Rol] = {r.nombre: r for r in db.scalars(select(Rol)).all()}
+
+    roles: dict[str, Rol] = {}
+    # Solo los roles de sistema vivos reciben la sincronización de permisos.
+    a_sincronizar: list[str] = []
+
+    for nombre in TODOS_LOS_ROLES:
+        rol = existentes.get(nombre)
+
+        if rol is None:
             rol = Rol(nombre=nombre, descripcion=f"Rol de sistema: {nombre}", es_sistema=True)
             db.add(rol)
             roles[nombre] = rol
+            a_sincronizar.append(nombre)
+            continue
+
+        if not rol.es_sistema:
+            # Se devuelve igual (existe y está vivo: quien pregunte por ese
+            # nombre debe encontrarlo), pero no se le toca ni un permiso.
+            roles[nombre] = rol
+            logger.warning(
+                "SIEMBRA OMITIDA — rol '%s': ya existe un rol de USUARIO con ese nombre "
+                "(id=%s, es_sistema=False, %d permiso(s)). NO se sembró el rol de sistema y NO "
+                "se le añadió ningún permiso al rol existente, para no ampliar en silencio lo "
+                "que pueden hacer los usuarios que ya lo tienen asignado. Si hace falta el rol "
+                "de sistema, renombre primero el rol de usuario y vuelva a ejecutar la siembra.",
+                nombre,
+                rol.id,
+                len(rol.permisos),
+            )
+            continue
+
+        if rol.deleted_at is not None:
+            # No se recrea: chocaría con el UNIQUE del nombre. No se resucita
+            # tampoco: borrarlo fue una decisión de alguien, no de la siembra.
+            logger.warning(
+                "SIEMBRA OMITIDA — rol de sistema '%s': está borrado lógicamente (id=%s, "
+                "deleted_at=%s). No se le sincronizan permisos ni se vuelve a crear, porque el "
+                "UNIQUE de roles.nombre no distingue filas borradas. Restáurelo a mano "
+                "(deleted_at=NULL) si lo necesita.",
+                nombre,
+                rol.id,
+                rol.deleted_at,
+            )
+            continue
+
+        roles[nombre] = rol
+        a_sincronizar.append(nombre)
+
     db.flush()
     # Sincronización por unión: si aparecen módulos nuevos en el catálogo,
     # los roles de sistema existentes reciben sus permisos en el siguiente seed
-    for nombre, claves in ROLES_PERMISOS.items():
+    for nombre in a_sincronizar:
+        claves = ROLES_PERMISOS.get(nombre)
+        if not claves:
+            continue  # el superadmin no lleva filas: su chequeo es implícito
         rol = roles[nombre]
         actuales = {(p.modulo, p.accion) for p in rol.permisos}
         faltantes = [permisos[clave] for clave in claves if clave in permisos and clave not in actuales]
@@ -165,7 +249,17 @@ def seed_superadmin(db: Session, roles: dict[str, Rol]) -> Usuario:
             username=settings.FIRST_ADMIN_USERNAME,
             hashed_password=hash_password(settings.FIRST_ADMIN_PASSWORD),
         )
-        admin.roles = [roles[ROL_SUPERADMIN]]
+        # .get(): seed_roles puede no devolver un nombre si el rol está borrado
+        # lógicamente. Mejor un superadmin sin rol y un aviso en el log que una
+        # siembra que revienta con KeyError a mitad de un despliegue.
+        rol_superadmin = roles.get(ROL_SUPERADMIN)
+        if rol_superadmin is None:
+            logger.warning(
+                "El rol '%s' no está disponible: el superadmin se crea SIN rol y hay que "
+                "asignárselo a mano.",
+                ROL_SUPERADMIN,
+            )
+        admin.roles = [rol_superadmin] if rol_superadmin is not None else []
         db.add(admin)
         db.flush()
         logger.info("Superadmin creado: %s", admin.username)
@@ -231,7 +325,14 @@ def seed_empresa_demo(db: Session, roles: dict[str, Rol]) -> None:
         hashed_password=hash_password(settings.FIRST_ADMIN_PASSWORD),
         empresa_id=empresa.id,
     )
-    admin_empresa.roles = [roles["Administrador Empresa"]]
+    # .get() por lo mismo que en seed_superadmin: el nombre puede faltar.
+    rol_admin_empresa = roles.get("Administrador Empresa")
+    if rol_admin_empresa is None:
+        logger.warning(
+            "El rol 'Administrador Empresa' no está disponible: el usuario de la empresa demo "
+            "se crea SIN rol."
+        )
+    admin_empresa.roles = [rol_admin_empresa] if rol_admin_empresa is not None else []
     db.add(admin_empresa)
     db.flush()
     logger.info("Empresa demo creada: %s", empresa.nombre)
