@@ -108,6 +108,14 @@ class LoteProduccionRead(BaseSchema):
 
     fecha: date
     tipo_queso: str
+    # 'produccion' = se hizo aquí, con su leche detrás.
+    # 'existencia' = ya estaba en bodega y se cargó a mano; su costo es el que se
+    # cargó y no tiene leche. Es el caso normal al empezar a usar el sistema.
+    origen: str
+    referencia: str | None = None
+    # Existencia cargada SIN costo: sus kilos salen como si hubieran costado cero,
+    # así que hacen ver la utilidad mejor de lo que es.
+    sin_costo: bool = False
     litros_usados: Decimal
     kilos_producidos: Decimal
     merma: Decimal
@@ -117,14 +125,20 @@ class LoteProduccionRead(BaseSchema):
     costo_transporte: Decimal
     costo_total: Decimal
     costo_kilo: Decimal
-    # A dónde fueron los kilos (los dos suman kilos_producidos)
+    # A dónde fueron los kilos (los tres suman kilos_producidos)
     kilos_vendidos: Decimal
+    # Ajustes de inventario hacia abajo: se dañó o se corrigió un sobrante. Sí se
+    # le resta a la utilidad, porque es plata que salió sin ingreso.
+    kilos_de_baja: Decimal = Decimal("0")
     kilos_en_bodega: Decimal
     # Plata
     ingresos: Decimal
     costo_vendido: Decimal
+    costo_de_baja: Decimal = Decimal("0")
     costo_en_bodega: Decimal
-    utilidad: Decimal  # ingresos - costo_vendido (lo de bodega NO se resta)
+    # ingresos - costo_vendido - costo_de_baja. Lo de bodega NO se resta: ese queso
+    # está ahí, no se ha perdido.
+    utilidad: Decimal
     precio_venta_kilo: Decimal
     vendido_completo: bool
     # Litros que se usaron sin leche registrada que los respalde
@@ -151,8 +165,10 @@ class LotesProduccionPanel(BaseSchema):
     total_costo_en_bodega: Decimal
     mejor: date | None = None
     peor: date | None = None
-    # Queso vendido que no salió de ninguna producción registrada
+    # Queso vendido (o dado de baja) que no salió de ningún lote registrado
     kilos_sin_lote: Decimal
+    # Existencia cargada a mano sin costo: hace ver la utilidad mejor de lo que es
+    kilos_existencia_sin_costo: Decimal = Decimal("0")
     ingreso_sin_lote: Decimal
     # Litros usados en producciones sin leche registrada que los respalde
     litros_sin_recepcion: Decimal

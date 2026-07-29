@@ -77,6 +77,48 @@ class ProduccionEvento:
 
 
 @dataclass(frozen=True)
+class ExistenciaEvento:
+    """Queso que ya estaba en bodega y se cargó a mano, sin pasar por producción.
+
+    Es el caso normal al empezar a usar el sistema: ya había queso hecho. Entra al
+    inventario como una entrada de inventario suelta (no la crea una producción), y
+    trae su propio `costo_unitario`, así que se puede costear de verdad.
+
+    Se trata como un lote más, con dos diferencias: no tiene leche detrás (no se
+    sabe de qué leche salió, ni hace falta) y su costo es el que se cargó a mano.
+    Si se cargó sin costo, el lote queda en cero y eso se avisa aparte: sus kilos
+    harían ver la utilidad mejor de lo que es.
+    """
+
+    fecha: date
+    orden: int
+    tipo_queso_id: uuid.UUID
+    tipo_queso: str
+    kilos: Decimal
+    costo_unitario: Decimal
+    referencia: str | None
+
+
+@dataclass(frozen=True)
+class BajaEvento:
+    """Queso que sale de la bodega sin venderse: un ajuste de inventario hacia
+    abajo (se daño, se perdió, se corrigió un sobrante).
+
+    Hay que procesarlo o "en bodega" quedaría inflado: el stock del inventario sí
+    baja con el ajuste, y si el reparto no lo baja también, las dos pantallas
+    dirían cosas distintas sobre los mismos kilos.
+
+    Se le carga al lote más viejo, como todo lo demás, y su costo se pierde: es
+    plata que salió del lote sin ingreso.
+    """
+
+    fecha: date
+    orden: int
+    tipo_queso_id: uuid.UUID
+    kilos: Decimal
+
+
+@dataclass(frozen=True)
 class VentaEvento:
     """Un renglón de venta de queso terminado."""
 
@@ -138,9 +180,19 @@ class VentaDelLote:
         return self.ingreso - self.costo
 
 
+ORIGEN_PRODUCCION = "produccion"
+ORIGEN_EXISTENCIA = "existencia"
+
+
 @dataclass
 class LoteProduccion:
-    """Una producción, con lo que costó y lo que dejó."""
+    """Un lote de queso, con lo que costó y lo que dejó.
+
+    `origen` dice de dónde salió:
+    - 'produccion': se hizo aquí, y su costo es la leche que usó más el transporte.
+    - 'existencia': ya estaba en bodega y se cargó a mano; su costo es el que se
+      cargó, y no tiene leche detrás.
+    """
 
     fecha: date
     tipo_queso_id: uuid.UUID
@@ -148,24 +200,47 @@ class LoteProduccion:
     litros_usados: Decimal
     kilos_producidos: Decimal
     merma: Decimal
+    origen: str = ORIGEN_PRODUCCION
+    # Solo en los de origen 'existencia': cómo se identificó esa carga
+    referencia: str | None = None
     detalle_leche: list[LecheDelLote] = field(default_factory=list)
     detalle_ventas: list[VentaDelLote] = field(default_factory=list)
-    # A dónde fueron los kilos (los dos suman kilos_producidos)
+    # A dónde fueron los kilos (los tres suman kilos_producidos)
     kilos_vendidos: Decimal = CERO
+    kilos_de_baja: Decimal = CERO
     kilos_en_bodega: Decimal = CERO
     # Plata
     costo_leche: Decimal = CERO
     costo_transporte: Decimal = CERO
+    # Lo que se cargó a mano (solo en los de origen 'existencia')
+    costo_existencia: Decimal = CERO
     ingresos: Decimal = CERO
     costo_vendido: Decimal = CERO  # costo de los kilos que se vendieron
+    costo_de_baja: Decimal = CERO  # costo de los kilos que se dieron de baja
     costo_en_bodega: Decimal = CERO
     # Litros que no encontraron leche registrada de dónde salir
     litros_sin_recepcion: Decimal = CERO
 
     @property
     def costo_total(self) -> Decimal:
-        """Lo que costó el lote: la leche que usó más su transporte."""
-        return self.costo_leche + self.costo_transporte
+        """Lo que costó el lote.
+
+        En los de producción es la leche más su transporte; en los de existencia es
+        lo que se cargó a mano. Nunca las dos cosas a la vez, pero se suman las tres
+        para que el resto del cálculo (costo por kilo, cuadre, utilidad) sea el
+        mismo sin importar el origen.
+        """
+        return self.costo_leche + self.costo_transporte + self.costo_existencia
+
+    @property
+    def sin_costo(self) -> bool:
+        """Existencia cargada sin costo: sus kilos hacen ver la utilidad mejor de
+        lo que es, porque salen como si hubieran costado cero."""
+        return (
+            self.origen == ORIGEN_EXISTENCIA
+            and self.kilos_producidos > CERO
+            and self.costo_total <= CERO
+        )
 
     @property
     def costo_kilo(self) -> Decimal:
@@ -183,13 +258,16 @@ class LoteProduccion:
 
     @property
     def utilidad(self) -> Decimal:
-        """Utilidad de lo que YA se vendió del lote.
+        """Utilidad de lo que YA salió del lote.
 
         NO le resta el costo de lo que sigue en bodega: ese queso no se ha
         vendido, no es una pérdida, y restárselo es justo el error que hace que el
         estado de resultados del mes salga negativo. Lo de bodega va aparte.
+
+        Lo que SÍ le resta es lo que se dio de baja, que es plata que salió del
+        lote sin ingreso: eso sí se perdió.
         """
-        return self.ingresos - self.costo_vendido
+        return self.ingresos - self.costo_vendido - self.costo_de_baja
 
     @property
     def precio_venta_kilo(self) -> Decimal:
@@ -214,6 +292,9 @@ class RepartoProduccion:
     # Leche recibida que todavía no se ha usado en ninguna producción
     litros_sin_usar: Decimal = CERO
     costo_litros_sin_usar: Decimal = CERO
+    # Existencia cargada a mano SIN costo: sus kilos entran al inventario como si
+    # hubieran costado cero, así que hacen ver la utilidad mejor de lo que es.
+    kilos_existencia_sin_costo: Decimal = CERO
 
 
 # ------------------------------------------------------------ implementación
@@ -245,13 +326,19 @@ def repartir_produccion(
     recepciones: list[RecepcionEvento],
     producciones: list[ProduccionEvento],
     ventas: list[VentaEvento],
+    existencias: list[ExistenciaEvento] | None = None,
+    bajas: list[BajaEvento] | None = None,
 ) -> RepartoProduccion:
-    """Encadena los dos repartos y devuelve un lote por producción.
+    """Encadena los dos repartos y devuelve un lote por producción o existencia.
 
     Los eventos se procesan en orden cronológico. Dentro del mismo día la leche
     entra ANTES de que se produzca, y se produce ANTES de despachar: es el orden
     real de la planta, y al revés la leche del día no estaría disponible para la
     producción del día y todo se iría a "sin respaldo" sin razón.
+
+    `existencias` es el queso que ya estaba en bodega y se cargó a mano, sin pasar
+    por una producción. Entra a la cola de su tipo como cualquier otro lote y por
+    fecha, así que si es más viejo se despacha primero, que es lo correcto.
     """
     reparto = RepartoProduccion()
     cola_leche: list[_Leche] = []
@@ -265,8 +352,16 @@ def repartir_produccion(
         eventos.append((r.fecha, 0, r.orden, "recepcion", r))
     for p in producciones:
         eventos.append((p.fecha, 1, p.orden, "produccion", p))
+    # La existencia va con la misma prioridad que la producción: las dos meten
+    # queso a la bodega, y lo que las ordena entre sí es la fecha.
+    for e in existencias or []:
+        eventos.append((e.fecha, 1, e.orden, "existencia", e))
+    # Las bajas van ANTES de las ventas del mismo día, como la merma en reventa: lo
+    # que se daña se descubre al despachar, o sea antes de darlo por vendido.
+    for b in bajas or []:
+        eventos.append((b.fecha, 2, b.orden, "baja", b))
     for v in ventas:
-        eventos.append((v.fecha, 2, v.orden, "venta", v))
+        eventos.append((v.fecha, 3, v.orden, "venta", v))
     eventos.sort(key=lambda e: (e[0], e[1], e[2]))
 
     for _, _, _, clase, evento in eventos:
@@ -346,6 +441,51 @@ def repartir_produccion(
                     )
                 )
 
+        elif clase == "baja":
+            baja: BajaEvento = evento  # type: ignore[assignment]
+            cola = cola_queso.get(baja.tipo_queso_id, [])
+            restante = baja.kilos
+            for queso in cola:
+                if restante <= CERO:
+                    break
+                if queso.kilos <= CERO:
+                    continue
+                toma = min(queso.kilos, restante)
+                queso.kilos -= toma
+                restante -= toma
+                queso.lote.kilos_de_baja += toma
+                queso.lote.costo_de_baja += _q(toma * queso.costo_kilo)
+            if restante > CERO:
+                # Se dio de baja queso que no está en ningún lote: mismo aviso que
+                # una venta sin lote, porque es el mismo hueco.
+                reparto.kilos_sin_lote += restante
+
+        elif clase == "existencia":
+            existencia: ExistenciaEvento = evento  # type: ignore[assignment]
+            if existencia.kilos <= CERO:
+                continue
+            lote = LoteProduccion(
+                fecha=existencia.fecha,
+                tipo_queso_id=existencia.tipo_queso_id,
+                tipo_queso=existencia.tipo_queso,
+                litros_usados=CERO,
+                kilos_producidos=existencia.kilos,
+                merma=CERO,
+                origen=ORIGEN_EXISTENCIA,
+                referencia=existencia.referencia,
+                costo_existencia=_q(existencia.kilos * existencia.costo_unitario),
+            )
+            reparto.lotes.append(lote)
+            if lote.sin_costo:
+                reparto.kilos_existencia_sin_costo += existencia.kilos
+            cola_queso.setdefault(existencia.tipo_queso_id, []).append(
+                _Queso(
+                    lote=lote,
+                    kilos=existencia.kilos,
+                    costo_kilo=lote.costo_total / existencia.kilos,
+                )
+            )
+
         else:
             venta: VentaEvento = evento  # type: ignore[assignment]
             cola = cola_queso.get(venta.tipo_queso_id, [])
@@ -414,12 +554,14 @@ def repartir_produccion(
                 leche.litros * (leche.costo_litro + leche.transporte_litro)
             )
 
-    # Cuadre peso a peso: lo vendido más lo que está en bodega tiene que dar el
-    # costo del lote. El residuo del redondeo se le carga a lo que sigue en bodega,
-    # que es lo único que no está pegado a una venta ya emitida; si el lote se
-    # vendió completo, a lo vendido.
+    # Cuadre peso a peso: lo vendido, lo dado de baja y lo que está en bodega tienen
+    # que dar el costo del lote. El residuo del redondeo se le carga a lo que sigue
+    # en bodega, que es lo único que no está pegado a un documento ya emitido; si el
+    # lote ya salió completo, a lo vendido.
     for lote in reparto.lotes:
-        diferencia = _q(lote.costo_total) - (lote.costo_vendido + lote.costo_en_bodega)
+        diferencia = _q(lote.costo_total) - (
+            lote.costo_vendido + lote.costo_de_baja + lote.costo_en_bodega
+        )
         if diferencia != CERO:
             if lote.kilos_en_bodega > CERO:
                 lote.costo_en_bodega += diferencia

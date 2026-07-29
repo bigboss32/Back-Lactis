@@ -194,7 +194,10 @@ class LoteProduccionService:
         self.ctx = ctx
 
     def panel(self, desde=None, hasta=None):
+        from app.modules.inventario.repository import ProductoRepository
         from app.modules.produccion.lotes import (
+            BajaEvento,
+            ExistenciaEvento,
             ProduccionEvento,
             RecepcionEvento,
             VentaEvento,
@@ -235,7 +238,35 @@ class LoteProduccionService:
             for i, f in enumerate(VentaRepository(self.db, empresa).eventos_para_lotes())
         ]
 
-        reparto = repartir_produccion(recepciones, producciones, ventas)
+        # Queso que ya estaba en bodega y se cargo a mano, sin pasar por una
+        # produccion. El signo del movimiento decide si suma queso (entrada, o
+        # ajuste hacia arriba) o si lo saca (ajuste hacia abajo).
+        existencias: list = []
+        bajas: list = []
+        for indice, fila in enumerate(
+            ProductoRepository(self.db, empresa).movimientos_de_queso_sin_produccion()
+        ):
+            fecha, _, tipo_queso_id, tipo_queso, movimiento, cantidad, costo, referencia = fila
+            kilos = Decimal(cantidad or 0)
+            if movimiento == "ajuste" and kilos < CERO:
+                bajas.append(
+                    BajaEvento(
+                        fecha=fecha, orden=indice, tipo_queso_id=tipo_queso_id,
+                        kilos=-kilos,
+                    )
+                )
+            elif kilos > CERO:
+                existencias.append(
+                    ExistenciaEvento(
+                        fecha=fecha, orden=indice, tipo_queso_id=tipo_queso_id,
+                        tipo_queso=tipo_queso, kilos=kilos,
+                        costo_unitario=Decimal(costo or 0), referencia=referencia,
+                    )
+                )
+
+        reparto = repartir_produccion(
+            recepciones, producciones, ventas, existencias, bajas
+        )
         visibles = [
             l
             for l in reparto.lotes
@@ -266,6 +297,11 @@ class LoteProduccionService:
                 precio_venta_kilo=dinero(l.precio_venta_kilo),
                 vendido_completo=l.vendido_completo,
                 litros_sin_recepcion=l.litros_sin_recepcion,
+                origen=l.origen,
+                referencia=l.referencia,
+                kilos_de_baja=l.kilos_de_baja,
+                costo_de_baja=dinero(l.costo_de_baja),
+                sin_costo=l.sin_costo,
                 detalle_leche=[
                     LecheDelLoteRead(
                         proveedor=d.proveedor, fecha_recepcion=d.fecha_recepcion,
@@ -307,6 +343,7 @@ class LoteProduccionService:
             # Los avisos son del reparto COMPLETO y no del filtro: esconderlos al
             # cambiar de mes sería lo contrario de lo que se busca.
             kilos_sin_lote=reparto.kilos_sin_lote,
+            kilos_existencia_sin_costo=reparto.kilos_existencia_sin_costo,
             ingreso_sin_lote=dinero(reparto.ingreso_sin_lote),
             litros_sin_recepcion=reparto.litros_sin_recepcion,
             litros_sin_usar=reparto.litros_sin_usar,
