@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from app.common.schemas import BaseSchema
+from app.modules.produccion.schemas import OrigenDelCosto
 
 
 class AsientoLibroDiario(BaseSchema):
@@ -57,6 +58,10 @@ class EstadoResultados(BaseSchema):
     # --- Aviso: queso vendido que no salió de ningún lote, así que no se pudo
     # costear. Si es distinto de cero, la utilidad se ve mejor de lo que es.
     queso_vendido_sin_costo: Decimal = Decimal("0")
+    # De qué producciones salió el queso que se vendió. La suma de sus costos ES
+    # `costo_queso_vendido`: es la cuenta que el usuario puede seguir para ver que
+    # la leche sí se está restando.
+    origen_del_costo: list[OrigenDelCosto] = []
     # --- Informativo: lo que compró en el mes y cuánto de eso sigue sin venderse.
     # NO entra en la utilidad, porque no es pérdida: la plata está ahí.
     costo_leche: Decimal

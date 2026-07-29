@@ -217,3 +217,27 @@ class CifrasDelPeriodo(BaseSchema):
     queso_en_bodega: Decimal
     # Avisos: plata que no se puede costear
     queso_vendido_sin_costo: Decimal  # se vendió queso que no salió de ningún lote
+    # De qué producciones salió el queso que se vendió: la suma de sus costos ES
+    # `costo_queso_vendido`, así que el usuario puede seguir la cuenta renglón por
+    # renglón hasta la cifra que se resta arriba.
+    origen_del_costo: list["OrigenDelCosto"] = []
+
+
+class OrigenDelCosto(BaseSchema):
+    """Una producción de la que salió parte del queso vendido en el período.
+
+    Es la respuesta a "¿y la leche, se resta o no?": el costo que se resta en el
+    estado de resultados es la suma de estas producciones, y cada una se puede
+    abrir en la pantalla de lotes para ver de qué proveedor vino su leche.
+
+    Se prefiere esto a un puente que parta de la leche comprada en el mes: ese
+    puente necesita un renglón de ajuste por el queso hecho con leche de otro mes,
+    y ese ajuste puede salir enorme y no es algo que el usuario pueda señalar. Esta
+    lista, en cambio, suma exacto la cifra y cada renglón es un documento real.
+    """
+
+    fecha: date
+    tipo_queso: str
+    origen: str  # 'produccion' | 'existencia'
+    kilos: Decimal  # kilos de ese lote que se vendieron en el período
+    costo: Decimal  # lo que costaron esos kilos

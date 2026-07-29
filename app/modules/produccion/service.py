@@ -308,7 +308,7 @@ class LoteProduccionService:
         Se llama al MISMO reparto que la pantalla de lotes, así que la contabilidad
         y esa pantalla no pueden decir cosas distintas del mismo queso.
         """
-        from app.modules.produccion.schemas import CifrasDelPeriodo
+        from app.modules.produccion.schemas import CifrasDelPeriodo, OrigenDelCosto
 
         reparto = self._reparto()
         en_rango = lambda f: desde <= f <= hasta  # noqa: E731
@@ -318,12 +318,26 @@ class LoteProduccionService:
         transporte = CERO
         danado = CERO
         en_bodega = CERO
+        origen: list = []
         for lote in reparto.lotes:
+            # Cuánto de ESTE lote se vendió dentro del período: es lo que permite
+            # decirle al usuario de qué producciones salió el costo que se le resta.
+            kilos_lote = CERO
+            costo_lote = CERO
             for v in lote.detalle_ventas:
                 if en_rango(v.fecha):
                     queso_vendido += v.ingreso
                     costo_vendido += v.costo
                     transporte += v.gasto
+                    kilos_lote += v.kilos
+                    costo_lote += v.costo
+            if kilos_lote > CERO:
+                origen.append(
+                    OrigenDelCosto(
+                        fecha=lote.fecha, tipo_queso=lote.tipo_queso, origen=lote.origen,
+                        kilos=kilos_lote, costo=_dinero(costo_lote),
+                    )
+                )
             for b in lote.detalle_bajas:
                 if en_rango(b.fecha):
                     danado += b.costo
@@ -349,6 +363,9 @@ class LoteProduccionService:
             # producción, y esconderlo al cambiar de mes sería lo contrario de lo
             # que se busca.
             queso_vendido_sin_costo=_dinero(reparto.ingreso_sin_lote),
+            # De la producción que más aportó a la que menos: así los renglones
+            # importantes se ven primero y la cola no estorba.
+            origen_del_costo=sorted(origen, key=lambda o: o.costo, reverse=True),
         )
 
     def panel(self, desde=None, hasta=None):

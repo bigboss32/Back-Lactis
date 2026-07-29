@@ -205,6 +205,7 @@ class ContabilidadService:
             transporte_despachos=lotes.transporte_despachos,
             queso_danado=lotes.queso_danado,
             queso_vendido_sin_costo=lotes.queso_vendido_sin_costo,
+            origen_del_costo=lotes.origen_del_costo,
             costo_leche=costo_leche,
             costo_transporte=costo_transporte,
             leche_sin_usar=lotes.leche_sin_usar,
