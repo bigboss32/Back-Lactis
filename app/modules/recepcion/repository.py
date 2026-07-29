@@ -59,3 +59,35 @@ class RecepcionRepository(BaseRepository[RecepcionLeche]):
         if proveedor_id:
             stmt = stmt.where(RecepcionLeche.proveedor_id == proveedor_id)
         return list(self.db.scalars(stmt).all())
+
+    def eventos_para_lotes(self) -> list[tuple]:
+        """Toda la leche recibida vigente, en orden cronológico, para el reparto.
+
+        Sin filtro de fechas A PROPÓSITO: la leche del 30 de junio se convierte en
+        el queso de julio, así que para costear la producción de julio hay que haber
+        procesado lo de antes. Filtrar aquí dejaría la producción de los primeros
+        días sin leche que la respalde.
+
+        Devuelve (fecha, created_at, proveedor, litros, valor_neto, transporte).
+        """
+        from app.modules.proveedores.models import Proveedor
+
+        return list(
+            self.db.execute(
+                select(
+                    RecepcionLeche.fecha,
+                    RecepcionLeche.created_at,
+                    Proveedor.nombre,
+                    RecepcionLeche.cantidad_litros,
+                    RecepcionLeche.valor_neto,
+                    RecepcionLeche.valor_transporte,
+                )
+                .join(Proveedor, Proveedor.id == RecepcionLeche.proveedor_id)
+                .where(
+                    RecepcionLeche.empresa_id == self.empresa_id,
+                    RecepcionLeche.deleted_at.is_(None),
+                    RecepcionLeche.estado == "activo",
+                )
+                .order_by(RecepcionLeche.fecha, RecepcionLeche.created_at)
+            ).all()
+        )

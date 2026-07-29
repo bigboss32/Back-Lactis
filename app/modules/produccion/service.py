@@ -170,3 +170,145 @@ class ProduccionService(BaseService[Produccion]):
         return self.repo.list_paginated(
             params, filters={"tipo_queso_id": tipo_queso_id}, extra_criteria=extra
         )
+
+
+# ------------------------------------------- utilidad por lote de producción
+class LoteProduccionService:
+    """Qué dejó el queso que se hizo cada día.
+
+    Toda la mecánica de las dos cadenas (leche -> producción -> venta) está en
+    `app.modules.produccion.lotes`, que es una función pura sin base de datos para
+    poder probarla con casos armados a mano. Aquí solo se leen los eventos, se
+    llama al reparto y se arma la respuesta.
+
+    El reparto se hace SIEMPRE sobre toda la historia, aunque se pidan los lotes de
+    un mes: la leche del 30 de junio es el queso de julio, y el queso de julio se
+    vende en septiembre. Filtrar la consulta dejaría los primeros días sin
+    respaldo. El filtro de fechas se aplica al final, a qué lotes se MUESTRAN.
+    """
+
+    modulo = "produccion"
+
+    def __init__(self, db, ctx):
+        self.db = db
+        self.ctx = ctx
+
+    def panel(self, desde=None, hasta=None):
+        from app.modules.produccion.lotes import (
+            ProduccionEvento,
+            RecepcionEvento,
+            VentaEvento,
+            repartir_produccion,
+        )
+        from app.modules.produccion.repository import ProduccionRepository
+        from app.modules.produccion.schemas import (
+            LecheDelLoteRead,
+            LoteProduccionRead,
+            LotesProduccionPanel,
+            VentaDelLoteProduccionRead,
+        )
+        from app.modules.recepcion.repository import RecepcionRepository
+        from app.modules.ventas.repository import VentaRepository
+
+        empresa = self.ctx.empresa_id
+        recepciones = [
+            RecepcionEvento(
+                fecha=f[0], orden=i, proveedor=f[2], litros=Decimal(f[3] or 0),
+                valor_leche=Decimal(f[4] or 0), valor_transporte=Decimal(f[5] or 0),
+            )
+            for i, f in enumerate(RecepcionRepository(self.db, empresa).eventos_para_lotes())
+        ]
+        producciones = [
+            ProduccionEvento(
+                fecha=f[0], orden=i, tipo_queso_id=f[2], tipo_queso=f[3],
+                litros_usados=Decimal(f[4] or 0), kilos=Decimal(f[5] or 0),
+                merma=Decimal(f[6] or 0),
+            )
+            for i, f in enumerate(ProduccionRepository(self.db, empresa).eventos_para_lotes())
+        ]
+        ventas = [
+            VentaEvento(
+                fecha=f[0], orden=i, cliente=f[2], tipo_queso_id=f[3], producto=f[4],
+                kilos=Decimal(f[5] or 0), precio_kilo=Decimal(f[6] or 0),
+                valor_total=Decimal(f[7] or 0),
+            )
+            for i, f in enumerate(VentaRepository(self.db, empresa).eventos_para_lotes())
+        ]
+
+        reparto = repartir_produccion(recepciones, producciones, ventas)
+        visibles = [
+            l
+            for l in reparto.lotes
+            if (desde is None or l.fecha >= desde) and (hasta is None or l.fecha <= hasta)
+        ]
+
+        def dinero(valor):
+            return Decimal(valor).quantize(Decimal("0.01"))
+
+        filas = [
+            LoteProduccionRead(
+                fecha=l.fecha,
+                tipo_queso=l.tipo_queso,
+                litros_usados=l.litros_usados,
+                kilos_producidos=l.kilos_producidos,
+                merma=l.merma,
+                rendimiento=Decimal(l.rendimiento).quantize(Decimal("0.0001")),
+                costo_leche=dinero(l.costo_leche),
+                costo_transporte=dinero(l.costo_transporte),
+                costo_total=dinero(l.costo_total),
+                costo_kilo=dinero(l.costo_kilo),
+                kilos_vendidos=l.kilos_vendidos,
+                kilos_en_bodega=l.kilos_en_bodega,
+                ingresos=dinero(l.ingresos),
+                costo_vendido=dinero(l.costo_vendido),
+                costo_en_bodega=dinero(l.costo_en_bodega),
+                utilidad=dinero(l.utilidad),
+                precio_venta_kilo=dinero(l.precio_venta_kilo),
+                vendido_completo=l.vendido_completo,
+                litros_sin_recepcion=l.litros_sin_recepcion,
+                detalle_leche=[
+                    LecheDelLoteRead(
+                        proveedor=d.proveedor, fecha_recepcion=d.fecha_recepcion,
+                        litros=d.litros, costo_leche=dinero(d.costo_leche),
+                        costo_transporte=dinero(d.costo_transporte), costo=dinero(d.costo),
+                    )
+                    for d in l.detalle_leche
+                ],
+                detalle_ventas=[
+                    VentaDelLoteProduccionRead(
+                        fecha=v.fecha, cliente=v.cliente, producto=v.producto,
+                        kilos=v.kilos, kilos_venta=v.kilos_venta,
+                        precio_kilo=dinero(v.precio_kilo), ingreso=dinero(v.ingreso),
+                        costo=dinero(v.costo), utilidad=dinero(v.utilidad),
+                        partida=v.partida,
+                    )
+                    for v in l.detalle_ventas
+                ],
+            )
+            for l in visibles
+        ]
+
+        mejor = peor = None
+        if visibles:
+            mejor = max(visibles, key=lambda l: l.utilidad).fecha
+            peor = min(visibles, key=lambda l: l.utilidad).fecha
+
+        return LotesProduccionPanel(
+            lotes=filas,
+            total_utilidad=sum((f.utilidad for f in filas), CERO),
+            total_litros=sum((f.litros_usados for f in filas), CERO),
+            total_kilos=sum((f.kilos_producidos for f in filas), CERO),
+            total_costo=sum((f.costo_total for f in filas), CERO),
+            total_ingresos=sum((f.ingresos for f in filas), CERO),
+            total_kilos_en_bodega=sum((f.kilos_en_bodega for f in filas), CERO),
+            total_costo_en_bodega=sum((f.costo_en_bodega for f in filas), CERO),
+            mejor=mejor,
+            peor=peor,
+            # Los avisos son del reparto COMPLETO y no del filtro: esconderlos al
+            # cambiar de mes sería lo contrario de lo que se busca.
+            kilos_sin_lote=reparto.kilos_sin_lote,
+            ingreso_sin_lote=dinero(reparto.ingreso_sin_lote),
+            litros_sin_recepcion=reparto.litros_sin_recepcion,
+            litros_sin_usar=reparto.litros_sin_usar,
+            costo_litros_sin_usar=dinero(reparto.costo_litros_sin_usar),
+        )

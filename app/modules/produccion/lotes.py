@@ -1,0 +1,433 @@
+"""Utilidad POR LOTE DE PRODUCCIÓN: qué dejó el queso que se hizo cada día.
+
+EL PROBLEMA QUE RESUELVE
+-----------------------
+El estado de resultados del período resta TODA la leche que entró en el mes
+contra TODO el queso que se vendió en el mes. Pero la leche del 1 de julio se
+convierte en queso que puede venderse 60 días después, así que las dos cifras no
+son del mismo queso: el resultado sale negativo sin que el negocio esté perdiendo,
+porque la plata de la leche está ahí, convertida en queso, en la bodega.
+
+Aquí se calcula lo que de verdad dejó cada producción: lo que le costó la leche
+que usó, lo que se vendió de ella, y lo que todavía está en bodega.
+
+LAS DOS CADENAS
+---------------
+Son dos repartos encadenados, y hacen falta los dos:
+
+1. LECHE -> PRODUCCIÓN. Los litros que usó una producción salen de la leche
+   recibida, de la más vieja a la más nueva. La leche es lo más perecedero de
+   todo, así que "primero la más vieja" no es una convención: es obligatorio en la
+   planta. Cada recepción tiene su propio precio por litro (varía por proveedor),
+   así que el lote queda con su costo REAL y no con un promedio del mes.
+
+   El transporte de esos litros va con ellos: es parte de lo que costó traer esa
+   leche y no un gasto suelto del mes.
+
+2. PRODUCCIÓN -> VENTA. Los kilos vendidos salen del lote de producción más
+   viejo, también por lo perecedero. Ojo: la cola es POR TIPO DE QUESO. No se
+   puede despachar queso doble crema de un lote de campesino, y una sola cola
+   mezclaría los costos de dos productos con rendimientos distintos.
+
+LO QUE CUADRA
+-------------
+Cada peso de leche termina en exactamente uno de estos sitios: costo del queso
+vendido, costo del queso que sigue en bodega, o leche que se usó en una producción
+sin registrar (`litros_sin_recepcion`, que se avisa aparte). Y cada kilo producido
+está vendido o está en bodega.
+
+De ahí sale la línea que le falta al estado de resultados: el queso que quedó en
+bodega NO es pérdida del período, es inventario.
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal
+
+CERO = Decimal("0")
+CENTAVOS = Decimal("0.01")
+
+
+# --------------------------------------------------------------------- entrada
+@dataclass(frozen=True)
+class RecepcionEvento:
+    """Leche recibida de un proveedor."""
+
+    fecha: date
+    orden: int
+    proveedor: str
+    litros: Decimal
+    # Lo que se le paga al proveedor por esos litros (ya con bonificaciones y
+    # descuentos) y el flete de traerlos. Los dos son costo de ESA leche.
+    valor_leche: Decimal
+    valor_transporte: Decimal
+
+
+@dataclass(frozen=True)
+class ProduccionEvento:
+    fecha: date
+    orden: int
+    tipo_queso_id: uuid.UUID
+    tipo_queso: str
+    litros_usados: Decimal
+    kilos: Decimal
+    merma: Decimal
+
+
+@dataclass(frozen=True)
+class VentaEvento:
+    """Un renglón de venta de queso terminado."""
+
+    fecha: date
+    orden: int
+    cliente: str
+    tipo_queso_id: uuid.UUID
+    producto: str
+    kilos: Decimal
+    precio_kilo: Decimal
+    valor_total: Decimal
+
+
+# ---------------------------------------------------------------------- salida
+@dataclass
+class LecheDelLote:
+    """De qué proveedor vino la leche que usó este lote, y cuánto costó.
+
+    Es lo que permite decir "el queso del 1 de julio se hizo con leche de estos
+    tres proveedores, a estos precios": el costo del lote no es un promedio del
+    mes, son las recepciones concretas que se consumieron.
+    """
+
+    proveedor: str
+    litros: Decimal
+    costo_leche: Decimal
+    costo_transporte: Decimal
+    fecha_recepcion: date
+
+    @property
+    def costo(self) -> Decimal:
+        return self.costo_leche + self.costo_transporte
+
+
+@dataclass
+class VentaDelLote:
+    """Una venta que se llevó kilos de este lote.
+
+    `kilos` son los que salieron de ESTE lote y `kilos_venta` los del renglón
+    completo: una venta grande se reparte entre varios lotes, y mostrar solo los
+    primeros haría creer que se despachó menos de lo que se despachó.
+    """
+
+    fecha: date
+    cliente: str
+    producto: str
+    kilos: Decimal
+    kilos_venta: Decimal
+    precio_kilo: Decimal
+    ingreso: Decimal
+    costo: Decimal
+
+    @property
+    def partida(self) -> bool:
+        return self.kilos < self.kilos_venta
+
+    @property
+    def utilidad(self) -> Decimal:
+        return self.ingreso - self.costo
+
+
+@dataclass
+class LoteProduccion:
+    """Una producción, con lo que costó y lo que dejó."""
+
+    fecha: date
+    tipo_queso_id: uuid.UUID
+    tipo_queso: str
+    litros_usados: Decimal
+    kilos_producidos: Decimal
+    merma: Decimal
+    detalle_leche: list[LecheDelLote] = field(default_factory=list)
+    detalle_ventas: list[VentaDelLote] = field(default_factory=list)
+    # A dónde fueron los kilos (los dos suman kilos_producidos)
+    kilos_vendidos: Decimal = CERO
+    kilos_en_bodega: Decimal = CERO
+    # Plata
+    costo_leche: Decimal = CERO
+    costo_transporte: Decimal = CERO
+    ingresos: Decimal = CERO
+    costo_vendido: Decimal = CERO  # costo de los kilos que se vendieron
+    costo_en_bodega: Decimal = CERO
+    # Litros que no encontraron leche registrada de dónde salir
+    litros_sin_recepcion: Decimal = CERO
+
+    @property
+    def costo_total(self) -> Decimal:
+        """Lo que costó el lote: la leche que usó más su transporte."""
+        return self.costo_leche + self.costo_transporte
+
+    @property
+    def costo_kilo(self) -> Decimal:
+        if self.kilos_producidos <= CERO:
+            return CERO
+        return self.costo_total / self.kilos_producidos
+
+    @property
+    def rendimiento(self) -> Decimal:
+        """Kilos de queso por litro de leche. Es el número que dice si el lote
+        salió bueno antes de saber a cómo se vendió."""
+        if self.litros_usados <= CERO:
+            return CERO
+        return self.kilos_producidos / self.litros_usados
+
+    @property
+    def utilidad(self) -> Decimal:
+        """Utilidad de lo que YA se vendió del lote.
+
+        NO le resta el costo de lo que sigue en bodega: ese queso no se ha
+        vendido, no es una pérdida, y restárselo es justo el error que hace que el
+        estado de resultados del mes salga negativo. Lo de bodega va aparte.
+        """
+        return self.ingresos - self.costo_vendido
+
+    @property
+    def precio_venta_kilo(self) -> Decimal:
+        if self.kilos_vendidos <= CERO:
+            return CERO
+        return self.ingresos / self.kilos_vendidos
+
+    @property
+    def vendido_completo(self) -> bool:
+        return self.kilos_en_bodega <= CERO
+
+
+@dataclass
+class RepartoProduccion:
+    lotes: list[LoteProduccion] = field(default_factory=list)
+    # Kilos vendidos que no salieron de ninguna producción registrada: se vendió
+    # queso que nunca se cargó como producido. No se esconde.
+    kilos_sin_lote: Decimal = CERO
+    ingreso_sin_lote: Decimal = CERO
+    # Litros usados en producciones sin leche registrada que los respalde
+    litros_sin_recepcion: Decimal = CERO
+    # Leche recibida que todavía no se ha usado en ninguna producción
+    litros_sin_usar: Decimal = CERO
+    costo_litros_sin_usar: Decimal = CERO
+
+
+# ------------------------------------------------------------ implementación
+@dataclass
+class _Leche:
+    """Litros de una recepción, con su costo por litro."""
+
+    proveedor: str
+    fecha: date
+    litros: Decimal
+    costo_litro: Decimal
+    transporte_litro: Decimal
+
+
+@dataclass
+class _Queso:
+    """Kilos de un lote de producción, con su costo por kilo."""
+
+    lote: LoteProduccion
+    kilos: Decimal
+    costo_kilo: Decimal
+
+
+def _q(valor: Decimal) -> Decimal:
+    return valor.quantize(CENTAVOS)
+
+
+def repartir_produccion(
+    recepciones: list[RecepcionEvento],
+    producciones: list[ProduccionEvento],
+    ventas: list[VentaEvento],
+) -> RepartoProduccion:
+    """Encadena los dos repartos y devuelve un lote por producción.
+
+    Los eventos se procesan en orden cronológico. Dentro del mismo día la leche
+    entra ANTES de que se produzca, y se produce ANTES de despachar: es el orden
+    real de la planta, y al revés la leche del día no estaría disponible para la
+    producción del día y todo se iría a "sin respaldo" sin razón.
+    """
+    reparto = RepartoProduccion()
+    cola_leche: list[_Leche] = []
+    # La cola de queso va POR TIPO: no se puede despachar un tipo de queso desde
+    # el lote de otro, y una sola cola mezclaría costos de productos distintos.
+    cola_queso: dict[uuid.UUID, list[_Queso]] = {}
+    filas_venta: dict[tuple[date, int, int], VentaDelLote] = {}
+
+    eventos: list[tuple[date, int, int, str, object]] = []
+    for r in recepciones:
+        eventos.append((r.fecha, 0, r.orden, "recepcion", r))
+    for p in producciones:
+        eventos.append((p.fecha, 1, p.orden, "produccion", p))
+    for v in ventas:
+        eventos.append((v.fecha, 2, v.orden, "venta", v))
+    eventos.sort(key=lambda e: (e[0], e[1], e[2]))
+
+    for _, _, _, clase, evento in eventos:
+        if clase == "recepcion":
+            recepcion: RecepcionEvento = evento  # type: ignore[assignment]
+            if recepcion.litros <= CERO:
+                continue
+            cola_leche.append(
+                _Leche(
+                    proveedor=recepcion.proveedor,
+                    fecha=recepcion.fecha,
+                    litros=recepcion.litros,
+                    costo_litro=recepcion.valor_leche / recepcion.litros,
+                    transporte_litro=recepcion.valor_transporte / recepcion.litros,
+                )
+            )
+
+        elif clase == "produccion":
+            produccion: ProduccionEvento = evento  # type: ignore[assignment]
+            lote = LoteProduccion(
+                fecha=produccion.fecha,
+                tipo_queso_id=produccion.tipo_queso_id,
+                tipo_queso=produccion.tipo_queso,
+                litros_usados=produccion.litros_usados,
+                kilos_producidos=produccion.kilos,
+                merma=produccion.merma,
+            )
+            reparto.lotes.append(lote)
+
+            # --- Cadena 1: de qué leche salieron esos litros
+            restante = produccion.litros_usados
+            for leche in cola_leche:
+                if restante <= CERO:
+                    break
+                if leche.litros <= CERO:
+                    continue
+                toma = min(leche.litros, restante)
+                leche.litros -= toma
+                restante -= toma
+                costo = _q(toma * leche.costo_litro)
+                transporte = _q(toma * leche.transporte_litro)
+                lote.costo_leche += costo
+                lote.costo_transporte += transporte
+                # Se agrupa por proveedor Y fecha de recepción: si se separara por
+                # cada recepción, un lote grande dejaría veinte renglones del mismo
+                # proveedor del mismo día y no se podría leer.
+                fila = next(
+                    (
+                        f
+                        for f in lote.detalle_leche
+                        if f.proveedor == leche.proveedor and f.fecha_recepcion == leche.fecha
+                    ),
+                    None,
+                )
+                if fila is None:
+                    fila = LecheDelLote(
+                        proveedor=leche.proveedor, litros=CERO, costo_leche=CERO,
+                        costo_transporte=CERO, fecha_recepcion=leche.fecha,
+                    )
+                    lote.detalle_leche.append(fila)
+                fila.litros += toma
+                fila.costo_leche += costo
+                fila.costo_transporte += transporte
+            if restante > CERO:
+                # Se produjo con leche que no está registrada: el lote queda con el
+                # costo de lo que sí se pudo respaldar, y la diferencia se declara.
+                lote.litros_sin_recepcion = restante
+                reparto.litros_sin_recepcion += restante
+
+            # --- El queso producido entra a la cola de su tipo
+            if produccion.kilos > CERO:
+                cola_queso.setdefault(produccion.tipo_queso_id, []).append(
+                    _Queso(
+                        lote=lote,
+                        kilos=produccion.kilos,
+                        costo_kilo=lote.costo_total / produccion.kilos,
+                    )
+                )
+
+        else:
+            venta: VentaEvento = evento  # type: ignore[assignment]
+            cola = cola_queso.get(venta.tipo_queso_id, [])
+            restante = venta.kilos
+            asignados: list[tuple[_Queso, Decimal]] = []
+            for queso in cola:
+                if restante <= CERO:
+                    break
+                if queso.kilos <= CERO:
+                    continue
+                toma = min(queso.kilos, restante)
+                queso.kilos -= toma
+                restante -= toma
+                asignados.append((queso, toma))
+
+            kilos_cubiertos = venta.kilos - restante
+            if restante > CERO and venta.kilos > CERO:
+                proporcion = kilos_cubiertos / venta.kilos
+                valor_reparto = _q(venta.valor_total * proporcion)
+                reparto.ingreso_sin_lote += venta.valor_total - valor_reparto
+                reparto.kilos_sin_lote += restante
+                base = kilos_cubiertos
+            else:
+                valor_reparto = venta.valor_total
+                base = venta.kilos
+
+            # El último se lleva el residuo del redondeo, para que la suma de los
+            # pedazos sea exactamente el valor repartido.
+            acumulado = CERO
+            for indice, (queso, kilos) in enumerate(asignados):
+                if indice == len(asignados) - 1:
+                    ingreso = valor_reparto - acumulado
+                else:
+                    ingreso = _q(valor_reparto * kilos / base) if base > CERO else CERO
+                    acumulado += ingreso
+                costo = _q(kilos * queso.costo_kilo)
+                lote = queso.lote
+                lote.kilos_vendidos += kilos
+                lote.ingresos += ingreso
+                lote.costo_vendido += costo
+
+                clave = (venta.fecha, venta.orden, id(lote))
+                fila = filas_venta.get(clave)
+                if fila is None:
+                    fila = VentaDelLote(
+                        fecha=venta.fecha, cliente=venta.cliente, producto=venta.producto,
+                        kilos=CERO, kilos_venta=venta.kilos,
+                        precio_kilo=venta.precio_kilo, ingreso=CERO, costo=CERO,
+                    )
+                    filas_venta[clave] = fila
+                    lote.detalle_ventas.append(fila)
+                fila.kilos += kilos
+                fila.ingreso += ingreso
+                fila.costo += costo
+
+    # Lo que quedó en las colas
+    for cola in cola_queso.values():
+        for queso in cola:
+            if queso.kilos > CERO:
+                queso.lote.kilos_en_bodega += queso.kilos
+                queso.lote.costo_en_bodega += _q(queso.kilos * queso.costo_kilo)
+    for leche in cola_leche:
+        if leche.litros > CERO:
+            reparto.litros_sin_usar += leche.litros
+            reparto.costo_litros_sin_usar += _q(
+                leche.litros * (leche.costo_litro + leche.transporte_litro)
+            )
+
+    # Cuadre peso a peso: lo vendido más lo que está en bodega tiene que dar el
+    # costo del lote. El residuo del redondeo se le carga a lo que sigue en bodega,
+    # que es lo único que no está pegado a una venta ya emitida; si el lote se
+    # vendió completo, a lo vendido.
+    for lote in reparto.lotes:
+        diferencia = _q(lote.costo_total) - (lote.costo_vendido + lote.costo_en_bodega)
+        if diferencia != CERO:
+            if lote.kilos_en_bodega > CERO:
+                lote.costo_en_bodega += diferencia
+            else:
+                lote.costo_vendido += diferencia
+        lote.detalle_ventas.sort(key=lambda v: v.fecha, reverse=True)
+        lote.detalle_leche.sort(key=lambda l: l.fecha_recepcion)
+
+    # De la más reciente a la más vieja
+    reparto.lotes.sort(key=lambda l: l.fecha, reverse=True)
+    return reparto
