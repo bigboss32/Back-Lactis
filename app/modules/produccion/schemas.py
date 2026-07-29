@@ -186,3 +186,34 @@ class LotesProduccionPanel(BaseSchema):
     # Leche recibida que todavía no se ha usado en ninguna producción
     litros_sin_usar: Decimal
     costo_litros_sin_usar: Decimal
+
+
+class CifrasDelPeriodo(BaseSchema):
+    """Lo que el estado de resultados necesita de la cadena de lotes.
+
+    Todo va cortado al período pedido, con estos criterios:
+
+    - `costo_queso_vendido`, `transporte_despachos` y `queso_danado` son de los
+      DOCUMENTOS con fecha en el período: las ventas que se despacharon y los
+      ajustes que se hicieron en esas fechas. Son lo que entra en la utilidad.
+    - `leche_sin_usar` y `queso_en_bodega` son informativos y se miden HOY: de lo
+      que se compró o se hizo en el período, cuánto sigue sin venderse. No entran
+      en la utilidad porque no son pérdida: la plata está ahí.
+
+    Ojo con las bases, que son distintas a propósito: la leche sin usar se cuenta
+    por la fecha en que LLEGÓ, y el queso en bodega por la fecha en que SE HIZO.
+    Un lote del 1 de julio hecho con leche del 30 de junio cuenta en el queso de
+    julio aunque su leche fuera de junio. Como estas dos cifras no entran en la
+    utilidad, esa mezcla no descuadra nada, pero hay que decirla.
+    """
+
+    # Entran en la utilidad
+    queso_vendido: Decimal  # ingresos de los renglones de queso del período
+    costo_queso_vendido: Decimal
+    transporte_despachos: Decimal
+    queso_danado: Decimal
+    # Informativos, medidos hoy
+    leche_sin_usar: Decimal
+    queso_en_bodega: Decimal
+    # Avisos: plata que no se puede costear
+    queso_vendido_sin_costo: Decimal  # se vendió queso que no salió de ningún lote

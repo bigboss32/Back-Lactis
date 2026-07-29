@@ -150,13 +150,44 @@ class ContabilidadService:
             )
         ) or CERO
 
+        # Las cifras de la cadena de lotes: lo que costó el queso QUE SE VENDIÓ, los
+        # fletes de los despachos y lo que se dañó. Se pide al mismo servicio que
+        # pinta la pantalla de "Utilidad por lote", así que las dos no pueden decir
+        # cosas distintas del mismo queso.
+        from app.modules.produccion.service import LoteProduccionService
+
+        lotes = LoteProduccionService(self.db, self.ctx).cifras_del_periodo(desde, hasta)
+
+        # Los ingresos se abren para que los tres renglones sumen el total facturado:
+        # el queso sale de la cadena (son los renglones de producto terminado), y el
+        # resto es lo que no es queso más los descuentos que se dieron.
+        descuentos = self.db.scalar(
+            select(func.coalesce(func.sum(Venta.descuento), 0)).where(
+                Venta.empresa_id == empresa,
+                Venta.deleted_at.is_(None),
+                Venta.estado != "anulada",
+                Venta.fecha.between(desde, hasta),
+            )
+        ) or CERO
+        # Lo que no es queso sale por resta, y así los tres renglones cuadran exacto
+        # con el total facturado sin tener que consultarlo aparte.
+        otras_ventas = ingresos_ventas + descuentos - lotes.queso_vendido
+
         gastos_categorias = GastoRepository(self.db, empresa).total_por_categoria(desde, hasta)
         lineas = [LineaCategoria(categoria=g.nombre, total=g.total or CERO) for g in gastos_categorias]
         if nomina > CERO:
             lineas.append(LineaCategoria(categoria="Nómina (empleados)", total=nomina))
         total_gastos = sum((linea.total for linea in lineas), CERO)
 
-        utilidad_bruta = ingresos_ventas - costo_leche - costo_transporte
+        # LA CUENTA CORREGIDA: se resta el costo de lo que SE VENDIÓ, no la leche que
+        # entró en el mes. Lo que se dañó sí se resta (es plata perdida) y el queso
+        # que sigue en bodega NO, porque está ahí.
+        utilidad_bruta = (
+            ingresos_ventas
+            - lotes.costo_queso_vendido
+            - lotes.transporte_despachos
+            - lotes.queso_danado
+        )
         utilidad_neta = utilidad_bruta - total_gastos
         margen = (
             (utilidad_neta / ingresos_ventas * 100).quantize(Decimal("0.01"))
@@ -167,8 +198,17 @@ class ContabilidadService:
             desde=desde,
             hasta=hasta,
             ingresos_ventas=ingresos_ventas,
+            queso_vendido=lotes.queso_vendido,
+            otras_ventas=otras_ventas,
+            descuentos=descuentos,
+            costo_queso_vendido=lotes.costo_queso_vendido,
+            transporte_despachos=lotes.transporte_despachos,
+            queso_danado=lotes.queso_danado,
+            queso_vendido_sin_costo=lotes.queso_vendido_sin_costo,
             costo_leche=costo_leche,
             costo_transporte=costo_transporte,
+            leche_sin_usar=lotes.leche_sin_usar,
+            queso_en_bodega=lotes.queso_en_bodega,
             gastos_por_categoria=lineas,
             total_gastos=total_gastos,
             utilidad_bruta=utilidad_bruta,

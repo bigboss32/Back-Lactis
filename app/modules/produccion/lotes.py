@@ -157,6 +157,35 @@ class LecheDelLote:
 
 
 @dataclass
+class BajaDelLote:
+    """Queso de este lote que salió sin venderse, con su fecha.
+
+    Se guarda con fecha y no solo acumulado porque el estado de resultados
+    necesita saber cuánto se dañó DENTRO de un mes: sin la fecha habría que
+    repartir el total del lote a ojo entre los meses.
+    """
+
+    fecha: date
+    kilos: Decimal
+    costo: Decimal
+
+
+@dataclass
+class LecheSinUsar:
+    """Leche que llegó y todavía no se ha convertido en queso.
+
+    Lleva la fecha de RECEPCIÓN para poder decir, de la leche que se compró en un
+    mes, cuánta sigue en el tanque. Es inventario de materia prima, no costo de
+    ningún lote.
+    """
+
+    fecha_recepcion: date
+    proveedor: str
+    litros: Decimal
+    costo: Decimal
+
+
+@dataclass
 class VentaDelLote:
     """Una venta que se llevó kilos de este lote.
 
@@ -221,6 +250,7 @@ class LoteProduccion:
     referencia: str | None = None
     detalle_leche: list[LecheDelLote] = field(default_factory=list)
     detalle_ventas: list[VentaDelLote] = field(default_factory=list)
+    detalle_bajas: list[BajaDelLote] = field(default_factory=list)
     # A dónde fueron los kilos (los tres suman kilos_producidos)
     kilos_vendidos: Decimal = CERO
     kilos_de_baja: Decimal = CERO
@@ -324,6 +354,9 @@ class RepartoProduccion:
     # Leche recibida que todavía no se ha usado en ninguna producción
     litros_sin_usar: Decimal = CERO
     costo_litros_sin_usar: Decimal = CERO
+    # La misma leche sin usar, con la fecha en que llegó: sirve para decir, de lo
+    # que se compró en un mes, cuánto sigue en el tanque.
+    detalle_leche_sin_usar: list[LecheSinUsar] = field(default_factory=list)
     # Existencia cargada a mano SIN costo: sus kilos entran al inventario como si
     # hubieran costado cero, así que hacen ver la utilidad mejor de lo que es.
     kilos_existencia_sin_costo: Decimal = CERO
@@ -485,8 +518,12 @@ def repartir_produccion(
                 toma = min(queso.kilos, restante)
                 queso.kilos -= toma
                 restante -= toma
+                costo_baja = _q(toma * queso.costo_kilo)
                 queso.lote.kilos_de_baja += toma
-                queso.lote.costo_de_baja += _q(toma * queso.costo_kilo)
+                queso.lote.costo_de_baja += costo_baja
+                queso.lote.detalle_bajas.append(
+                    BajaDelLote(fecha=baja.fecha, kilos=toma, costo=costo_baja)
+                )
             if restante > CERO:
                 # Se dio de baja queso que no está en ningún lote: mismo aviso que
                 # una venta sin lote, porque es el mismo hueco.
@@ -596,9 +633,16 @@ def repartir_produccion(
                 queso.lote.costo_en_bodega += _q(queso.kilos * queso.costo_kilo)
     for leche in cola_leche:
         if leche.litros > CERO:
-            reparto.litros_sin_usar += leche.litros
-            reparto.costo_litros_sin_usar += _q(
+            costo_pendiente = _q(
                 leche.litros * (leche.costo_litro + leche.transporte_litro)
+            )
+            reparto.litros_sin_usar += leche.litros
+            reparto.costo_litros_sin_usar += costo_pendiente
+            reparto.detalle_leche_sin_usar.append(
+                LecheSinUsar(
+                    fecha_recepcion=leche.fecha, proveedor=leche.proveedor,
+                    litros=leche.litros, costo=costo_pendiente,
+                )
             )
 
     # Cuadre peso a peso: lo vendido, lo dado de baja y lo que está en bodega tienen

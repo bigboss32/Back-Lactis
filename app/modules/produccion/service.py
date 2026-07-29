@@ -22,6 +22,11 @@ CERO = Decimal("0")
 DOS_DECIMALES = Decimal("0.01")
 
 
+def _dinero(valor: Decimal) -> Decimal:
+    """Redondea a centavos. Se usa al FINAL, nunca antes de multiplicar."""
+    return Decimal(valor).quantize(DOS_DECIMALES)
+
+
 class TipoQuesoService(BaseService[TipoQueso]):
     repository_cls = TipoQuesoRepository
     modulo = "produccion"
@@ -194,7 +199,16 @@ class LoteProduccionService:
         self.db = db
         self.ctx = ctx
 
-    def panel(self, desde=None, hasta=None):
+    def _reparto(self):
+        """Arma el reparto completo de las dos cadenas.
+
+        Lo usan la pantalla de lotes Y el estado de resultados: si cada uno armara
+        el suyo, podrían acabar diciendo cosas distintas del mismo queso.
+
+        Va SIEMPRE sobre toda la historia, sin filtro de fechas: la leche del 30 de
+        junio es el queso de julio y el queso de julio se vende en septiembre. Quien
+        llama recorta después lo que muestra.
+        """
         from app.modules.inventario.repository import ProductoRepository
         from app.modules.produccion.lotes import (
             BajaEvento,
@@ -283,9 +297,69 @@ class LoteProduccionService:
                     )
                 )
 
-        reparto = repartir_produccion(
+        return repartir_produccion(
             recepciones, producciones, ventas, existencias, bajas
         )
+
+
+    def cifras_del_periodo(self, desde: date, hasta: date):
+        """Las cifras que el estado de resultados necesita, cortadas al período.
+
+        Se llama al MISMO reparto que la pantalla de lotes, así que la contabilidad
+        y esa pantalla no pueden decir cosas distintas del mismo queso.
+        """
+        from app.modules.produccion.schemas import CifrasDelPeriodo
+
+        reparto = self._reparto()
+        en_rango = lambda f: desde <= f <= hasta  # noqa: E731
+
+        queso_vendido = CERO
+        costo_vendido = CERO
+        transporte = CERO
+        danado = CERO
+        en_bodega = CERO
+        for lote in reparto.lotes:
+            for v in lote.detalle_ventas:
+                if en_rango(v.fecha):
+                    queso_vendido += v.ingreso
+                    costo_vendido += v.costo
+                    transporte += v.gasto
+            for b in lote.detalle_bajas:
+                if en_rango(b.fecha):
+                    danado += b.costo
+            # El queso en bodega se cuenta por la fecha en que se HIZO el lote: de lo
+            # que se produjo en el período, esto sigue sin venderse hoy.
+            if en_rango(lote.fecha):
+                en_bodega += lote.costo_en_bodega
+
+        # La leche sin usar se cuenta por la fecha en que LLEGÓ.
+        leche_sin_usar = sum(
+            (x.costo for x in reparto.detalle_leche_sin_usar if en_rango(x.fecha_recepcion)),
+            CERO,
+        )
+
+        return CifrasDelPeriodo(
+            queso_vendido=_dinero(queso_vendido),
+            costo_queso_vendido=_dinero(costo_vendido),
+            transporte_despachos=_dinero(transporte),
+            queso_danado=_dinero(danado),
+            leche_sin_usar=_dinero(leche_sin_usar),
+            queso_en_bodega=_dinero(en_bodega),
+            # Este NO se corta por período: es un aviso de que falta cargar una
+            # producción, y esconderlo al cambiar de mes sería lo contrario de lo
+            # que se busca.
+            queso_vendido_sin_costo=_dinero(reparto.ingreso_sin_lote),
+        )
+
+    def panel(self, desde=None, hasta=None):
+        from app.modules.produccion.schemas import (
+            LecheDelLoteRead,
+            LoteProduccionRead,
+            LotesProduccionPanel,
+            VentaDelLoteProduccionRead,
+        )
+
+        reparto = self._reparto()
         visibles = [
             l
             for l in reparto.lotes
