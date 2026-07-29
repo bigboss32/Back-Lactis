@@ -22,9 +22,12 @@ from app.modules.proveedores.models import Proveedor  # noqa: F401
 from app.modules.recepcion.models import RecepcionLeche  # noqa: F401
 from app.modules.reventa.models import (  # noqa: F401
     AbonoCompraQueso,
+    AbonoSaldoAnterior,
     AbonoVentaQueso,
     CompraQueso,
     ConversionBorona,
+    SaldoAnterior,
+    Temporada,
     VentaQueso,
 )
 from app.modules.rutas.models import Ruta  # noqa: F401

@@ -10,6 +10,7 @@ from app.modules.reventa.models import (
     CompraQueso,
     ConversionBorona,
     SaldoAnterior,
+    Temporada,
     VentaQueso,
 )
 
@@ -69,6 +70,32 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
             )
         ).one()
         return Decimal(fila[0]), Decimal(fila[1])
+
+    def pendiente_periodo(self, desde: date, hasta: date) -> Decimal:
+        """Lo que falta pagar SOLO por las compras de este rango de fechas.
+
+        Es distinto de `acumulados()[2]`, que es la cartera de siempre: para saber
+        si una temporada quedó cerrada hay que mirar lo de ESA temporada. Con la
+        cifra histórica, una temporada de marzo ya pagada aparecería con deuda
+        solo porque la de julio todavía debe.
+
+        Va acotado en cero fila por fila con la misma `saldo_pendiente` que los
+        demás agregados: si acotara distinto, la suma de las temporadas no daría
+        la cifra de la tarjeta y el usuario lo nota con la calculadora.
+        """
+        total = self.db.scalar(
+            select(
+                func.coalesce(
+                    func.sum(saldo_pendiente(CompraQueso.valor_total, CompraQueso.abonado)), 0
+                )
+            ).where(
+                CompraQueso.empresa_id == self.empresa_id,
+                CompraQueso.deleted_at.is_(None),
+                CompraQueso.estado != "anulada",
+                CompraQueso.fecha.between(desde, hasta),
+            )
+        )
+        return Decimal(total or 0)
 
     def acumulados(self) -> tuple[Decimal, Decimal, Decimal]:
         """(kilos netos históricos, borona de compras, saldo por pagar).
@@ -301,6 +328,26 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
             )
         ).one()
         return Decimal(fila[0]), Decimal(fila[1]), Decimal(fila[2])
+
+    def pendiente_periodo(self, desde: date, hasta: date) -> Decimal:
+        """Lo que falta cobrar SOLO por las ventas de este rango de fechas.
+
+        El espejo de `CompraQuesoRepository.pendiente_periodo`: sirve para decir
+        si una temporada quedó cerrada sin arrastrar la cartera de las otras.
+        """
+        total = self.db.scalar(
+            select(
+                func.coalesce(
+                    func.sum(saldo_pendiente(VentaQueso.valor_total, VentaQueso.abonado)), 0
+                )
+            ).where(
+                VentaQueso.empresa_id == self.empresa_id,
+                VentaQueso.deleted_at.is_(None),
+                VentaQueso.estado != "anulada",
+                VentaQueso.fecha.between(desde, hasta),
+            )
+        )
+        return Decimal(total or 0)
 
     def gastos_periodo(self, desde: date, hasta: date, tipo: str | None = None) -> Decimal:
         """Suma de gastos de venta (transporte, etc.) del período. Con `tipo`
@@ -540,3 +587,103 @@ class ConversionBoronaRepository(BaseRepository[ConversionBorona]):
     def total_a_borona(self) -> Decimal:
         """Solo lo que se pasó a borona (suma al inventario de borona), histórico."""
         return self._total(DESTINO_BORONA)
+
+
+class TemporadaRepository(BaseRepository[Temporada]):
+    model = Temporada
+    search_fields = ("nombre",)
+    default_order_by = "fecha_inicio"
+
+    def vigentes(self) -> list[Temporada]:
+        """Todas las temporadas, de la más reciente a la más vieja.
+
+        Ese orden es a propósito: la lista se lee de arriba para abajo y lo que
+        interesa primero es la temporada que está corriendo.
+        """
+        return list(
+            self.db.execute(
+                select(Temporada)
+                .where(
+                    Temporada.empresa_id == self.empresa_id,
+                    Temporada.deleted_at.is_(None),
+                )
+                .order_by(Temporada.fecha_inicio.desc())
+            ).scalars()
+        )
+
+    def abierta(self, excluir_id=None) -> Temporada | None:
+        """La temporada sin fecha de cierre, si hay. Solo puede haber una."""
+        criterios = [
+            Temporada.empresa_id == self.empresa_id,
+            Temporada.deleted_at.is_(None),
+            Temporada.fecha_fin.is_(None),
+        ]
+        if excluir_id is not None:
+            criterios.append(Temporada.id != excluir_id)
+        return self.db.execute(select(Temporada).where(*criterios)).scalars().first()
+
+    def solapada(self, inicio: date, fin: date | None, excluir_id=None) -> Temporada | None:
+        """Otra temporada que se cruce con el rango dado, si hay.
+
+        Dos rangos se cruzan cuando cada uno empieza antes de que termine el otro.
+        Una temporada ABIERTA (fecha_fin NULL) se trata como que llega hasta el
+        infinito: es la que está corriendo, así que cualquier cosa posterior a su
+        inicio se le cruza. Se resuelve con COALESCE a una fecha tope en vez de
+        comparar con NULL, porque en SQL cualquier comparación contra NULL da
+        NULL —ni verdadero ni falso— y el solape pasaría de largo sin avisar.
+        """
+        tope = date(9999, 12, 31)
+        fin_propio = fin or tope
+        fin_otra = func.coalesce(Temporada.fecha_fin, tope)
+        criterios = [
+            Temporada.empresa_id == self.empresa_id,
+            Temporada.deleted_at.is_(None),
+            Temporada.fecha_inicio <= fin_propio,
+            fin_otra >= inicio,
+        ]
+        if excluir_id is not None:
+            criterios.append(Temporada.id != excluir_id)
+        return (
+            self.db.execute(
+                select(Temporada).where(*criterios).order_by(Temporada.fecha_inicio)
+            )
+            .scalars()
+            .first()
+        )
+
+    def ultimo_cierre(self) -> date | None:
+        """Fecha de cierre más reciente: sirve para proponer el inicio de la
+        siguiente temporada (el día después) y que no queden huecos ni solapes."""
+        return self.db.scalar(
+            select(func.max(Temporada.fecha_fin)).where(
+                Temporada.empresa_id == self.empresa_id,
+                Temporada.deleted_at.is_(None),
+            )
+        )
+
+    def fechas_con_movimiento(self) -> set[date]:
+        """Días en que hubo una compra o una venta de queso.
+
+        Sirve para avisar de los HUECOS: si hay movimientos que no caen en
+        ninguna temporada, la suma de las temporadas no da el total del negocio y
+        el usuario tiene que saberlo. Es un set de fechas y no un conteo porque
+        cuáles son huecos depende de las temporadas, que se cruzan en Python.
+
+        No incluye conversiones ni saldos del libro anterior: una conversión sola
+        no abre temporada (mueve queso que ya se compró) y los saldos anteriores
+        son de otro sistema y no pertenecen a ninguna.
+        """
+        fechas: set[date] = set()
+        for modelo in (CompraQueso, VentaQueso):
+            fechas.update(
+                self.db.execute(
+                    select(modelo.fecha)
+                    .where(
+                        modelo.empresa_id == self.empresa_id,
+                        modelo.deleted_at.is_(None),
+                        modelo.estado != "anulada",
+                    )
+                    .distinct()
+                ).scalars()
+            )
+        return fechas

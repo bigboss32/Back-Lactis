@@ -199,3 +199,49 @@ class AbonoSaldoAnterior(AuditMixin, Base):
     observaciones: Mapped[str | None] = mapped_column(String(300))
 
     saldo: Mapped[SaldoAnterior] = relationship(back_populates="abonos")
+
+
+class Temporada(TenantMixin, AuditMixin, Base):
+    """Un ciclo de compra y reventa con nombre y fechas: "Semana Santa 2026".
+
+    Es SOLO un rango de fechas con nombre. No tiene columnas de plata a
+    propósito, y esa es la decisión de diseño importante: la ganancia de la
+    temporada NO se guarda, se calcula cada vez con el mismo motor del resumen
+    (`ReventaResumenService.resumen`) sobre `fecha_inicio..fecha_fin`.
+
+    Se hizo así por dos razones:
+
+    1. Sirve HACIA ATRÁS. Como las cifras salen de los movimientos que ya están
+       cargados, se puede registrar hoy una temporada de marzo y su ganancia
+       aparece de inmediato. Con una cifra congelada habría que esperar a cerrar
+       la próxima para empezar a tener historia.
+    2. NO SE DESACTUALIZA. Si mañana se le corrige el precio a una compra de esa
+       temporada, la ganancia se mueve con ella. Una cifra congelada quedaría
+       distinta de la que muestra el Resumen filtrado a las mismas fechas, y el
+       usuario cuadra estos números a mano: dos cifras que no coinciden para el
+       mismo rango es exactamente lo que le haría perder la confianza en todo el
+       tablero.
+
+    La contra es que "cerrar" una temporada no congela nada, pero eso es honesto:
+    lo que se cierra es el ciclo del queso, no el libro.
+
+    Las temporadas de una empresa NO SE PUEDEN SOLAPAR (lo valida el servicio).
+    Si se solaparan, el mismo kilo y el mismo peso caerían en dos temporadas y la
+    suma de las ganancias por temporada no daría la ganancia total.
+
+    `fecha_fin` en NULL significa TEMPORADA ABIERTA (la que está corriendo), y
+    solo puede haber una así. El estado del AuditMixin no se usa para esto: la
+    única fuente de verdad de si está abierta es `fecha_fin`, porque dos fuentes
+    para el mismo hecho terminan contradiciéndose.
+    """
+
+    __tablename__ = "temporadas"
+
+    nombre: Mapped[str] = mapped_column(String(80), nullable=False)
+    fecha_inicio: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    fecha_fin: Mapped[date | None] = mapped_column(Date, default=None, index=True)
+    notas: Mapped[str | None] = mapped_column(String(500))
+
+    @property
+    def abierta(self) -> bool:
+        return self.fecha_fin is None

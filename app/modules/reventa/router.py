@@ -20,6 +20,11 @@ from app.modules.reventa.schemas import (
     SaldoAnteriorRead,
     SaldoAnteriorUpdate,
     SugerenciasReventa,
+    TemporadaCerrar,
+    TemporadaCreate,
+    TemporadaRead,
+    TemporadasPanel,
+    TemporadaUpdate,
     VentaQuesoCreate,
     VentaQuesoRead,
     VentaQuesoUpdate,
@@ -29,6 +34,7 @@ from app.modules.reventa.service import (
     ConversionBoronaService,
     ReventaResumenService,
     SaldoAnteriorService,
+    TemporadaService,
     VentaQuesoService,
 )
 
@@ -440,3 +446,95 @@ def anular_saldo_anterior(
     ctx: RequestContext = Depends(require_permission("reventa", "administrar")),
 ) -> SaldoAnteriorRead:
     return SaldoAnteriorService(db, ctx).anular(entity_id)
+
+
+# ----------------------------------------------------------------- temporadas
+@router.get(
+    "/temporadas",
+    response_model=TemporadasPanel,
+    summary="Temporadas con la ganancia de cada una (calculada, no guardada)",
+)
+def panel_temporadas(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+) -> TemporadasPanel:
+    """La lista de temporadas con sus cifras, de la más reciente a la más vieja.
+
+    Las cifras se calculan con el mismo motor del resumen sobre las fechas de
+    cada temporada, así que la ganancia de una temporada es EXACTAMENTE la que
+    muestra el Resumen si se filtra a esas fechas. No hay ninguna cifra guardada.
+    """
+    return TemporadaService(db, ctx).panel()
+
+
+@router.post(
+    "/temporadas",
+    response_model=TemporadaRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Abrir o registrar una temporada (sin fecha_fin queda abierta)",
+)
+def crear_temporada(
+    payload: TemporadaCreate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+) -> TemporadaRead:
+    """Se puede registrar una temporada YA PASADA con sus dos fechas: las cifras
+    salen de los movimientos que ya están cargados, así que aparecen de una."""
+    return TemporadaService(db, ctx).crear(payload)
+
+
+@router.put(
+    "/temporadas/{entity_id}",
+    response_model=TemporadaRead,
+    summary="Editar una temporada (nombre, fechas o notas)",
+)
+def editar_temporada(
+    entity_id: uuid.UUID,
+    payload: TemporadaUpdate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "editar")),
+) -> TemporadaRead:
+    return TemporadaService(db, ctx).actualizar(entity_id, payload)
+
+
+@router.delete(
+    "/temporadas/{entity_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Eliminar una temporada (no borra compras ni ventas)",
+)
+def eliminar_temporada(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "eliminar")),
+) -> None:
+    """Borra SOLO la temporada, que es un rango de fechas con nombre. Las compras
+    y las ventas de esas fechas se quedan tal cual: la temporada no las contiene,
+    solo las agrupa para mirarlas."""
+    TemporadaService(db, ctx).eliminar(entity_id)
+
+
+@router.post(
+    "/temporadas/{entity_id}/cerrar",
+    response_model=TemporadaRead,
+    summary="Cerrar la temporada (le pone fecha de fin; no congela las cifras)",
+)
+def cerrar_temporada(
+    entity_id: uuid.UUID,
+    payload: TemporadaCerrar,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "editar")),
+) -> TemporadaRead:
+    return TemporadaService(db, ctx).cerrar(entity_id, payload.fecha_fin)
+
+
+@router.post(
+    "/temporadas/{entity_id}/reabrir",
+    response_model=TemporadaRead,
+    summary="Reabrir una temporada cerrada por equivocación",
+)
+def reabrir_temporada(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "editar")),
+) -> TemporadaRead:
+    return TemporadaService(db, ctx).reabrir(entity_id)

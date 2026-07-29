@@ -378,3 +378,105 @@ class EstadoCuentaProductor(BaseSchema):
     saldo: Decimal
     compras_detalle: list[EstadoCuentaCompra] = []
     pagos: list[EstadoCuentaPagoProductor] = []
+
+
+# -------------------------------------------------------------- temporadas
+class TemporadaCreate(BaseSchema):
+    """`fecha_fin` en null crea la temporada ABIERTA (la que está corriendo)."""
+
+    nombre: str = Field(min_length=2, max_length=80)
+    fecha_inicio: date
+    fecha_fin: date | None = None
+    notas: str | None = Field(default=None, max_length=500)
+
+
+class TemporadaUpdate(BaseSchema):
+    nombre: str | None = Field(default=None, min_length=2, max_length=80)
+    fecha_inicio: date | None = None
+    fecha_fin: date | None = None
+    notas: str | None = Field(default=None, max_length=500)
+
+
+class TemporadaCerrar(BaseSchema):
+    """Cerrar la temporada es ponerle fecha de fin. Por defecto, hoy."""
+
+    fecha_fin: date | None = None
+
+
+class TemporadaRead(TenantRead):
+    nombre: str
+    fecha_inicio: date
+    fecha_fin: date | None
+    notas: str | None
+    abierta: bool
+
+
+class TemporadaResumen(BaseSchema):
+    """Una temporada con sus cifras, calculadas con el MISMO motor del resumen.
+
+    Ojo con de dónde sale cada cifra, que es lo que hace que se pueda cuadrar:
+
+    - Todo lo de plata y de kilos es DEL PERÍODO de la temporada, sacado de
+      `ReventaResumenService.resumen(fecha_inicio, fecha_fin)`. Por eso `ganancia`
+      es exactamente la misma cifra que muestra el Resumen si se filtra a esas
+      fechas: es la misma función, no una copia.
+    - `por_cobrar` y `por_pagar` son también SOLO de los documentos de esas
+      fechas, no la cartera de siempre. Si no, una temporada vieja ya cobrada
+      aparecería con deuda por culpa de la que está corriendo.
+    - `por_cobrar`/`por_pagar` NO incluyen el libro anterior: esas cuentas vienen
+      de otro sistema, no tienen kilos y no pertenecen a ninguna temporada.
+    """
+
+    id: uuid.UUID
+    nombre: str
+    fecha_inicio: date
+    # En la temporada abierta es la fecha con la que se calculó (hoy), para que en
+    # pantalla se vea hasta dónde llegan las cifras y no parezcan de todo el año.
+    fecha_fin: date
+    abierta: bool
+    dias: int
+    notas: str | None
+    # Kilos
+    kilos_comprados: Decimal
+    kilos_vendidos: Decimal
+    kilos_borona_vendidos: Decimal
+    kilos_a_borona: Decimal
+    kilos_merma: Decimal
+    kilos_pendientes: Decimal
+    # Plata
+    total_compras: Decimal
+    total_ventas: Decimal
+    total_gastos: Decimal
+    ganancia: Decimal
+    margen_por_kilo: Decimal
+    precio_promedio_compra: Decimal
+    precio_promedio_venta: Decimal
+    # Lo que falta de ESTA temporada
+    por_cobrar: Decimal
+    por_pagar: Decimal
+    # Si ya no falta nada: sin queso pendiente, sin cobrar y sin pagar
+    cerrada_de_verdad: bool
+
+
+class TemporadasPanel(BaseSchema):
+    """Lo que necesita la pantalla de temporadas en una sola llamada.
+
+    Los totales son la SUMA de las temporadas listadas, no el histórico completo:
+    lo que está fuera de toda temporada no puede aparecer sumado aquí porque
+    entonces la lista no daría el total y ese es justo el desglose que el usuario
+    revisa con calculadora. `dias_sin_temporada` avisa de esos huecos.
+    """
+
+    temporadas: list[TemporadaResumen] = []
+    # Suma de las temporadas de la lista
+    total_ganancia: Decimal
+    total_kilos_comprados: Decimal
+    total_ventas: Decimal
+    total_compras: Decimal
+    # La mejor y la peor por ganancia (null si no hay ninguna temporada)
+    mejor: str | None = None
+    peor: str | None = None
+    # Días con movimientos que no caen en ninguna temporada
+    dias_sin_temporada: int = 0
+    # Inicio que se propone para la próxima (día siguiente al último cierre)
+    proximo_inicio: date | None = None

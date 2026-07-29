@@ -4,7 +4,7 @@ clientes y resumen de ganancia. Contabilidad separada del libro de la quesera.
 import re
 import unicodedata
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -28,12 +28,14 @@ from app.modules.reventa.models import (
     CompraQueso,
     ConversionBorona,
     SaldoAnterior,
+    Temporada,
     VentaQueso,
 )
 from app.modules.reventa.repository import (
     CompraQuesoRepository,
     ConversionBoronaRepository,
     SaldoAnteriorRepository,
+    TemporadaRepository,
     VentaQuesoRepository,
 )
 from app.modules.reventa.schemas import (
@@ -48,6 +50,8 @@ from app.modules.reventa.schemas import (
     GananciaProductor,
     ResumenReventa,
     SugerenciasReventa,
+    TemporadaResumen,
+    TemporadasPanel,
 )
 from app.utils.export import (
     build_estado_cuenta_pdf,
@@ -1561,3 +1565,180 @@ class ReventaResumenService:
             saldo=datos.saldo,
         )
         return pdf, _nombre_archivo_productor(datos.productor)
+
+
+# --------------------------------------------------------------- temporadas
+class TemporadaService(BaseService[Temporada]):
+    """Temporadas: ciclos de compra y reventa con nombre y fechas.
+
+    NO guarda ninguna cifra de plata. Las cifras de cada temporada salen de
+    `ReventaResumenService.resumen(fecha_inicio, fecha_fin)`, o sea del mismo
+    código que pinta el Resumen. Es la decisión central de este módulo y está
+    explicada en el modelo `Temporada`: así funciona hacia atrás (se registra hoy
+    una temporada de marzo y sus cifras aparecen solas) y nunca queda una cifra
+    guardada distinta de la que muestra el Resumen para las mismas fechas.
+
+    Las dos reglas que se validan, y por qué las dos son de plata y no de forma:
+
+    - NO SE SOLAPAN. Si dos temporadas se cruzaran, los mismos kilos y la misma
+      plata caerían en las dos y la suma de las ganancias por temporada no daría
+      la ganancia del negocio.
+    - SOLO UNA ABIERTA. La abierta es la que está corriendo y se calcula hasta
+      hoy; con dos abiertas las dos llegarían hasta hoy y se cruzarían por
+      definición.
+    """
+
+    repository_cls = TemporadaRepository
+    modulo = "reventa"
+
+    # ------------------------------------------------------------ validación
+    def _validar_rango(
+        self, inicio: date, fin: date | None, excluir_id: uuid.UUID | None = None
+    ) -> None:
+        if fin is not None and fin < inicio:
+            raise BusinessError(
+                "La temporada no puede terminar antes de empezar: empieza el "
+                f"{inicio.strftime('%d/%m/%Y')} y terminaría el "
+                f"{fin.strftime('%d/%m/%Y')}"
+            )
+        if fin is None:
+            otra_abierta = self.repo.abierta(excluir_id=excluir_id)
+            if otra_abierta is not None:
+                raise BusinessError(
+                    f"Ya hay una temporada abierta: {otra_abierta.nombre}. "
+                    "Ciérrela antes de abrir otra."
+                )
+        cruzada = self.repo.solapada(inicio, fin, excluir_id=excluir_id)
+        if cruzada is not None:
+            hasta = (
+                cruzada.fecha_fin.strftime("%d/%m/%Y") if cruzada.fecha_fin else "sin cerrar"
+            )
+            raise BusinessError(
+                f"Se cruza con la temporada {cruzada.nombre} "
+                f"({cruzada.fecha_inicio.strftime('%d/%m/%Y')} - {hasta}). "
+                "Las temporadas no se pueden solapar, porque los mismos kilos y "
+                "la misma plata quedarían contados en las dos."
+            )
+
+    def validar_crear(self, data: dict[str, Any]) -> None:
+        self._validar_rango(data["fecha_inicio"], data.get("fecha_fin"))
+
+    def validar_actualizar(self, obj: Temporada, data: dict[str, Any]) -> None:
+        # Con exclude_unset, lo que no venga en el payload se queda como está: hay
+        # que validar el rango RESULTANTE, no solo lo que llegó. Cambiar solo el
+        # inicio también puede provocar un cruce.
+        inicio = data.get("fecha_inicio", obj.fecha_inicio)
+        fin = data["fecha_fin"] if "fecha_fin" in data else obj.fecha_fin
+        self._validar_rango(inicio, fin, excluir_id=obj.id)
+
+    # -------------------------------------------------------- abrir y cerrar
+    def cerrar(self, entity_id: uuid.UUID, fecha_fin: date | None = None) -> Temporada:
+        """Le pone fecha de cierre. Cerrar NO congela las cifras: lo que se cierra
+        es el ciclo del queso, no el libro (ver el modelo)."""
+        temporada = self.repo.get_or_fail(entity_id)
+        if temporada.fecha_fin is not None:
+            raise BusinessError(
+                f"La temporada {temporada.nombre} ya está cerrada "
+                f"({temporada.fecha_fin.strftime('%d/%m/%Y')})"
+            )
+        return self.actualizar(entity_id, {"fecha_fin": fecha_fin or date.today()})
+
+    def reabrir(self, entity_id: uuid.UUID) -> Temporada:
+        """Quita la fecha de cierre, para cuando se cerró por equivocación.
+
+        Solo se puede si no hay otra abierta y si al quedar hasta hoy no se cruza
+        con ninguna posterior: eso lo comprueba la validación normal.
+        """
+        temporada = self.repo.get_or_fail(entity_id)
+        if temporada.fecha_fin is None:
+            raise BusinessError(f"La temporada {temporada.nombre} ya está abierta")
+        return self.actualizar(entity_id, {"fecha_fin": None})
+
+    # ---------------------------------------------------------------- panel
+    def _resumen_de(
+        self,
+        temporada: Temporada,
+        hoy: date,
+        resumenes: "ReventaResumenService",
+        compras: CompraQuesoRepository,
+        ventas: VentaQuesoRepository,
+    ) -> TemporadaResumen:
+        # La abierta se calcula hasta HOY. Si además empezara en el futuro (se
+        # puede dejar programada), el rango quedaría al revés y las consultas
+        # devolverían ceros mudos: se acota al propio inicio, que da un día con
+        # todo en cero, que es la verdad.
+        fin = temporada.fecha_fin or max(hoy, temporada.fecha_inicio)
+        r = resumenes.resumen(temporada.fecha_inicio, fin)
+        por_cobrar = ventas.pendiente_periodo(temporada.fecha_inicio, fin)
+        por_pagar = compras.pendiente_periodo(temporada.fecha_inicio, fin)
+        return TemporadaResumen(
+            id=temporada.id,
+            nombre=temporada.nombre,
+            fecha_inicio=temporada.fecha_inicio,
+            fecha_fin=fin,
+            abierta=temporada.fecha_fin is None,
+            dias=(fin - temporada.fecha_inicio).days + 1,
+            notas=temporada.notas,
+            kilos_comprados=r.kilos_comprados,
+            kilos_vendidos=r.kilos_vendidos,
+            kilos_borona_vendidos=r.kilos_borona_vendidos,
+            kilos_a_borona=r.kilos_a_borona,
+            kilos_merma=r.kilos_merma,
+            kilos_pendientes=r.kilos_pendientes,
+            total_compras=r.total_compras,
+            total_ventas=r.total_ventas,
+            total_gastos=r.total_gastos,
+            ganancia=r.ganancia_estimada,
+            margen_por_kilo=r.margen_por_kilo,
+            precio_promedio_compra=r.precio_promedio_compra,
+            precio_promedio_venta=r.precio_promedio_venta,
+            por_cobrar=por_cobrar,
+            por_pagar=por_pagar,
+            # Los kilos pendientes pueden salir NEGATIVOS (se vendió queso que
+            # venía de una temporada anterior): eso no es queso por vender, así
+            # que "cerrada de verdad" mira que no SOBRE nada, no que dé cero justo.
+            cerrada_de_verdad=(
+                r.kilos_pendientes <= CERO and por_cobrar <= CERO and por_pagar <= CERO
+            ),
+        )
+
+    def panel(self) -> TemporadasPanel:
+        hoy = date.today()
+        resumenes = ReventaResumenService(self.db, self.ctx)
+        compras = CompraQuesoRepository(self.db, self.ctx.empresa_id)
+        ventas = VentaQuesoRepository(self.db, self.ctx.empresa_id)
+        temporadas = self.repo.vigentes()
+        filas = [self._resumen_de(t, hoy, resumenes, compras, ventas) for t in temporadas]
+
+        # Los totales son la SUMA EXACTA de las filas de la lista. Se suman las
+        # filas ya calculadas y no se vuelve a consultar el rango completo: si se
+        # consultara aparte, con huecos entre temporadas el total daría más que la
+        # suma de la lista y el desglose dejaría de cuadrar. Los huecos se avisan
+        # por separado con dias_sin_temporada.
+        mejor = peor = None
+        if filas:
+            mejor = max(filas, key=lambda f: f.ganancia).nombre
+            peor = min(filas, key=lambda f: f.ganancia).nombre
+
+        # Huecos: días con compras o ventas que no caen en ninguna temporada.
+        cubiertos = [
+            (t.fecha_inicio, t.fecha_fin or max(hoy, t.fecha_inicio)) for t in temporadas
+        ]
+        sin_temporada = sum(
+            1
+            for f in self.repo.fechas_con_movimiento()
+            if not any(inicio <= f <= fin for inicio, fin in cubiertos)
+        )
+
+        ultimo = self.repo.ultimo_cierre()
+        return TemporadasPanel(
+            temporadas=filas,
+            total_ganancia=sum((f.ganancia for f in filas), CERO),
+            total_kilos_comprados=sum((f.kilos_comprados for f in filas), CERO),
+            total_ventas=sum((f.total_ventas for f in filas), CERO),
+            total_compras=sum((f.total_compras for f in filas), CERO),
+            mejor=mejor,
+            peor=peor,
+            dias_sin_temporada=sin_temporada,
+            proximo_inicio=(ultimo + timedelta(days=1)) if ultimo else None,
+        )

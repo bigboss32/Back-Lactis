@@ -65,9 +65,12 @@ class EmpresaService(BaseService[Empresa]):
         from app.modules.recepcion.models import RecepcionLeche
         from app.modules.reventa.models import (
             AbonoCompraQueso,
+            AbonoSaldoAnterior,
             AbonoVentaQueso,
             CompraQueso,
             ConversionBorona,
+            SaldoAnterior,
+            Temporada,
             VentaQueso,
         )
         from app.modules.ventas.models import Pago, Venta, VentaDetalle
@@ -88,6 +91,7 @@ class EmpresaService(BaseService[Empresa]):
             (LiquidacionDetalle, LiquidacionDetalle.liquidacion_id, Liquidacion),
             (AbonoCompraQueso, AbonoCompraQueso.compra_id, CompraQueso),
             (AbonoVentaQueso, AbonoVentaQueso.venta_id, VentaQueso),
+            (AbonoSaldoAnterior, AbonoSaldoAnterior.saldo_id, SaldoAnterior),
         ]
         for modelo, fk, padre in detalles:
             res = self.db.execute(
@@ -97,10 +101,16 @@ class EmpresaService(BaseService[Empresa]):
 
         # 2) Tablas transaccionales (todas con empresa_id). El orden hijos->padres
         #    lo da reversed(sorted_tables), respetando las llaves foráneas.
+        # SaldoAnterior y Temporada van aquí y no se quedan como "catálogo": un
+        # saldo del libro anterior es PLATA (suma en por cobrar y por pagar), así
+        # que si sobreviviera al reinicio la cartera seguiría mostrando deuda de
+        # una empresa que se supone que quedó en ceros. Y una temporada sin
+        # movimientos es un rango con nombre que ya no significa nada.
         transaccionales = {
             Pago, MovimientoInventario, MovimientoCaja, MovimientoBancario,
             ConversionBorona, PagoEmpleado, Anticipo, Notificacion, RecepcionLeche,
             Venta, Liquidacion, Produccion, CompraQueso, VentaQueso, Gasto, CajaDiaria,
+            SaldoAnterior, Temporada,
         }
         tablas = {m.__table__ for m in transaccionales}
         for table in reversed(Base.metadata.sorted_tables):
