@@ -49,7 +49,16 @@ class VentaRepository(BaseRepository[Venta]):
         recalcula dividiendo, para que en pantalla coincida con la factura.
 
         Devuelve (fecha, created_at, cliente, tipo_queso_id, producto, cantidad,
-        precio_unitario, total).
+        precio_unitario, total, gasto_monto de la venta, id de la venta).
+
+        El flete viene de la VENTA (es del despacho completo, no del renglón), y se
+        devuelve también el id para poder sumar los kilos de esa venta y repartirlo
+        entre sus renglones a prorrata. Si se le cargara entero a cada renglón, una
+        venta de tres productos multiplicaría el flete por tres.
+
+        Los kilos totales se suman en Python y no con una subconsulta: la subconsulta
+        se auto-correlacionaba contra el propio VentaDetalle del SELECT de afuera y
+        quedaba sin FROM.
         """
         from app.modules.inventario.models import Producto
 
@@ -64,6 +73,8 @@ class VentaRepository(BaseRepository[Venta]):
                     VentaDetalle.cantidad,
                     VentaDetalle.precio_unitario,
                     VentaDetalle.total,
+                    Venta.gasto_monto,
+                    Venta.id,
                 )
                 .join(Venta, Venta.id == VentaDetalle.venta_id)
                 .join(Cliente, Cliente.id == Venta.cliente_id)

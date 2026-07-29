@@ -29,6 +29,19 @@ from app.utils.export import pesos
 CERO = Decimal("0")
 
 
+def _gasto_de_despacho(por_kilo: Decimal, kilos: Decimal) -> Decimal:
+    """Lo que cuesta llevar el despacho: el flete por kilo por los kilos que van.
+
+    Se calcula sobre los kilos de TODOS los renglones de la venta, porque el flete
+    se paga por el peso que sube al camión y no por producto. Igual que en las
+    ventas de reventa.
+
+    NO se le suma al total que paga el cliente: es un costo de la quesera, y es lo
+    que hace que el kilo puesto en destino valga más que el kilo en la planta.
+    """
+    return (Decimal(por_kilo or 0) * Decimal(kilos or 0)).quantize(Decimal("0.01"))
+
+
 class VentaService(BaseService[Venta]):
     repository_cls = VentaRepository
     modulo = "ventas"
@@ -74,6 +87,12 @@ class VentaService(BaseService[Venta]):
         if descuento > subtotal:
             raise BusinessError("El descuento no puede superar el subtotal")
         total = (subtotal - descuento).quantize(Decimal("0.01"))
+
+        # El flete del despacho: sale de los kilos que van, no del total en plata.
+        kilos_despachados = sum((Decimal(d["cantidad"]) for d in detalles_data), CERO)
+        data["gasto_monto"] = _gasto_de_despacho(
+            data.get("gasto_por_kilo") or CERO, kilos_despachados
+        )
 
         venta = Venta(
             **data,
@@ -191,6 +210,17 @@ class VentaService(BaseService[Venta]):
 
         if "descuento" in data:
             venta.descuento = Decimal(data["descuento"])
+
+        # El flete se recalcula si cambió su valor por kilo O si cambiaron los kilos
+        # despachados: si solo se mirara el campo, cambiar los renglones dejaría el
+        # monto viejo y el kilo puesto en destino saldría mal.
+        if "gasto_concepto" in data:
+            venta.gasto_concepto = data["gasto_concepto"]
+        if "gasto_por_kilo" in data:
+            venta.gasto_por_kilo = Decimal(data["gasto_por_kilo"] or CERO)
+        if "gasto_por_kilo" in data or detalles_data is not None:
+            kilos_despachados = sum((Decimal(d.cantidad) for d in venta.detalles), CERO)
+            venta.gasto_monto = _gasto_de_despacho(venta.gasto_por_kilo, kilos_despachados)
 
         if afecta_importes:
             if venta.descuento > venta.subtotal:

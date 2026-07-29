@@ -36,6 +36,22 @@ class Venta(TenantMixin, AuditMixin, Base):
     pagado: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
     observaciones: Mapped[str | None] = mapped_column(String(500))
 
+    # Lo que cuesta LLEVAR el despacho: el flete a Bogotá o a donde sea. Es el
+    # mismo concepto que el `gasto_*` de las ventas de reventa, y se llaman igual a
+    # propósito para que los dos módulos se lean y se mantengan igual.
+    #
+    # OJO: NO cambia el `total` que paga el cliente. Es un costo de la quesera que
+    # reduce la utilidad, y es lo que hace que el kilo PUESTO EN DESTINO valga más
+    # que el kilo en la planta. Sin esto, la utilidad por lote sale mejor de lo real.
+    gasto_concepto: Mapped[str | None] = mapped_column(String(150))
+    gasto_por_kilo: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), default=Decimal("0"), server_default="0"
+    )
+    # Total del gasto = gasto_por_kilo * kilos despachados (lo calcula el servicio)
+    gasto_monto: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), default=Decimal("0"), server_default="0"
+    )
+
     cliente = relationship("Cliente", lazy="joined")
     detalles: Mapped[list["VentaDetalle"]] = relationship(
         back_populates="venta", lazy="selectin", cascade="all, delete-orphan"

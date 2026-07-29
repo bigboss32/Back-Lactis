@@ -127,6 +127,7 @@ def comprobar_cuadre(p, etiqueta=""):
         # Y la utilidad es la resta que dice ser
         assert D(lote["utilidad"]) == (
             D(lote["ingresos"]) - D(lote["costo_vendido"]) - D(lote["costo_de_baja"])
+            - D(lote["gastos"])
         )
         # El detalle de la leche suma el costo del lote (si hubo leche que lo
         # respalde). En los de existencia no hay leche que revisar.
@@ -140,6 +141,9 @@ def comprobar_cuadre(p, etiqueta=""):
         # Lo que se dio de baja no sale en ninguna venta (no se vendió) pero sí se
         # le resta al lote, así que la relación es con la baja restada. La pantalla
         # muestra la baja como un renglón propio que lleva de una cifra a la otra.
+        # Los fletes SÍ están dentro de la utilidad de cada fila de venta (cada
+        # despacho tiene su flete), así que la única diferencia con el lote es la baja.
+        assert sum(D(v["gasto"]) for v in lote["detalle_ventas"]) == D(lote["gastos"])
         suma_ventas = sum(D(v["utilidad"]) for v in lote["detalle_ventas"])
         assert suma_ventas - D(lote["costo_de_baja"]) == D(lote["utilidad"]), (
             f"{etiqueta} lote {lote['fecha']}: ventas {suma_ventas} - baja "
@@ -771,3 +775,193 @@ def test_un_ajuste_hacia_abajo_es_baja_y_si_se_resta(client, base_datos):
           f" {lote['kilos_en_bodega']} kg")
     assert D(stock) == D(lote["kilos_en_bodega"])
     comprobar_cuadre(p, "baja")
+
+
+# ---------------------------------------------------------------------------
+# 22. El flete del despacho: lo que vale el kilo PUESTO en Bogotá
+# ---------------------------------------------------------------------------
+def vender_con_flete(client, h, fecha, cliente, producto, kilos, precio,
+                     flete_kilo, concepto="Transporte a Bogotá"):
+    r = client.post(
+        "/api/v1/ventas",
+        json={"cliente_id": cliente["id"], "fecha": fecha,
+              "gasto_concepto": concepto, "gasto_por_kilo": str(flete_kilo),
+              "detalles": [{"producto_id": producto["id"], "cantidad": str(kilos),
+                            "precio_unitario": str(precio)}]},
+        headers=h,
+    )
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_el_flete_del_despacho_sube_el_costo_del_kilo_puesto(client, base_datos):
+    """Lo que pidió el usuario: el transporte a Bogotá es un gasto que sube lo que
+    vale el kilo puesto allá.
+
+    Sin esto, el kilo salía a lo que costó en la planta y la utilidad quedaba mejor
+    de lo real. El flete NO se le suma al total que paga el cliente: lo paga la
+    quesera.
+    """
+    h = auth_headers(client, "admin.a")
+    transportador, prov = montar_leche(client, h)
+    tipo = tipo_queso(client, h, "Queso campesino")
+    recibir(client, h, "2026-07-01", prov["Libardo"], 1000, transportador)
+    producir(client, h, "2026-07-01", tipo, litros=1000, kilos=100)
+    cliente = cliente_nuevo(client, h)
+    producto = producto_de(client, h, tipo)
+    # 100 kg a 25.000, con flete de 1.200 por kilo hasta Bogotá
+    venta = vender_con_flete(client, h, "2026-07-20", cliente, producto,
+                             kilos=100, precio=25000, flete_kilo=1200)
+
+    print("\n===== 22. EL KILO PUESTO EN BOGOTÁ =====")
+    print(f"  la venta: total {venta['total']} | flete {venta['gasto_concepto']}"
+          f" {venta['gasto_por_kilo']}/kg = {venta['gasto_monto']}")
+    # El flete NO está dentro del total que paga el cliente
+    assert D(venta["total"]) == 2_500_000
+    assert D(venta["gasto_monto"]) == 120_000
+    assert venta["gasto_concepto"] == "Transporte a Bogotá"
+
+    lote = panel(client, h)["lotes"][0]
+    print(f"  el lote costó {lote['costo_total']} ({lote['costo_kilo']}/kg en planta)")
+    print(f"  flete que le tocó: {lote['gastos']}")
+    print(f"  KILO PUESTO EN DESTINO: {lote['costo_puesto_kilo']}/kg")
+    print(f"  ingresos {lote['ingresos']} - costo {lote['costo_vendido']}"
+          f" - flete {lote['gastos']} = UTILIDAD {lote['utilidad']}")
+    # En planta el kilo costó 19.000; puesto en Bogotá, 20.200
+    assert D(lote["costo_kilo"]) == 19_000
+    assert D(lote["gastos"]) == 120_000
+    assert D(lote["costo_puesto_kilo"]) == 20_200
+    # Y la utilidad ya trae el flete restado: 2.500.000 - 1.900.000 - 120.000
+    assert D(lote["utilidad"]) == 480_000
+    # Sin el flete habría dicho 600.000, que es la cifra que estaba mal
+    assert D(lote["utilidad"]) != D(lote["ingresos"]) - D(lote["costo_vendido"])
+    comprobar_cuadre(p={"lotes": [lote]}, etiqueta="flete")
+
+
+def test_el_flete_se_reparte_entre_los_lotes_del_despacho(client, base_datos):
+    """Un despacho que sale de dos lotes: a cada uno le toca el flete de SUS kilos.
+    Si se le cargara entero a los dos, el flete se contaría doble."""
+    h = auth_headers(client, "admin.a")
+    transportador, prov = montar_leche(client, h)
+    tipo = tipo_queso(client, h, "Queso campesino")
+    recibir(client, h, "2026-07-01", prov["Carmen"], 500, transportador)
+    recibir(client, h, "2026-07-08", prov["Libardo"], 500, transportador)
+    producir(client, h, "2026-07-01", tipo, litros=500, kilos=50)
+    producir(client, h, "2026-07-08", tipo, litros=500, kilos=50)
+    cliente = cliente_nuevo(client, h)
+    producto = producto_de(client, h, tipo)
+    # 80 kg: 50 del lote viejo y 30 del nuevo, con flete de 1.000/kg
+    vender_con_flete(client, h, "2026-07-20", cliente, producto,
+                     kilos=80, precio=25000, flete_kilo=1000)
+
+    p = panel(client, h)
+    por_fecha = {l["fecha"]: l for l in p["lotes"]}
+    print("\n===== 23. EL FLETE REPARTIDO ENTRE DOS LOTES =====")
+    for fecha in sorted(por_fecha):
+        l = por_fecha[fecha]
+        print(f"  lote {fecha}: {l['kilos_vendidos']} kg | flete {l['gastos']}"
+              f" | puesto {l['costo_puesto_kilo']}/kg | utilidad {l['utilidad']}")
+    viejo, nuevo = por_fecha["2026-07-01"], por_fecha["2026-07-08"]
+    # 50/80 y 30/80 de los 80.000 de flete
+    assert D(viejo["gastos"]) == 50_000
+    assert D(nuevo["gastos"]) == 30_000
+    # Y la suma es el flete completo, ni más ni menos
+    assert D(viejo["gastos"]) + D(nuevo["gastos"]) == 80_000
+    assert D(p["total_gastos"]) == 80_000
+    comprobar_cuadre(p, "flete repartido")
+
+
+def test_editar_los_kilos_recalcula_el_flete(client, base_datos):
+    """Si solo se mirara el campo del valor por kilo, cambiar los renglones dejaría
+    el monto viejo y el kilo puesto en destino saldría mal."""
+    h = auth_headers(client, "admin.a")
+    transportador, prov = montar_leche(client, h)
+    tipo = tipo_queso(client, h, "Queso campesino")
+    recibir(client, h, "2026-07-01", prov["Libardo"], 1000, transportador)
+    producir(client, h, "2026-07-01", tipo, litros=1000, kilos=100)
+    cliente = cliente_nuevo(client, h)
+    producto = producto_de(client, h, tipo)
+    venta = vender_con_flete(client, h, "2026-07-20", cliente, producto,
+                             kilos=100, precio=25000, flete_kilo=1200)
+    assert D(venta["gasto_monto"]) == 120_000
+
+    # Se corrige: eran 60 kg, no 100. El flete tiene que bajar solo.
+    r = client.put(
+        f"/api/v1/ventas/{venta['id']}",
+        json={"detalles": [{"producto_id": producto["id"], "cantidad": "60",
+                            "precio_unitario": "25000"}]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    print("\n===== 24. EDITAR LOS KILOS RECALCULA EL FLETE =====")
+    print(f"  de 100 kg a 60 kg: flete {venta['gasto_monto']} -> {r.json()['gasto_monto']}")
+    assert D(r.json()["gasto_monto"]) == 72_000  # 60 x 1.200
+
+    lote = panel(client, h)["lotes"][0]
+    print(f"  el lote: flete {lote['gastos']} | puesto {lote['costo_puesto_kilo']}/kg")
+    assert D(lote["gastos"]) == 72_000
+    assert D(lote["costo_puesto_kilo"]) == 20_200  # 19.000 + 1.200
+    comprobar_cuadre(p={"lotes": [lote]}, etiqueta="flete editado")
+
+
+def test_una_venta_de_dos_productos_no_multiplica_el_flete(client, base_datos):
+    """El flete es del despacho, no de cada renglón. Si se le cargara entero a cada
+    uno, una venta de dos productos lo contaría dos veces."""
+    h = auth_headers(client, "admin.a")
+    transportador, prov = montar_leche(client, h)
+    campesino = tipo_queso(client, h, "Queso campesino")
+    doble = tipo_queso(client, h, "Queso doble crema")
+    recibir(client, h, "2026-07-01", prov["Libardo"], 2000, transportador)
+    producir(client, h, "2026-07-01", campesino, litros=1000, kilos=100)
+    producir(client, h, "2026-07-02", doble, litros=1000, kilos=100)
+    cliente = cliente_nuevo(client, h)
+    # Un solo despacho con los dos quesos: 60 kg y 40 kg, flete de 1.000/kg
+    r = client.post(
+        "/api/v1/ventas",
+        json={"cliente_id": cliente["id"], "fecha": "2026-07-20",
+              "gasto_concepto": "Transporte a Bogotá", "gasto_por_kilo": "1000",
+              "detalles": [
+                  {"producto_id": producto_de(client, h, campesino)["id"],
+                   "cantidad": "60", "precio_unitario": "25000"},
+                  {"producto_id": producto_de(client, h, doble)["id"],
+                   "cantidad": "40", "precio_unitario": "28000"},
+              ]},
+        headers=h,
+    )
+    assert r.status_code == 201, r.text
+    venta = r.json()
+
+    p = panel(client, h)
+    print("\n===== 25. UN DESPACHO, DOS PRODUCTOS =====")
+    print(f"  100 kg despachados a 1.000/kg -> flete {venta['gasto_monto']}")
+    for l in p["lotes"]:
+        print(f"    {l['tipo_queso']}: {l['kilos_vendidos']} kg | flete {l['gastos']}")
+    print(f"  suma de los fletes: {p['total_gastos']}")
+    # 100 kg x 1.000 = 100.000, UNA vez
+    assert D(venta["gasto_monto"]) == 100_000
+    assert D(p["total_gastos"]) == 100_000
+    por_tipo = {l["tipo_queso"]: l for l in p["lotes"]}
+    assert D(por_tipo["Queso campesino"]["gastos"]) == 60_000
+    assert D(por_tipo["Queso doble crema"]["gastos"]) == 40_000
+    comprobar_cuadre(p, "dos productos")
+
+
+def test_sin_flete_todo_sigue_igual(client, base_datos):
+    """Las ventas viejas no tienen flete: no puede cambiarles nada."""
+    h = auth_headers(client, "admin.a")
+    transportador, prov = montar_leche(client, h)
+    tipo = tipo_queso(client, h, "Queso campesino")
+    recibir(client, h, "2026-07-01", prov["Libardo"], 1000, transportador)
+    producir(client, h, "2026-07-01", tipo, litros=1000, kilos=100)
+    cliente = cliente_nuevo(client, h)
+    vender(client, h, "2026-07-20", cliente, producto_de(client, h, tipo),
+           kilos=100, precio=25000)
+
+    lote = panel(client, h)["lotes"][0]
+    print("\n===== 26. SIN FLETE =====")
+    print(f"  flete {lote['gastos']} | puesto {lote['costo_puesto_kilo']}/kg"
+          f" | utilidad {lote['utilidad']}")
+    assert D(lote["gastos"]) == 0
+    # Sin flete, el kilo puesto es el mismo que en planta
+    assert D(lote["costo_puesto_kilo"]) == D(lote["costo_kilo"]) == 19_000
+    assert D(lote["utilidad"]) == 600_000

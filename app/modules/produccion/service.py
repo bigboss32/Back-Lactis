@@ -19,6 +19,7 @@ from app.modules.produccion.models import Produccion, TipoQueso
 from app.modules.produccion.repository import ProduccionRepository, TipoQuesoRepository
 
 CERO = Decimal("0")
+DOS_DECIMALES = Decimal("0.01")
 
 
 class TipoQuesoService(BaseService[TipoQueso]):
@@ -229,14 +230,32 @@ class LoteProduccionService:
             )
             for i, f in enumerate(ProduccionRepository(self.db, empresa).eventos_para_lotes())
         ]
-        ventas = [
-            VentaEvento(
-                fecha=f[0], orden=i, cliente=f[2], tipo_queso_id=f[3], producto=f[4],
-                kilos=Decimal(f[5] or 0), precio_kilo=Decimal(f[6] or 0),
-                valor_total=Decimal(f[7] or 0),
+        # El flete viene de la VENTA completa, así que a cada renglón le toca la
+        # parte que corresponde a SUS kilos: si se le cargara entero a cada renglón,
+        # una venta de tres productos multiplicaría el flete por tres.
+        filas_venta = VentaRepository(self.db, empresa).eventos_para_lotes()
+        # Kilos totales por venta, para repartir su flete entre los renglones
+        kilos_por_venta: dict = {}
+        for f in filas_venta:
+            kilos_por_venta[f[9]] = kilos_por_venta.get(f[9], CERO) + Decimal(f[5] or 0)
+
+        ventas = []
+        for i, f in enumerate(filas_venta):
+            kilos_renglon = Decimal(f[5] or 0)
+            kilos_venta = kilos_por_venta.get(f[9], CERO)
+            flete_venta = Decimal(f[8] or 0)
+            flete_renglon = (
+                (flete_venta * kilos_renglon / kilos_venta).quantize(DOS_DECIMALES)
+                if kilos_venta > CERO
+                else CERO
             )
-            for i, f in enumerate(VentaRepository(self.db, empresa).eventos_para_lotes())
-        ]
+            ventas.append(
+                VentaEvento(
+                    fecha=f[0], orden=i, cliente=f[2], tipo_queso_id=f[3], producto=f[4],
+                    kilos=kilos_renglon, precio_kilo=Decimal(f[6] or 0),
+                    valor_total=Decimal(f[7] or 0), gasto_monto=flete_renglon,
+                )
+            )
 
         # Queso que ya estaba en bodega y se cargo a mano, sin pasar por una
         # produccion. El signo del movimiento decide si suma queso (entrada, o
@@ -291,6 +310,8 @@ class LoteProduccionService:
                 kilos_vendidos=l.kilos_vendidos,
                 kilos_en_bodega=l.kilos_en_bodega,
                 ingresos=dinero(l.ingresos),
+                gastos=dinero(l.gastos),
+                costo_puesto_kilo=dinero(l.costo_puesto_kilo),
                 costo_vendido=dinero(l.costo_vendido),
                 costo_en_bodega=dinero(l.costo_en_bodega),
                 utilidad=dinero(l.utilidad),
@@ -315,8 +336,9 @@ class LoteProduccionService:
                         fecha=v.fecha, cliente=v.cliente, producto=v.producto,
                         kilos=v.kilos, kilos_venta=v.kilos_venta,
                         precio_kilo=dinero(v.precio_kilo), ingreso=dinero(v.ingreso),
-                        costo=dinero(v.costo), utilidad=dinero(v.utilidad),
-                        partida=v.partida,
+                        costo=dinero(v.costo), gasto=dinero(v.gasto),
+                        costo_puesto_kilo=dinero(v.costo_puesto_kilo),
+                        utilidad=dinero(v.utilidad), partida=v.partida,
                     )
                     for v in l.detalle_ventas
                 ],
@@ -336,6 +358,7 @@ class LoteProduccionService:
             total_kilos=sum((f.kilos_producidos for f in filas), CERO),
             total_costo=sum((f.costo_total for f in filas), CERO),
             total_ingresos=sum((f.ingresos for f in filas), CERO),
+            total_gastos=sum((f.gastos for f in filas), CERO),
             total_kilos_en_bodega=sum((f.kilos_en_bodega for f in filas), CERO),
             total_costo_en_bodega=sum((f.costo_en_bodega for f in filas), CERO),
             mejor=mejor,

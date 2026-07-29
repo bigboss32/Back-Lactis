@@ -130,6 +130,9 @@ class VentaEvento:
     kilos: Decimal
     precio_kilo: Decimal
     valor_total: Decimal
+    # Lo que costó LLEVAR el despacho. No lo paga el cliente: lo paga la quesera, y
+    # se reparte entre los lotes que aportaron kilos a esa venta.
+    gasto_monto: Decimal = CERO
 
 
 # ---------------------------------------------------------------------- salida
@@ -170,6 +173,9 @@ class VentaDelLote:
     precio_kilo: Decimal
     ingreso: Decimal
     costo: Decimal
+    # La parte del flete de esa venta que le toca a este lote, a prorrata de los
+    # kilos que aportó.
+    gasto: Decimal = CERO
 
     @property
     def partida(self) -> bool:
@@ -177,7 +183,17 @@ class VentaDelLote:
 
     @property
     def utilidad(self) -> Decimal:
-        return self.ingreso - self.costo
+        return self.ingreso - self.costo - self.gasto
+
+    @property
+    def costo_puesto_kilo(self) -> Decimal:
+        """Cuánto costó cada kilo PUESTO en el destino: el queso más el flete.
+
+        Es la cifra que el usuario pidió: "lo que vale el kilo puesto en Bogotá".
+        """
+        if self.kilos <= CERO:
+            return CERO
+        return (self.costo + self.gasto) / self.kilos
 
 
 ORIGEN_PRODUCCION = "produccion"
@@ -215,6 +231,8 @@ class LoteProduccion:
     # Lo que se cargó a mano (solo en los de origen 'existencia')
     costo_existencia: Decimal = CERO
     ingresos: Decimal = CERO
+    # Fletes de los despachos, en la parte que le toca a este lote
+    gastos: Decimal = CERO
     costo_vendido: Decimal = CERO  # costo de los kilos que se vendieron
     costo_de_baja: Decimal = CERO  # costo de los kilos que se dieron de baja
     costo_en_bodega: Decimal = CERO
@@ -265,15 +283,29 @@ class LoteProduccion:
         estado de resultados del mes salga negativo. Lo de bodega va aparte.
 
         Lo que SÍ le resta es lo que se dio de baja, que es plata que salió del
-        lote sin ingreso: eso sí se perdió.
+        lote sin ingreso, y los fletes de los despachos, que son plata que salió
+        para poder vender.
         """
-        return self.ingresos - self.costo_vendido - self.costo_de_baja
+        return self.ingresos - self.costo_vendido - self.costo_de_baja - self.gastos
 
     @property
     def precio_venta_kilo(self) -> Decimal:
         if self.kilos_vendidos <= CERO:
             return CERO
         return self.ingresos / self.kilos_vendidos
+
+    @property
+    def costo_puesto_kilo(self) -> Decimal:
+        """Cuánto costó cada kilo PUESTO en el destino: el queso más el flete.
+
+        Es la cifra que pidió el usuario: "lo que vale el kilo puesto en Bogotá".
+        Se calcula sobre los kilos VENDIDOS y no sobre los producidos, porque el
+        flete solo se pagó por los que se despacharon: si se dividiera entre todos,
+        el kilo que sigue en bodega cargaría con un flete que nadie pagó.
+        """
+        if self.kilos_vendidos <= CERO:
+            return CERO
+        return (self.costo_vendido + self.gastos) / self.kilos_vendidos
 
     @property
     def vendido_completo(self) -> bool:
@@ -512,19 +544,32 @@ def repartir_produccion(
                 valor_reparto = venta.valor_total
                 base = venta.kilos
 
+            # El flete de esa venta se reparte igual que el ingreso: a prorrata de
+            # los kilos, y si la venta quedó parcialmente sin lote, solo la parte que
+            # sí tuvo lote (el resto de ese flete no es de ningún lote).
+            if restante > CERO and venta.kilos > CERO:
+                gasto_reparto = _q(venta.gasto_monto * (kilos_cubiertos / venta.kilos))
+            else:
+                gasto_reparto = venta.gasto_monto
+
             # El último se lleva el residuo del redondeo, para que la suma de los
             # pedazos sea exactamente el valor repartido.
             acumulado = CERO
+            acumulado_gasto = CERO
             for indice, (queso, kilos) in enumerate(asignados):
                 if indice == len(asignados) - 1:
                     ingreso = valor_reparto - acumulado
+                    gasto = gasto_reparto - acumulado_gasto
                 else:
                     ingreso = _q(valor_reparto * kilos / base) if base > CERO else CERO
+                    gasto = _q(gasto_reparto * kilos / base) if base > CERO else CERO
                     acumulado += ingreso
+                    acumulado_gasto += gasto
                 costo = _q(kilos * queso.costo_kilo)
                 lote = queso.lote
                 lote.kilos_vendidos += kilos
                 lote.ingresos += ingreso
+                lote.gastos += gasto
                 lote.costo_vendido += costo
 
                 clave = (venta.fecha, venta.orden, id(lote))
@@ -534,12 +579,14 @@ def repartir_produccion(
                         fecha=venta.fecha, cliente=venta.cliente, producto=venta.producto,
                         kilos=CERO, kilos_venta=venta.kilos,
                         precio_kilo=venta.precio_kilo, ingreso=CERO, costo=CERO,
+                        gasto=CERO,
                     )
                     filas_venta[clave] = fila
                     lote.detalle_ventas.append(fila)
                 fila.kilos += kilos
                 fila.ingreso += ingreso
                 fila.costo += costo
+                fila.gasto += gasto
 
     # Lo que quedó en las colas
     for cola in cola_queso.values():

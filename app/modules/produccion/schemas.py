@@ -93,6 +93,10 @@ class VentaDelLoteProduccionRead(BaseSchema):
     precio_kilo: Decimal
     ingreso: Decimal
     costo: Decimal
+    # La parte del flete de ese despacho que le toca a este lote
+    gasto: Decimal = Decimal("0")
+    # Lo que costó el kilo PUESTO en el destino: el queso más el flete
+    costo_puesto_kilo: Decimal = Decimal("0")
     utilidad: Decimal
     partida: bool
 
@@ -133,6 +137,12 @@ class LoteProduccionRead(BaseSchema):
     kilos_en_bodega: Decimal
     # Plata
     ingresos: Decimal
+    # Fletes de los despachos, en la parte que le toca a este lote. Sí se le restan
+    # a la utilidad: es plata que salió para poder vender.
+    gastos: Decimal = Decimal("0")
+    # Lo que costó el kilo PUESTO en el destino (queso + flete), sobre los kilos
+    # VENDIDOS: el flete solo se pagó por los que se despacharon.
+    costo_puesto_kilo: Decimal = Decimal("0")
     costo_vendido: Decimal
     costo_de_baja: Decimal = Decimal("0")
     costo_en_bodega: Decimal
@@ -161,6 +171,7 @@ class LotesProduccionPanel(BaseSchema):
     total_kilos: Decimal
     total_costo: Decimal
     total_ingresos: Decimal
+    total_gastos: Decimal = Decimal("0")
     total_kilos_en_bodega: Decimal
     total_costo_en_bodega: Decimal
     mejor: date | None = None
