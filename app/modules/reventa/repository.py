@@ -187,6 +187,51 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
         ).all()
         return [(fila[0], Decimal(fila[1])) for fila in filas]
 
+    def del_productor(
+        self, productor: str, desde: date | None = None, hasta: date | None = None
+    ) -> list[CompraQueso]:
+        """Compras vigentes de UN productor, de la más antigua a la más reciente.
+
+        Es el hermano de VentaQuesoRepository.por_cliente, para el estado de
+        cuenta del productor. Se llama `del_productor` y no `por_productor`
+        porque ese nombre ya lo usa el AGREGADO del período (kilos y valor
+        comprado por productor), que devuelve tuplas y no filas.
+
+        El nombre se compara NORMALIZADO (misma clave que agrupa el ranking), así
+        un "sebastián ruiz " de datos viejos entra en el estado de cuenta de
+        "Sebastián Ruiz" y su saldo no queda partido en dos productores.
+
+        El nombre viaja como PARÁMETRO de la consulta (`literal`), nunca pegado al
+        texto del SQL: es texto libre que escribe el usuario.
+
+        Los espacios internos se colapsan en Python ANTES de bindear, igual que
+        hace _canonizar_nombre al guardar: lower(trim(...)) recorta las puntas
+        pero deja los espacios de la mitad, así que registrar
+        "Sebastián  Ruiz" (guardado como "Sebastián Ruiz") y consultarlo con ese
+        mismo texto daría 404.
+
+        Sin rango de fechas devuelve todo el histórico, que es lo que muestra lo
+        que de verdad se le debe. Los abonos ya vienen con lazy="selectin".
+        """
+        buscado = " ".join((productor or "").split())
+        criterios = [
+            CompraQueso.empresa_id == self.empresa_id,
+            CompraQueso.deleted_at.is_(None),
+            CompraQueso.estado != "anulada",
+            clave_nombre(CompraQueso.productor) == clave_nombre(literal(buscado)),
+        ]
+        if desde:
+            criterios.append(CompraQueso.fecha >= desde)
+        if hasta:
+            criterios.append(CompraQueso.fecha <= hasta)
+        return list(
+            self.db.scalars(
+                select(CompraQueso)
+                .where(*criterios)
+                .order_by(CompraQueso.fecha, CompraQueso.created_at)
+            ).all()
+        )
+
     def nombres_productores(self) -> list[str]:
         """Nombres de productores ya usados (para autocompletar), sin repetir.
         Agrupa las variantes de escritura para no ofrecer el mismo dos veces."""

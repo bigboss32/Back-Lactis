@@ -811,6 +811,462 @@ def build_estado_cuenta_pdf(
     return buffer.getvalue()
 
 
+def build_estado_cuenta_productor_pdf(
+    *,
+    empresa_nombre: str,
+    empresa_nit: str | None,
+    empresa_ubicacion: str | None,
+    productor: str,
+    emitido: str,
+    periodo: str,
+    compras: int,
+    compras_detalle: Sequence[dict[str, Any]],
+    pagos: Sequence[dict[str, Any]],
+    total_kilos: Decimal,
+    total_comprado: Decimal,
+    total_pagado: Decimal,
+    saldo: Decimal,
+    saldos_anteriores: Sequence[dict[str, Any]] = (),
+    libro_anterior_total: Decimal = Decimal("0"),
+    libro_anterior_abonado: Decimal = Decimal("0"),
+    libro_anterior_saldo: Decimal = Decimal("0"),
+) -> bytes:
+    """Estado de cuenta de un PRODUCTOR: el espejo de build_estado_cuenta_pdf.
+
+    Es una función PROPIA y no una generalización de la del cliente a propósito:
+    esa ya está desplegada y verificada, y tocarla es riesgo puro. Aquí se reusan
+    sus helpers (BRAND, LOGO_PATH, pesos, kilogramos, _texto, el encabezado con
+    logo, las tablas con header BRAND y el pie).
+
+    `compras_detalle`: dicts con {fecha, kilos, borona_kilos, precio_kilo,
+    valor_total, abonado, saldo}. La borona NO lleva columna propia (ensancharía
+    la tabla): va en una nota corta al pie, porque es información suya y es
+    honesto decirle cuántos kilos vinieron con los lotes sin que se le paguen.
+    `pagos`: dicts con {fecha, valor}, y son SOLO los abonos de esas compras: lo
+    que se le abonó a una cuenta del sistema anterior va en la columna "Abonado"
+    de `saldos_anteriores` (ver el comentario de la sección "Pagos realizados").
+
+    `saldos_anteriores`: dicts con {fecha, concepto, valor_total, abonado,
+    saldo}, las cuentas a medio pagar que la quesera le quedó debiendo en el
+    sistema anterior (SOLO las de tipo 'pagar'). Si viene vacío, esa sección no
+    se imprime.
+
+    OJO, ES UN DOCUMENTO INTERNO PARA CUADRAR CUENTAS CON EL PRODUCTOR: sin
+    numeración consecutiva, sin resolución de la DIAN y sin IVA. No es una
+    factura fiscal, no lo dice y no debe parecerlo.
+
+    Y OJO CON LA CONFIDENCIALIDAD, QUE VA AL CONTRARIO QUE EN EL DEL CLIENTE:
+    esto lo lee el PRODUCTOR, así que aquí no entra ni se imprime NADA del lado
+    de la venta (a qué precio se revendió su queso, total de ventas, precio
+    promedio de venta, márgenes, ganancia, gastos de venta ni nombres de
+    clientes) ni los saldos del libro anterior de tipo 'cobrar', que son deudas
+    de clientes.
+
+    LOS SIGNOS TAMBIÉN VAN AL CONTRARIO: un `saldo` positivo significa que LA
+    QUESERA LE DEBE A ÉL, así que la cifra destacada va rotulada como saldo A
+    FAVOR DEL PRODUCTOR. Si sale negativo es que se le pagó de más, y el rótulo
+    cambia (ver más abajo).
+    """
+    buffer = io.BytesIO()
+    styles = getSampleStyleSheet()
+    st_company = ParagraphStyle("Company", parent=styles["Title"], fontSize=16, textColor=BRAND, spaceAfter=0, leading=18, alignment=0)
+    st_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=8, textColor=GREY, leading=11)
+    st_doctitle = ParagraphStyle("DocT", parent=styles["Normal"], fontSize=12.5, textColor=BRAND, fontName="Helvetica-Bold", alignment=TA_RIGHT, leading=15)
+    st_docmeta = ParagraphStyle("DocM", parent=styles["Normal"], fontSize=8.5, textColor=GREY, alignment=TA_RIGHT, leading=12)
+    st_head = ParagraphStyle("Sec", parent=styles["Heading3"], fontSize=10.5, textColor=BRAND, spaceBefore=2, spaceAfter=4)
+    st_lbl = ParagraphStyle("Lbl", parent=styles["Normal"], fontSize=7.5, textColor=GREY)
+    st_val = ParagraphStyle("Val", parent=styles["Normal"], fontSize=9.5, fontName="Helvetica-Bold", leading=12)
+    st_vacio = ParagraphStyle("Vacio", parent=styles["Normal"], fontSize=9, textColor=GREY, leading=13)
+    st_nota = ParagraphStyle("Nota", parent=styles["Normal"], fontSize=8, textColor=GREY, leading=11)
+    # Los kilos van como Paragraph alineado a la derecha, igual que en el del
+    # cliente: una celda de texto plano no se envuelve y con toneladas acumuladas
+    # el número se salía de la columna en silencio.
+    st_kilos = ParagraphStyle("Kilos", parent=styles["Normal"], fontSize=8, leading=10, alignment=TA_RIGHT)
+    st_kilos_tot = ParagraphStyle(
+        "KilosTot", parent=st_kilos, fontName="Helvetica-Bold", textColor=BRAND
+    )
+    st_concepto = ParagraphStyle("Concepto", parent=styles["Normal"], fontSize=8, leading=10)
+
+    # --- 1. Encabezado: logo + empresa + bloque del documento
+    # Todo texto libre va escapado con _texto: ReportLab interpreta mini-XML y un
+    # '<' del usuario borraría texto o tumbaría la generación del documento.
+    company_block: list[Any] = [Paragraph(_texto(empresa_nombre), st_company)]
+    sub = " · ".join(
+        p
+        for p in [
+            f"NIT {_texto(empresa_nit)}" if empresa_nit else None,
+            _texto(empresa_ubicacion) if empresa_ubicacion else None,
+        ]
+        if p
+    )
+    if sub:
+        company_block.append(Paragraph(sub, st_sub))
+    doc_block = [
+        Paragraph("ESTADO DE CUENTA DEL PRODUCTOR", st_doctitle),
+        Paragraph(f"Emitido: {_texto(emitido)}", st_docmeta),
+    ]
+    logo_cell: Any = (
+        RLImage(str(LOGO_PATH), width=1.4 * cm, height=1.4 * cm) if LOGO_PATH.exists() else ""
+    )
+    header = Table([[logo_cell, company_block, doc_block]], colWidths=[1.7 * cm, 8.2 * cm, 7.4 * cm])
+    header.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (0, 0), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    elements: list[Any] = [
+        header,
+        HRFlowable(width="100%", thickness=1.2, color=BRAND, spaceBefore=6, spaceAfter=10),
+    ]
+
+    # Lo que se le queda debiendo SOLO por las compras hechas en este sistema. Es
+    # lo que tiene que cerrar la columna "Saldo" del detalle: `saldo` trae además
+    # la deuda del libro anterior, y usarlo en la fila de totales haría que la
+    # tabla no sumara. Sin saldos anteriores los dos son iguales.
+    saldo_sistema = total_comprado - total_pagado
+
+    # --- Cómo va el saldo. Son TRES casos: lo normal es que se le deba, puede
+    # estar al día, y puede haberse pagado de más (pasa al rebajarle el precio a
+    # una compra ya pagada). Cada caso lleva su propio rótulo: decirle "saldo a
+    # favor suyo -$550.000" le diría lo contrario de la realidad.
+    if saldo > 0:
+        estado_cuenta = "Con saldo a favor suyo"
+        rotulo_saldo = "SALDO A FAVOR DEL PRODUCTOR"
+        valor_saldo = pesos(saldo)
+    elif saldo == 0:
+        estado_cuenta = "Al día"
+        rotulo_saldo = "SALDO A FAVOR DEL PRODUCTOR"
+        valor_saldo = pesos(Decimal("0"))
+    else:
+        # Se le pagó más de lo que valían sus compras. La cifra destacada va en
+        # POSITIVO y el rótulo dice de quién es, igual que se hizo en el del
+        # cliente: un signo menos pegado a un total es justo lo que se lee mal.
+        # Abajo va además un renglón con la operación y su signo.
+        estado_cuenta = "Se le pagó de más"
+        rotulo_saldo = "PAGADO DE MÁS (a favor de la quesera)"
+        valor_saldo = pesos(abs(saldo))
+
+    # --- 2. Datos del productor y del período (el nombre largo se envuelve solo)
+    info = Table(
+        [
+            [Paragraph("Productor", st_lbl), Paragraph(_texto(productor), st_val),
+             Paragraph("Período", st_lbl), Paragraph(_texto(periodo), st_val)],
+            [Paragraph("Compras", st_lbl), Paragraph(str(compras), st_val),
+             Paragraph("Estado", st_lbl), Paragraph(estado_cuenta, st_val)],
+        ],
+        colWidths=[2.6 * cm, 6.2 * cm, 2.6 * cm, 5.9 * cm],
+    )
+    info.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), BRAND_LIGHT),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D6E0EA")),
+                ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+        )
+    )
+    elements += [info, Spacer(1, 12)]
+
+    # --- 3. Detalle de compras (solo lo suyo: lo que se le compró y se le pagó)
+    elements.append(Paragraph("Detalle de compras", st_head))
+    if compras_detalle:
+        det_data: list[list[Any]] = [
+            ["Fecha", "Kilos", "Precio/kg", "Total", "Abonado", "Saldo"]
+        ]
+        borona_total = Decimal("0")
+        for compra in compras_detalle:
+            borona_total += Decimal(compra.get("borona_kilos") or 0)
+            det_data.append(
+                [
+                    compra["fecha"].strftime("%d/%m/%Y"),
+                    Paragraph(kilogramos(compra["kilos"]), st_kilos),
+                    pesos(compra["precio_kilo"]),
+                    pesos(compra["valor_total"]),
+                    pesos(compra["abonado"]),
+                    pesos(compra["saldo"]),
+                ]
+            )
+        det_data.append(
+            [
+                "TOTALES", Paragraph(kilogramos(total_kilos), st_kilos_tot), "",
+                pesos(total_comprado), pesos(total_pagado), pesos(saldo_sistema),
+            ]
+        )
+        fila_totales = len(det_data) - 1
+        det = Table(
+            det_data,
+            # El ancho útil de la página son 18,59 cm (carta menos los márgenes) y
+            # la tabla usa 18,5. Sin la columna "Producto" del documento del
+            # cliente sobra espacio: se reparte entre la plata, que es lo que el
+            # productor revisa con calculadora.
+            colWidths=[2.6 * cm, 2.9 * cm, 3.0 * cm, 3.4 * cm, 3.3 * cm, 3.3 * cm],
+            repeatRows=1,
+            hAlign="LEFT",
+        )
+        det.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), BRAND),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
+                    ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, fila_totales - 1), [colors.white, BRAND_LIGHT]),
+                    # Fila de totales resaltada (kilos y plata)
+                    ("BACKGROUND", (0, fila_totales), (-1, fila_totales), BRAND_LIGHT),
+                    ("FONTNAME", (0, fila_totales), (-1, fila_totales), "Helvetica-Bold"),
+                    ("TEXTCOLOR", (0, fila_totales), (-1, fila_totales), BRAND),
+                    ("ALIGN", (0, fila_totales), (0, fila_totales), "LEFT"),
+                ]
+            )
+        )
+        elements += [det]
+        if borona_total > 0:
+            # La borona NO tiene columna propia (ensancharía la tabla), pero sí se
+            # dice: son kilos suyos que vinieron con los lotes y no se le pagan.
+            elements += [
+                Spacer(1, 4),
+                Paragraph(
+                    f"Con los lotes vinieron además {kilogramos(borona_total)} de "
+                    "borona, que no se pagan y por eso no suman en el total.",
+                    st_nota,
+                ),
+            ]
+        elements.append(Spacer(1, 12))
+    else:
+        # Pasa con el productor que solo arrastra deuda del sistema anterior: una
+        # tabla con encabezados y una fila de ceros no dice nada.
+        elements += [Paragraph("Sin compras registradas", st_vacio), Spacer(1, 12)]
+
+    # --- 4. Saldos de la cuenta anterior: lo que se le venía debiendo del sistema
+    # que se usaba antes (solo los de tipo 'pagar'). Si no hay, no aparece.
+    if saldos_anteriores:
+        elements.append(Paragraph("Saldos de la cuenta anterior", st_head))
+        ant_data: list[list[Any]] = [["Fecha", "Concepto", "Total", "Abonado", "Saldo"]]
+        for anterior in saldos_anteriores:
+            ant_data.append(
+                [
+                    anterior["fecha"].strftime("%d/%m/%Y"),
+                    # El concepto es texto libre: va escapado, como todo lo que
+                    # escribe el usuario y entra en un Paragraph.
+                    Paragraph(_texto(anterior["concepto"]), st_concepto),
+                    pesos(anterior["valor_total"]),
+                    pesos(anterior["abonado"]),
+                    pesos(anterior["saldo"]),
+                ]
+            )
+        ant_data.append(
+            [
+                "TOTALES", "", pesos(libro_anterior_total),
+                pesos(libro_anterior_abonado), pesos(libro_anterior_saldo),
+            ]
+        )
+        fila_tot_ant = len(ant_data) - 1
+        ant = Table(
+            ant_data,
+            # Mismos 18,5 cm de ancho que el detalle de compras; el concepto se
+            # lleva el espacio porque es la columna que se envuelve.
+            colWidths=[2.3 * cm, 7.0 * cm, 3.1 * cm, 3.1 * cm, 3.0 * cm],
+            repeatRows=1,
+            hAlign="LEFT",
+        )
+        ant.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), BRAND),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
+                    ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, fila_tot_ant - 1), [colors.white, BRAND_LIGHT]),
+                    # Fila de totales resaltada, igual que en el detalle de compras
+                    ("SPAN", (0, fila_tot_ant), (1, fila_tot_ant)),
+                    ("BACKGROUND", (0, fila_tot_ant), (-1, fila_tot_ant), BRAND_LIGHT),
+                    ("FONTNAME", (0, fila_tot_ant), (-1, fila_tot_ant), "Helvetica-Bold"),
+                    ("TEXTCOLOR", (0, fila_tot_ant), (-1, fila_tot_ant), BRAND),
+                    ("ALIGN", (0, fila_tot_ant), (1, fila_tot_ant), "LEFT"),
+                ]
+            )
+        )
+        elements += [
+            ant,
+            Spacer(1, 4),
+            Paragraph(
+                "Estas cuentas vienen del sistema que se usaba antes y no "
+                "corresponden a compras registradas aquí.",
+                st_nota,
+            ),
+            Spacer(1, 12),
+        ]
+
+    # --- 5. Pagos realizados
+    #
+    # Como en el documento del cliente, esta tabla lista SOLO los abonos de las
+    # compras hechas en este sistema: los de las cuentas anteriores ya están
+    # cuadrados arriba (columna Abonado y su fila de TOTALES), y traerlos también
+    # aquí haría que la misma plata apareciera dos veces. Lo que sí se cuida es el
+    # TEXTO: a quien se le acabó de abonar a su cuenta vieja no se le puede decir
+    # "Sin pagos registrados", porque sería negarle un pago que sí recibió.
+    elements.append(Paragraph("Pagos realizados", st_head))
+    if pagos:
+        # Solo Fecha y Valor: las observaciones del abono son la nota interna de
+        # la quesera y este documento se le entrega al productor.
+        pag_data: list[list[Any]] = [["Fecha", "Valor"]]
+        for pago in pagos:
+            pag_data.append([pago["fecha"].strftime("%d/%m/%Y"), pesos(pago["valor"])])
+        pag = Table(
+            pag_data, colWidths=[5.0 * cm, 5.0 * cm], repeatRows=1, hAlign="CENTER"
+        )
+        pag.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), BRAND),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
+                    # Desde la fila 0: el encabezado "Valor" tiene que quedar
+                    # sobre los montos, igual que en la tabla de compras.
+                    ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        elements += [pag]
+    elif saldos_anteriores:
+        elements += [
+            Paragraph(
+                "Sin pagos por compras registradas en este sistema.", st_vacio
+            )
+        ]
+    else:
+        elements += [Paragraph("Sin pagos registrados", st_vacio)]
+    if saldos_anteriores:
+        elements += [
+            Spacer(1, 4),
+            Paragraph(
+                "Los abonos que se le hicieron a las cuentas del sistema anterior "
+                'están en la columna "Abonado" de la sección "Saldos de la cuenta '
+                'anterior".',
+                st_nota,
+            ),
+        ]
+    elements.append(Spacer(1, 12))
+
+    # --- 6. Resumen (con el saldo destacado). Los renglones tienen que SUMAR la
+    # cifra destacada: comprado - pagado + saldo de la cuenta anterior. Cada
+    # renglón lleva su operador escrito porque con tres renglones ya no se adivina
+    # cuál se resta: el productor reproduce la cuenta con la calculadora.
+    resumen_rows: list[tuple[str, str, bool]] = [
+        ("Total comprado", pesos(total_comprado), False),
+        ("(-) Total pagado", pesos(total_pagado), False),
+    ]
+    if saldos_anteriores:
+        resumen_rows.append(
+            ("(+) Saldo de la cuenta anterior", pesos(libro_anterior_saldo), False)
+        )
+    resumen_rows.append(
+        # Con saldo negativo el rótulo cambia y el valor va en POSITIVO: se le
+        # pagó de más, no es una deuda de la quesera con signo menos.
+        (rotulo_saldo, valor_saldo, True)
+    )
+    # La columna del rótulo va más ancha que en el del cliente: "SALDO A FAVOR DEL
+    # PRODUCTOR" y "PAGADO DE MÁS (a favor de la quesera)" son textos largos y una
+    # celda de texto plano no se envuelve (se saldría de la columna en silencio).
+    res = Table([[c, v] for (c, v, _) in resumen_rows], colWidths=[7.4 * cm, 5 * cm], hAlign="RIGHT")
+    res_style: list[Any] = [
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#E6E6E6")),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+    ]
+    for i, (_, _, resaltado) in enumerate(resumen_rows):
+        if resaltado:
+            res_style += [
+                ("BACKGROUND", (0, i), (-1, i), BRAND_LIGHT),
+                ("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"),
+                ("TEXTCOLOR", (0, i), (-1, i), BRAND),
+                ("FONTSIZE", (0, i), (-1, i), 10),
+            ]
+    res.setStyle(TableStyle(res_style))
+    elements += [res, Spacer(1, 8)]
+
+    if saldo < 0:
+        # La cifra destacada va en positivo, así que aquí queda escrita la
+        # operación CON su signo: sin esto, sumando los renglones a mano da un
+        # negativo contra un destacado en positivo y parece un error del documento.
+        operacion = f"{pesos(total_comprado)} - {pesos(total_pagado)}"
+        if saldos_anteriores:
+            operacion += f" + {pesos(libro_anterior_saldo)}"
+        elements += [
+            Paragraph(
+                f"La cuenta da {operacion} = {pesos(saldo)}, es decir que se le "
+                f"pagaron {pesos(abs(saldo))} más de lo que valen sus compras: por "
+                "eso arriba aparece en positivo a favor de la quesera.",
+                st_nota,
+            ),
+            Spacer(1, 8),
+        ]
+    elements.append(Spacer(1, 6))
+
+    # --- 7. Nota final (sin firmas: no es un comprobante de pago ni una factura)
+    elements.append(
+        Paragraph(
+            "Este documento es un resumen informativo de la cuenta y no es una "
+            "factura. Si encuentra alguna diferencia, comuníquese con nosotros.",
+            st_nota,
+        )
+    )
+
+    # Pie propio: en las páginas de continuación hay que decir de qué documento y
+    # de qué productor es la hoja (el del cliente no se toca).
+    def _pie_estado_cuenta_productor(canvas: Any, doc_: Any) -> None:
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#D6E0EA"))
+        canvas.setLineWidth(0.5)
+        canvas.line(1.5 * cm, 1.3 * cm, letter[0] - 1.5 * cm, 1.3 * cm)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(GREY)
+        canvas.drawString(1.5 * cm, 1.0 * cm, f"Generado por Lactis · {emitido}")
+        canvas.drawRightString(letter[0] - 1.5 * cm, 1.0 * cm, f"Página {doc_.page}")
+        if doc_.page > 1:
+            # El nombre se recorta para no chocar con los textos de los extremos
+            # (el pie se dibuja en el canvas, no se envuelve solo).
+            nombre = productor if len(productor) <= 50 else f"{productor[:47]}…"
+            canvas.drawCentredString(
+                letter[0] / 2, 1.0 * cm, f"Estado de cuenta del productor · {nombre}"
+            )
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        buffer, pagesize=letter, topMargin=1.4 * cm, bottomMargin=1.8 * cm,
+        leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+        title=f"Estado de cuenta del productor {productor}",
+    )
+    doc.build(
+        elements,
+        onFirstPage=_pie_estado_cuenta_productor,
+        onLaterPages=_pie_estado_cuenta_productor,
+    )
+    return buffer.getvalue()
+
+
 def litros(valor: Any) -> str:
     """Litros con la misma precisión que guarda la base (hasta 2 decimales) y sin
     ceros a la derecha: 250 L, 227,5 L, 1.234,75 L.

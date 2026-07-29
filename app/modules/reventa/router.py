@@ -14,6 +14,7 @@ from app.modules.reventa.schemas import (
     ConversionCreate,
     ConversionRead,
     EstadoCuentaCliente,
+    EstadoCuentaProductor,
     ResumenReventa,
     SaldoAnteriorCreate,
     SaldoAnteriorRead,
@@ -76,6 +77,52 @@ def estado_cuenta_pdf(
 ) -> Response:
     contenido, filename = ReventaResumenService(db, ctx).estado_cuenta_pdf(
         cliente, desde, hasta
+    )
+    return Response(
+        content=contenido,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get(
+    "/estado-cuenta-productor",
+    response_model=EstadoCuentaProductor,
+    summary="Estado de cuenta de un productor (compras, pagos y saldo a su favor)",
+)
+def estado_cuenta_productor(
+    db: DbSession,
+    # max_length igual al de la columna (String(150)), como en el del cliente: un
+    # nombre más largo no puede existir en la base, así que se rechaza antes de
+    # tocar la consulta.
+    productor: str = Query(..., min_length=2, max_length=150),
+    desde: date | None = Query(None),
+    hasta: date | None = Query(None),
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+) -> EstadoCuentaProductor:
+    """Sin desde/hasta cubre todo el histórico del productor, que es el caso
+    normal: el saldo real que se le debe.
+
+    OJO CON EL SIGNO, que va al contrario del estado de cuenta del cliente: aquí
+    un saldo positivo significa que LA QUESERA LE DEBE A ÉL.
+    """
+    return ReventaResumenService(db, ctx).estado_cuenta_productor(productor, desde, hasta)
+
+
+@router.get(
+    "/estado-cuenta-productor/pdf",
+    summary="Descargar el estado de cuenta del productor en PDF (para entregárselo)",
+)
+def estado_cuenta_productor_pdf(
+    db: DbSession,
+    # Mismo tope que la columna String(150), igual que en la ruta del JSON.
+    productor: str = Query(..., min_length=2, max_length=150),
+    desde: date | None = Query(None),
+    hasta: date | None = Query(None),
+    ctx: RequestContext = Depends(require_permission("reventa", "imprimir")),
+) -> Response:
+    contenido, filename = ReventaResumenService(db, ctx).estado_cuenta_productor_pdf(
+        productor, desde, hasta
     )
     return Response(
         content=contenido,

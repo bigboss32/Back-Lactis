@@ -313,3 +313,68 @@ class EstadoCuentaCliente(BaseSchema):
     libro_anterior_total: Decimal = Decimal("0")
     libro_anterior_abonado: Decimal = Decimal("0")
     libro_anterior_saldo: Decimal = Decimal("0")
+
+
+# --------------------------------------- estado de cuenta DEL PRODUCTOR
+# CONFIDENCIALIDAD, AL REVÉS QUE EN EL DEL CLIENTE: este documento SE LE ENTREGA
+# AL PRODUCTOR para cuadrar cuentas con él. Por eso estos esquemas NO llevan
+# NADA del lado de la venta: ni a qué precio se revendió su queso, ni
+# total_ventas, ni precio_promedio_venta, ni valor_realizado_kilo, ni márgenes,
+# ni ganancia, ni los gastos de venta (flete), ni el nombre de ningún CLIENTE.
+# Tampoco llevan los saldos del libro anterior de tipo 'cobrar': esos son deudas
+# de CLIENTES con la quesera y no tienen nada que ver con un productor.
+# Solo va lo que es suyo: lo que le compraron, lo que le pagaron y lo que se le
+# debe.
+#
+# OJO CON LOS SIGNOS, que van al contrario del documento del cliente: allá un
+# saldo positivo significa que ÉL DEBE; aquí un saldo positivo significa que LA
+# QUESERA LE DEBE A ÉL. Siempre va rotulado ("saldo a favor del productor"), o
+# se lee invertido.
+class EstadoCuentaCompra(BaseSchema):
+    """Una compra que se le hizo al productor, con lo que lleva abonado."""
+
+    fecha: date
+    kilos: Decimal  # kilos_netos: los que se le pagan
+    borona_kilos: Decimal  # la borona que vino con el lote (no se paga); 0 si no hubo
+    precio_kilo: Decimal
+    valor_total: Decimal
+    abonado: Decimal
+    saldo: Decimal
+    estado: str  # pendiente | parcial | pagada
+
+
+class EstadoCuentaPagoProductor(BaseSchema):
+    """Un pago que se le hizo al productor (sin importar a qué compra se aplicó).
+
+    NO lleva `observaciones` A PROPÓSITO, por la misma razón que
+    EstadoCuentaPago: la observación del abono es la nota INTERNA que la quesera
+    se escribe a sí misma, y este esquema se le entrega al productor. Ya hubo un
+    incidente por esto en el documento del cliente y se quitó; no se repite.
+    """
+
+    fecha: date
+    valor: Decimal
+
+
+class EstadoCuentaProductor(BaseSchema):
+    productor: str
+    desde: date | None
+    hasta: date | None
+    emitido: date  # fecha de generación
+    compras: int  # cuántas compras se le hicieron (las del sistema, no las del libro)
+    total_kilos: Decimal  # kilos netos, los que se le pagan
+    # `total_comprado` y `total_pagado` son SOLO del sistema; lo que venía del
+    # libro anterior va aparte en los tres campos libro_anterior_*.
+    total_comprado: Decimal  # lo que valen sus compras
+    total_pagado: Decimal  # lo que se le ha abonado
+    # Lo que traía a medio pagar del sistema anterior: SOLO los saldos de tipo
+    # 'pagar' (los de tipo 'cobrar' son deudas de clientes y no entran aquí).
+    saldos_anteriores: list[EstadoCuentaSaldoAnterior] = []
+    libro_anterior_total: Decimal = Decimal("0")
+    libro_anterior_abonado: Decimal = Decimal("0")
+    libro_anterior_saldo: Decimal = Decimal("0")
+    # TODO lo que se le debe hoy, que es la única cifra que le importa a él:
+    #   (total_comprado - total_pagado) + libro_anterior_saldo = saldo
+    saldo: Decimal
+    compras_detalle: list[EstadoCuentaCompra] = []
+    pagos: list[EstadoCuentaPagoProductor] = []

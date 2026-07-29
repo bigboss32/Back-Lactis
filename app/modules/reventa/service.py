@@ -38,7 +38,10 @@ from app.modules.reventa.repository import (
 )
 from app.modules.reventa.schemas import (
     EstadoCuentaCliente,
+    EstadoCuentaCompra,
     EstadoCuentaPago,
+    EstadoCuentaPagoProductor,
+    EstadoCuentaProductor,
     EstadoCuentaSaldoAnterior,
     EstadoCuentaVenta,
     GananciaProducto,
@@ -46,7 +49,11 @@ from app.modules.reventa.schemas import (
     ResumenReventa,
     SugerenciasReventa,
 )
-from app.utils.export import build_estado_cuenta_pdf, pesos
+from app.utils.export import (
+    build_estado_cuenta_pdf,
+    build_estado_cuenta_productor_pdf,
+    pesos,
+)
 
 CERO = Decimal("0")
 DOS_DECIMALES = Decimal("0.01")
@@ -91,6 +98,23 @@ def _nombre_archivo_cliente(cliente: str) -> str:
     )
     limpio = re.sub(r"[^A-Za-z0-9_-]", "", "_".join(sin_acentos.split()))
     return f"estado_cuenta_{limpio or 'cliente'}.pdf"
+
+
+def _nombre_archivo_productor(productor: str) -> str:
+    """Nombre de archivo seguro para el estado de cuenta del productor.
+
+    Mismo saneamiento que _nombre_archivo_cliente, y se deja aparte a propósito
+    para no tocar el camino del cliente, que ya está desplegado y verificado. El
+    nombre del productor es texto libre: si se colara una comilla o un salto de
+    línea en el header Content-Disposition sería una inyección de cabecera HTTP.
+    Se quitan los acentos (para que "Sebastián" siga siendo legible) y se borra
+    todo lo que no sea alfanumérico, guion o guion bajo.
+    """
+    sin_acentos = "".join(
+        c for c in unicodedata.normalize("NFKD", productor) if not unicodedata.combining(c)
+    )
+    limpio = re.sub(r"[^A-Za-z0-9_-]", "", "_".join(sin_acentos.split()))
+    return f"estado_cuenta_productor_{limpio or 'productor'}.pdf"
 
 
 def _canonizar_nombre(nombre: str, ya_usados: list[str]) -> str:
@@ -1301,3 +1325,239 @@ class ReventaResumenService:
             saldo=datos.saldo,
         )
         return pdf, _nombre_archivo_cliente(datos.cliente)
+
+    # ------------------------------------- estado de cuenta DEL PRODUCTOR
+    def estado_cuenta_productor(
+        self, productor: str, desde: date | None = None, hasta: date | None = None
+    ) -> EstadoCuentaProductor:
+        """Cómo va la cuenta con un productor: lo que se le compró, lo que se le
+        pagó y lo que se le debe. Es el espejo de `estado_cuenta`.
+
+        CONFIDENCIALIDAD, AL CONTRARIO QUE EN EL DEL CLIENTE: esto se le entrega
+        AL PRODUCTOR. De cada compra solo salen fecha, kilos netos, la borona que
+        vino con el lote, precio por kilo, total, abonado y saldo, y de cada abono
+        solo fecha y valor. NADA del lado de la venta (a cuánto se revendió su
+        queso, el total de ventas, el precio promedio de venta, los márgenes, la
+        ganancia, los gastos de venta ni los nombres de los clientes) sale por
+        aquí, ni los saldos del libro de tipo 'cobrar', que son deudas de clientes.
+
+        Sin rango de fechas cubre todo el histórico, que es lo que de verdad se le
+        debe (el caso normal).
+
+        OJO CON EL SIGNO: `saldo` positivo significa que LA QUESERA LE DEBE A ÉL.
+        Es TODO lo que se le debe hoy: lo del sistema MÁS lo que se le venía
+        debiendo del libro anterior. `total_comprado` y `total_pagado` siguen
+        siendo solo del sistema y lo del libro va aparte, así que el documento
+        cuadra:
+            (total_comprado - total_pagado) + libro_anterior_saldo = saldo
+        """
+        compras = self.compras.del_productor(productor, desde, hasta)
+        # Los saldos del libro anterior se filtran por el MISMO rango que las
+        # compras, con la fecha original del documento viejo. SOLO los de tipo
+        # 'pagar': los de tipo 'cobrar' son deudas de CLIENTES con la quesera y no
+        # tienen nada que ver con un productor, ni siquiera si un tercero se llama
+        # igual.
+        saldos = self.saldos.por_tercero(TIPO_SALDO_PAGAR, productor, desde, hasta)
+        # Un productor al que solo se le arrastra deuda vieja SÍ tiene estado de
+        # cuenta: es justo el caso de quien viene del sistema anterior y todavía no
+        # le ha vendido nada aquí.
+        if not compras and not saldos:
+            # Si tiene movimientos pero fuera del rango pedido, decirlo tal cual:
+            # no es lo mismo que no haberle comprado nunca.
+            if (desde or hasta) and (
+                self.compras.del_productor(productor)
+                or self.saldos.por_tercero(TIPO_SALDO_PAGAR, productor)
+            ):
+                raise NotFoundError(
+                    "El productor no tiene compras ni saldos de la cuenta anterior "
+                    "vigentes en el período consultado (lo anulado no cuenta)"
+                )
+            # Se aclara lo de las anuladas porque el usuario puede estar viendo en
+            # pantalla una compra anulada de ese productor y no entender el error.
+            raise NotFoundError(
+                "El productor no tiene compras registradas ni saldos de la cuenta "
+                "anterior (lo anulado no cuenta para el estado de cuenta)"
+            )
+
+        filas: list[EstadoCuentaCompra] = []
+        pagos: list[EstadoCuentaPagoProductor] = []
+        total_kilos = CERO
+        total_comprado = CERO
+        total_pagado = CERO
+        for compra in compras:
+            # Los kilos que salen son los NETOS: son los que se le pagan. La
+            # borona va en su propio campo, sin sumar al total ni al valor.
+            kilos = Decimal(compra.kilos_netos)
+            valor = Decimal(compra.valor_total)
+            abonado = Decimal(compra.abonado)
+            total_kilos += kilos
+            total_comprado += valor
+            total_pagado += abonado
+            filas.append(
+                EstadoCuentaCompra(
+                    fecha=compra.fecha,
+                    kilos=kilos,
+                    borona_kilos=Decimal(compra.borona_kilos or CERO),
+                    precio_kilo=Decimal(compra.precio_kilo),
+                    valor_total=valor,
+                    abonado=abonado,
+                    saldo=valor - abonado,
+                    estado=compra.estado,
+                )
+            )
+            # Los pagos son TODOS los abonos de TODAS sus compras, juntos: al
+            # productor se le paga "a la cuenta", no le interesa a qué compra se
+            # aplicó cada abono. Del abono solo salen fecha y valor: sus
+            # `observaciones` son la nota interna de la quesera y NO se copian
+            # aquí (ver EstadoCuentaPagoProductor).
+            pagos += [
+                EstadoCuentaPagoProductor(fecha=abono.fecha, valor=Decimal(abono.valor))
+                for abono in compra.abonos
+            ]
+        pagos.sort(key=lambda pago: pago.fecha)
+
+        # Lo que se le venía debiendo del sistema anterior. Del saldo solo salen
+        # fecha, concepto, valor, abonado y saldo: sus `observaciones` son la nota
+        # interna de la quesera y no se copian (igual que en los abonos).
+        filas_libro: list[EstadoCuentaSaldoAnterior] = []
+        libro_total = CERO
+        libro_abonado = CERO
+        for saldo_anterior in saldos:
+            valor = Decimal(saldo_anterior.valor_total)
+            abonado = Decimal(saldo_anterior.abonado)
+            libro_total += valor
+            libro_abonado += abonado
+            filas_libro.append(
+                EstadoCuentaSaldoAnterior(
+                    fecha=saldo_anterior.fecha,
+                    concepto=saldo_anterior.concepto,
+                    valor_total=valor,
+                    abonado=abonado,
+                    saldo=valor - abonado,
+                )
+            )
+        libro_saldo = libro_total - libro_abonado
+
+        return EstadoCuentaProductor(
+            # El nombre que se muestra es el GUARDADO (el de su primera compra, o
+            # el del saldo viejo si solo tiene deuda del libro), no el que llegó
+            # por query: así sale bien escrito aunque se haya consultado en
+            # minúsculas.
+            productor=compras[0].productor if compras else saldos[0].tercero,
+            desde=desde,
+            hasta=hasta,
+            emitido=date.today(),
+            compras=len(filas),
+            total_kilos=total_kilos,
+            total_comprado=total_comprado,
+            total_pagado=total_pagado,
+            saldos_anteriores=filas_libro,
+            libro_anterior_total=libro_total,
+            libro_anterior_abonado=libro_abonado,
+            libro_anterior_saldo=libro_saldo,
+            # TODO lo que se le debe: lo del sistema más lo del libro anterior.
+            saldo=(total_comprado - total_pagado) + libro_saldo,
+            compras_detalle=filas,
+            pagos=pagos,
+        )
+
+    def _auditar_exportacion_productor(self, datos: EstadoCuentaProductor) -> None:
+        """Deja registrada la SALIDA de datos, igual que en el del cliente:
+        exportar la cuenta histórica de un productor es entregar información
+        afuera y tiene que quedar en la bitácora (quién la sacó, de qué productor
+        y de qué rango).
+        """
+        from app.modules.auditoria.models import Auditoria
+
+        self.db.add(
+            Auditoria(
+                empresa_id=self.ctx.empresa_id,
+                usuario_id=self.ctx.user_id,
+                ip=self.ctx.ip,
+                modulo="reventa",
+                accion="exportar",
+                entidad="EstadoCuentaProductor",
+                entidad_id=None,
+                antes=None,
+                despues={
+                    "documento": "estado_cuenta_productor_pdf",
+                    "productor": datos.productor,
+                    "desde": datos.desde.isoformat() if datos.desde else None,
+                    "hasta": datos.hasta.isoformat() if datos.hasta else None,
+                    "compras": datos.compras,
+                    "saldo": float(datos.saldo),
+                },
+            )
+        )
+
+    def estado_cuenta_productor_pdf(
+        self, productor: str, desde: date | None = None, hasta: date | None = None
+    ) -> tuple[bytes, str]:
+        """Estado de cuenta del productor en PDF, para entregárselo y cuadrar
+        cuentas con él. Es un documento INTERNO: sin numeración consecutiva, sin
+        resolución de la DIAN y sin IVA (no es una factura)."""
+        datos = self.estado_cuenta_productor(productor, desde, hasta)
+        self._auditar_exportacion_productor(datos)
+        empresa = EmpresaRepository(self.db).get(self.ctx.empresa_id)
+        nombre_empresa = empresa.nombre if empresa else "Quesera"
+        nit = empresa.nit if empresa else None
+        ubicacion = (
+            (", ".join(p for p in [empresa.ciudad, empresa.departamento] if p) or None)
+            if empresa
+            else None
+        )
+        if datos.desde and datos.hasta:
+            periodo = (
+                f"{datos.desde.strftime('%d/%m/%Y')} al {datos.hasta.strftime('%d/%m/%Y')}"
+            )
+        elif datos.desde:
+            periodo = f"Desde el {datos.desde.strftime('%d/%m/%Y')}"
+        elif datos.hasta:
+            periodo = f"Hasta el {datos.hasta.strftime('%d/%m/%Y')}"
+        else:
+            periodo = "Todo el histórico"
+
+        pdf = build_estado_cuenta_productor_pdf(
+            empresa_nombre=nombre_empresa,
+            empresa_nit=nit,
+            empresa_ubicacion=ubicacion,
+            productor=datos.productor,
+            emitido=datos.emitido.strftime("%d/%m/%Y"),
+            periodo=periodo,
+            compras=datos.compras,
+            # Se arman los campos uno por uno a propósito: lo que no se nombre
+            # aquí NO puede llegar al PDF que ve el productor.
+            compras_detalle=[
+                {
+                    "fecha": c.fecha,
+                    "kilos": c.kilos,
+                    "borona_kilos": c.borona_kilos,
+                    "precio_kilo": c.precio_kilo,
+                    "valor_total": c.valor_total,
+                    "abonado": c.abonado,
+                    "saldo": c.saldo,
+                }
+                for c in datos.compras_detalle
+            ],
+            pagos=[{"fecha": p.fecha, "valor": p.valor} for p in datos.pagos],
+            # Los saldos del libro anterior, campo por campo: la observación del
+            # saldo es interna y no puede llegar al documento del productor.
+            saldos_anteriores=[
+                {
+                    "fecha": s.fecha,
+                    "concepto": s.concepto,
+                    "valor_total": s.valor_total,
+                    "abonado": s.abonado,
+                    "saldo": s.saldo,
+                }
+                for s in datos.saldos_anteriores
+            ],
+            total_kilos=datos.total_kilos,
+            total_comprado=datos.total_comprado,
+            total_pagado=datos.total_pagado,
+            libro_anterior_total=datos.libro_anterior_total,
+            libro_anterior_abonado=datos.libro_anterior_abonado,
+            libro_anterior_saldo=datos.libro_anterior_saldo,
+            saldo=datos.saldo,
+        )
+        return pdf, _nombre_archivo_productor(datos.productor)
