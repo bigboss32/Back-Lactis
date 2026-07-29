@@ -572,14 +572,15 @@ def test_el_motor_fifo_directo_sin_base_de_datos():
 
     compras = [
         CompraEvento(fecha=date(2026, 7, 18), orden=0, productor="Sebastián",
-                     kilos=D("300"), borona_kilos=D("0"), valor_total=D("5400000"),
-                     saldo=D("0")),
+                     kilos=D("300"), borona_kilos=D("0"), precio_kilo=D("18000"),
+                     valor_total=D("5400000"), saldo=D("0")),
         CompraEvento(fecha=date(2026, 7, 18), orden=1, productor="Juan",
-                     kilos=D("200"), borona_kilos=D("0"), valor_total=D("3800000"),
-                     saldo=D("3800000")),
+                     kilos=D("200"), borona_kilos=D("0"), precio_kilo=D("19000"),
+                     valor_total=D("3800000"), saldo=D("3800000")),
     ]
     ventas = [
-        VentaEvento(fecha=date(2026, 7, 20), orden=0, tipo="queso", kilos=D("400"),
+        VentaEvento(fecha=date(2026, 7, 20), orden=0, cliente="Alba Nieto",
+                    tipo="queso", kilos=D("400"), precio_kilo=D("21000"),
                     valor_total=D("8400000"), gasto_monto=D("0")),
     ]
     reparto = repartir_lotes(compras, ventas, [])
@@ -603,3 +604,239 @@ def test_el_motor_fifo_directo_sin_base_de_datos():
     # Y el cuadre
     assert lote.costo_vendido + lote.costo_sin_vender == lote.costo_total
     assert lote.por_pagar == 3_800_000
+
+
+# ---------------------------------------------------------------------------
+# 17. El detalle del lote: quién aportó qué y a quién se le vendió
+# ---------------------------------------------------------------------------
+def test_la_suma_de_los_productores_da_la_ganancia_del_lote(client, base_datos):
+    """La ganancia de cada productor NO es la del lote repartida a prorrata: son
+    SUS kilos costeados al precio que se le pagó a él. Por eso dos productores del
+    mismo lote pueden tener margen distinto, y por eso la suma tiene que dar la
+    cifra grande sin sobrar ni faltar un peso."""
+    h = auth_headers(client, "admin.a")
+    # Mismo día, tres precios muy distintos
+    compra(client, h, fecha="2026-07-18", productor="Patricia Ospina",
+           kilos_brutos="200", precio_kilo="15000")
+    compra(client, h, fecha="2026-07-18", productor="Sebastián Ruiz",
+           kilos_brutos="500", precio_kilo="18000")
+    compra(client, h, fecha="2026-07-18", productor="Yeffer Alarcón",
+           kilos_brutos="300", precio_kilo="20500")
+    # Todo se vende al mismo precio, así el margen solo depende de la compra
+    venta(client, h, fecha="2026-07-20", cliente="Alba Nieto", kilos="1000",
+          precio_kilo="21000", pagada_de_contado=True)
+
+    lote = panel(client, h)["lotes"][0]
+    print("\n===== 17. DETALLE POR PRODUCTOR =====")
+    for c in lote["detalle_compras"]:
+        print(f"  {c['productor']:18} {c['kilos']:>8} kg a {c['precio_kilo']:>10}/kg"
+              f" -> ganancia {c['ganancia']:>12} (margen {c['margen_kilo']}/kg)")
+    print(f"  SUMA de los tres -> {lote['ganancia']}")
+
+    # Cada uno con SU margen: 21.000 menos lo que se le pagó
+    por_nombre = {c["productor"]: c for c in lote["detalle_compras"]}
+    assert D(por_nombre["Patricia Ospina"]["margen_kilo"]) == 6000
+    assert D(por_nombre["Sebastián Ruiz"]["margen_kilo"]) == 3000
+    assert D(por_nombre["Yeffer Alarcón"]["margen_kilo"]) == 500
+    # Y la suma da la ganancia del lote, exacta
+    suma = sum(D(c["ganancia"]) for c in lote["detalle_compras"])
+    assert suma == D(lote["ganancia"])
+    assert suma == 1_200_000 + 1_500_000 + 150_000
+    # Los kilos, el costo y el saldo también
+    assert sum(D(c["kilos"]) for c in lote["detalle_compras"]) == D(lote["kilos_comprados"])
+    assert sum(D(c["valor_total"]) for c in lote["detalle_compras"]) == D(lote["costo_total"])
+    assert sum(D(c["saldo"]) for c in lote["detalle_compras"]) == D(lote["por_pagar"])
+
+
+def test_las_ventas_del_lote_suman_sus_ingresos(client, base_datos):
+    h = auth_headers(client, "admin.a")
+    compra(client, h, fecha="2026-07-18", productor="Sebastián Ruiz",
+           kilos_brutos="1000", precio_kilo="17000")
+    venta(client, h, fecha="2026-07-20", cliente="Depósito El Trébol", kilos="400",
+          precio_kilo="20000", pagada_de_contado=True)
+    venta(client, h, fecha="2026-07-22", cliente="Alba Nieto", kilos="300",
+          precio_kilo="21500", gasto_concepto="Flete", gasto_por_kilo="300",
+          pagada_de_contado=True)
+
+    lote = panel(client, h)["lotes"][0]
+    print("\n===== 18. VENTAS QUE SALIERON DEL LOTE =====")
+    for v in lote["detalle_ventas"]:
+        print(f"  {v['fecha']} {v['cliente']:20} {v['kilos']:>8} kg de"
+              f" {v['kilos_venta']:>8} kg a {v['precio_kilo']:>9}/kg"
+              f" -> ingreso {v['ingreso']:>12} ganancia {v['ganancia']}"
+              f" partida={v['partida']}")
+    # Las dos ventas, de la más reciente a la más vieja
+    assert [v["fecha"] for v in lote["detalle_ventas"]] == ["2026-07-22", "2026-07-20"]
+    # Ninguna se partió: el lote tenía de sobra
+    assert all(v["partida"] is False for v in lote["detalle_ventas"])
+    # Y suman lo del lote
+    assert sum(D(v["ingreso"]) for v in lote["detalle_ventas"]) == D(lote["ingresos"])
+    assert sum(D(v["gasto"]) for v in lote["detalle_ventas"]) == D(lote["gastos"])
+    assert sum(D(v["kilos"]) for v in lote["detalle_ventas"]) == D(lote["kilos_vendidos"])
+    assert sum(D(v["ganancia"]) for v in lote["detalle_ventas"]) == D(lote["ganancia"])
+
+
+def test_una_venta_partida_se_ve_partida_en_los_dos_lotes(client, base_datos):
+    """Si mostrara solo los kilos que tomó de cada lote, la venta parecería más
+    pequeña de lo que fue. Por eso cada fila lleva los dos números."""
+    h = auth_headers(client, "admin.a")
+    compra(client, h, fecha="2026-07-18", productor="Sebastián Ruiz",
+           kilos_brutos="400", precio_kilo="17000")
+    compra(client, h, fecha="2026-07-25", productor="Juan Gómez",
+           kilos_brutos="400", precio_kilo="18000")
+    # Una sola venta de 700 kg: 400 del viejo y 300 del nuevo
+    venta(client, h, fecha="2026-07-27", cliente="Alba Nieto", kilos="700",
+          precio_kilo="21000", pagada_de_contado=True)
+
+    lotes = por_fecha(panel(client, h))
+    print("\n===== 19. UNA VENTA PARTIDA =====")
+    for fecha in sorted(lotes):
+        v = lotes[fecha]["detalle_ventas"][0]
+        print(f"  lote {fecha}: {v['kilos']} kg de los {v['kilos_venta']} kg de la"
+              f" venta | ingreso {v['ingreso']} | partida={v['partida']}")
+    a, b = lotes["2026-07-18"], lotes["2026-07-25"]
+    assert D(a["detalle_ventas"][0]["kilos"]) == 400
+    assert D(a["detalle_ventas"][0]["kilos_venta"]) == 700
+    assert a["detalle_ventas"][0]["partida"] is True
+    assert D(b["detalle_ventas"][0]["kilos"]) == 300
+    assert b["detalle_ventas"][0]["partida"] is True
+    # Y las dos partes suman la venta completa
+    ingresos = D(a["detalle_ventas"][0]["ingreso"]) + D(b["detalle_ventas"][0]["ingreso"])
+    assert ingresos == 700 * 21000
+
+
+def test_una_venta_de_dos_compras_del_mismo_lote_es_una_sola_fila(client, base_datos):
+    """El usuario piensa en ventas, no en trozos de inventario. Si una venta se
+    lleva kilos de dos compras del MISMO lote, tiene que salir una fila con los
+    kilos sumados y no dos filas de la misma venta."""
+    h = auth_headers(client, "admin.a")
+    compra(client, h, fecha="2026-07-18", productor="Patricia Ospina",
+           kilos_brutos="200", precio_kilo="15000")
+    compra(client, h, fecha="2026-07-18", productor="Sebastián Ruiz",
+           kilos_brutos="300", precio_kilo="18000")
+    # Una venta de 450 kg: 200 de Patricia y 250 de Sebastián
+    venta(client, h, fecha="2026-07-20", cliente="Alba Nieto", kilos="450",
+          precio_kilo="21000", pagada_de_contado=True)
+
+    lote = panel(client, h)["lotes"][0]
+    print("\n===== 20. UNA VENTA, DOS COMPRAS DEL MISMO LOTE =====")
+    print(f"  filas de venta: {len(lote['detalle_ventas'])}")
+    for v in lote["detalle_ventas"]:
+        print(f"    {v['cliente']}: {v['kilos']} kg | ingreso {v['ingreso']}")
+    for c in lote["detalle_compras"]:
+        print(f"    {c['productor']:18} vendidos {c['kilos_vendidos']} kg"
+              f" ganancia {c['ganancia']}")
+    # UNA sola fila con los 450 kg
+    assert len(lote["detalle_ventas"]) == 1
+    assert D(lote["detalle_ventas"][0]["kilos"]) == 450
+    assert D(lote["detalle_ventas"][0]["ingreso"]) == 450 * 21000
+    assert lote["detalle_ventas"][0]["partida"] is False
+    # Pero el detalle por productor sí los separa, cada uno con su margen
+    por_nombre = {c["productor"]: c for c in lote["detalle_compras"]}
+    assert D(por_nombre["Patricia Ospina"]["kilos_vendidos"]) == 200
+    assert D(por_nombre["Sebastián Ruiz"]["kilos_vendidos"]) == 250
+    assert D(por_nombre["Patricia Ospina"]["margen_kilo"]) == 6000
+    assert D(por_nombre["Sebastián Ruiz"]["margen_kilo"]) == 3000
+    # Y la suma sigue cuadrando
+    assert sum(D(c["ganancia"]) for c in lote["detalle_compras"]) == D(lote["ganancia"])
+
+
+def test_el_detalle_cuadra_con_las_cifras_reales(client, base_datos):
+    """El cuadre del detalle con los kilos y precios de verdad, incluida la compra
+    de Yeffer a $1/kg, que el usuario confirmó que está bien. Aquí es donde el
+    redondeo del reparto proporcional puede dejar centavos sueltos."""
+    h = auth_headers(client, "admin.a")
+    for productor, kilos, precio, borona in [
+        ("Patricia", "12", "12800", "0"), ("Rubiela", "68", "15200", "0"),
+        ("Sebastian", "946", "18100", "23.7"), ("Juan", "693", "17400", "9.7"),
+        ("Prieto", "54", "15200", "0"), ("Yeffer", "115", "1", "0"),
+    ]:
+        compra(client, h, fecha="2026-07-18", productor=productor,
+               kilos_brutos=kilos, precio_kilo=precio, borona_kilos=borona)
+    compra(client, h, fecha="2026-07-25", productor="Juan",
+           kilos_brutos="823", precio_kilo="18000")
+    compra(client, h, fecha="2026-07-25", productor="Sebastian",
+           kilos_brutos="802", precio_kilo="18800")
+    venta(client, h, fecha="2026-07-21", cliente="Depósito El Trébol", kilos="1200.5",
+          precio_kilo="20300", gasto_concepto="Flete", gasto_por_kilo="287.5",
+          pagada_de_contado=True)
+    venta(client, h, fecha="2026-07-28", cliente="Alba Nieto", kilos="1100.75",
+          precio_kilo="21150", gasto_concepto="Flete", gasto_por_kilo="312.5")
+    venta(client, h, fecha="2026-07-29", cliente="La Ganancia", tipo="borona",
+          kilos="33.4", precio_kilo="8200", pagada_de_contado=True)
+
+    p = panel(client, h)
+    print("\n===== 21. EL DETALLE CON CIFRAS REALES =====")
+    for lote in p["lotes"]:
+        print(f"  lote {lote['fecha']} (ganancia {lote['ganancia']}):")
+        suma_c = sum(D(c["ganancia"]) for c in lote["detalle_compras"])
+        for c in lote["detalle_compras"]:
+            print(f"    {c['productor']:12} {c['kilos']:>9} kg a {c['precio_kilo']:>10}"
+                  f" -> vendidos {c['kilos_vendidos']:>9} kg | ganancia {c['ganancia']:>13}")
+        print(f"    suma de productores: {suma_c} == {lote['ganancia']}")
+        suma_v = sum(D(v["ingreso"]) for v in lote["detalle_ventas"])
+        for v in lote["detalle_ventas"]:
+            print(f"    venta {v['fecha']} {v['cliente']:20} {v['kilos']:>9} kg"
+                  f" de {v['kilos_venta']:>9} | ingreso {v['ingreso']:>13}")
+        print(f"    suma de ventas: {suma_v} == {lote['ingresos']}")
+        # Los dos desgloses cuadran con la cifra grande
+        assert suma_c == D(lote["ganancia"])
+        assert suma_v == D(lote["ingresos"])
+        assert sum(D(v["gasto"]) for v in lote["detalle_ventas"]) == D(lote["gastos"])
+        assert sum(D(v["ganancia"]) for v in lote["detalle_ventas"]) == D(lote["ganancia"])
+        # Y por compra, los dos destinos del costo suman lo que se le pagó
+        for c in lote["detalle_compras"]:
+            dos = D(c["costo_realizado"]) + D(c["costo_sin_vender"])
+            assert dos == D(c["valor_total"]), (
+                f"{c['productor']}: {dos} != {c['valor_total']}"
+            )
+            kilos = (D(c["kilos_vendidos"]) + D(c["kilos_a_borona"])
+                     + D(c["kilos_merma"]) + D(c["kilos_sin_vender"]))
+            assert kilos == D(c["kilos"]), f"{c['productor']}: {kilos} != {c['kilos']}"
+    comprobar_cuadre(p, "detalle real")
+
+
+def test_con_merma_las_ventas_no_suman_la_ganancia_del_lote(client, base_datos):
+    """La merma NO sale en ninguna venta, porque no se vendió, pero sí se le resta
+    a la ganancia del lote. Entonces:
+
+        suma de lo que dejaron las ventas - merma = ganancia del lote
+
+    Esta prueba existe porque las otras dos del detalle no tenían merma y me
+    ocultaron el problema: el pie de la tabla de ventas mostraba la ganancia del
+    lote, y con merma las filas no lo sumaban. La pantalla ahora muestra la merma
+    como un renglón propio que lleva de una cifra a la otra.
+    """
+    h = auth_headers(client, "admin.a")
+    compra(client, h, fecha="2026-07-18", productor="Sebastián Ruiz",
+           kilos_brutos="500", precio_kilo="18000")
+    venta(client, h, fecha="2026-07-20", cliente="Alba Nieto", kilos="450",
+          precio_kilo="21000", gasto_concepto="Flete", gasto_por_kilo="200",
+          pagada_de_contado=True)
+    # Los 50 kg que faltan se pierden como merma
+    ajuste(client, h, fecha="2026-07-22", kilos="50", destino="merma")
+
+    lote = panel(client, h)["lotes"][0]
+    ventas = lote["detalle_ventas"]
+    suma_ventas = sum(D(v["ganancia"]) for v in ventas)
+    print("\n===== 22. MERMA Y EL PIE DE LA TABLA DE VENTAS =====")
+    for v in ventas:
+        print(f"  {v['fecha']} {v['cliente']}: entró {v['ingreso']}"
+              f" | costó {v['costo']} | gasto {v['gasto']} -> dejó {v['ganancia']}")
+    print(f"  suma de las ventas: {suma_ventas}")
+    print(f"  (-) merma perdida:  {lote['costo_merma']}")
+    print(f"  ganancia del lote:  {lote['ganancia']}")
+
+    # 9.450.000 - 8.100.000 - 90.000 = 1.260.000 de las ventas
+    assert suma_ventas == 1_260_000
+    # La merma son 50 kg x 18.000 = 900.000
+    assert D(lote["costo_merma"]) == 900_000
+    # Y la ganancia del lote es la resta: NO es la suma de las ventas
+    assert D(lote["ganancia"]) == 360_000
+    assert suma_ventas - D(lote["costo_merma"]) == D(lote["ganancia"])
+    assert suma_ventas != D(lote["ganancia"])
+
+    # El detalle por productor SÍ suma la ganancia del lote, porque la merma se le
+    # carga a la compra de la que salió el queso perdido
+    assert sum(D(c["ganancia"]) for c in lote["detalle_compras"]) == D(lote["ganancia"])
+    comprobar_cuadre(p={"lotes": [lote]}, etiqueta="merma")

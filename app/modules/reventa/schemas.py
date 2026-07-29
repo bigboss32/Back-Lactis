@@ -483,6 +483,58 @@ class TemporadasPanel(BaseSchema):
 
 
 # -------------------------------------------------------------------- lotes
+class CompraDelLoteRead(BaseSchema):
+    """Una compra dentro del lote, con lo que dejaron SUS kilos.
+
+    La ganancia es EXACTA, no la del lote repartida a prorrata: son los kilos de
+    este productor costeados al precio que se le pagó a él. Por eso dos productores
+    del mismo lote pueden tener margen distinto, y por eso la suma de estas
+    ganancias da la del lote sin sobrar ni faltar un peso.
+    """
+
+    productor: str
+    kilos: Decimal
+    borona_recibida: Decimal
+    precio_kilo: Decimal
+    valor_total: Decimal
+    saldo: Decimal  # lo que falta pagarle por esta compra
+    # A dónde fueron SUS kilos (los cuatro suman `kilos`)
+    kilos_vendidos: Decimal
+    kilos_a_borona: Decimal
+    kilos_merma: Decimal
+    kilos_sin_vender: Decimal
+    borona_vendida: Decimal
+    borona_sin_vender: Decimal
+    # Plata
+    ingresos: Decimal
+    gastos: Decimal
+    costo_realizado: Decimal  # lo que costó lo que ya salió (vendido + merma)
+    costo_sin_vender: Decimal
+    ganancia: Decimal
+    margen_kilo: Decimal
+
+
+class VentaDelLoteRead(BaseSchema):
+    """Una venta que se llevó kilos de este lote.
+
+    `kilos` son los que salieron de ESTE lote y `kilos_venta` los de la venta
+    completa: una venta grande se parte entre varios lotes, y mostrar solo los
+    primeros haría creer que la venta fue más pequeña de lo que fue.
+    """
+
+    fecha: date
+    cliente: str
+    tipo: str  # 'queso' | 'borona'
+    kilos: Decimal
+    kilos_venta: Decimal
+    precio_kilo: Decimal
+    ingreso: Decimal  # la parte de la venta que le corresponde a este lote
+    gasto: Decimal
+    costo: Decimal
+    ganancia: Decimal
+    partida: bool  # la venta se repartió con otros lotes
+
+
 class LoteResumen(BaseSchema):
     """Un lote de compra: todas las compras de queso de una misma fecha.
 
@@ -532,6 +584,11 @@ class LoteResumen(BaseSchema):
     precio_venta_kilo: Decimal  # ingreso_queso / kilos_vendidos
     # Si ya no queda nada del lote por vender
     cerrado: bool
+    # El detalle: quién aportó qué y a quién se le vendió. Van en la misma
+    # respuesta y no en otro endpoint porque el reparto FIFO ya los calculó: pedirlos
+    # aparte obligaría a repetir el reparto completo, que es la parte costosa.
+    detalle_compras: list[CompraDelLoteRead] = []
+    detalle_ventas: list[VentaDelLoteRead] = []
 
 
 class LotesPanel(BaseSchema):

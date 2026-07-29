@@ -19,25 +19,32 @@ esconderlo (ver `kilos_sin_lote`).
 
 CÓMO SE COSTEA
 --------------
-Cada lote tiene su propio costo por kilo (valor pagado / kilos comprados), que es
-distinto entre lotes: en los datos reales el del 18 salió a $16.519/kg y el del
-25 a $18.395/kg. Cuando una venta se lleva K kilos de un lote, a ese lote se le
-carga K × su costo por kilo.
+El reparto se lleva al nivel de CADA COMPRA, no del lote: cada compra tiene su
+propio costo por kilo, y cuando una venta se lleva K kilos de una compra, a esa
+compra se le carga K × su costo por kilo. Las cifras del lote son la SUMA de las
+de sus compras (ver `LoteCalculado`), no un acumulado aparte, y de ahí salen dos
+cosas al mismo tiempo:
+
+- El cuadre del lote queda garantizado por construcción, no por un ajuste al
+  final: si cada compra cuadra, el lote cuadra.
+- Sale gratis el detalle por productor DENTRO del lote, y es exacto: no es la
+  ganancia del lote repartida a prorrata de los kilos, es la ganancia de los
+  kilos de ese productor con el precio que se le pagó a él.
 
 La borona tiene DOS orígenes y se costea distinto según cuál:
-- La que llega con el lote y no se paga: costo CERO. Lo que se venda de ella es
-  ganancia pura del lote.
-- La que sale de pasar queso a borona: se lleva el costo del queso del que salió.
-  Si no, pasar queso a borona haría desaparecer plata del lote.
+- La que llega con la compra y no se paga: costo CERO. Lo que se venda de ella es
+  ganancia pura de esa compra.
+- La que sale de pasar queso a borona: se lleva el costo del queso del que salió,
+  y se le carga a la MISMA compra de la que salió ese queso. Si no, pasar queso a
+  borona haría desaparecer plata.
 
 LA CUENTA QUE TIENE QUE CUADRAR
 -------------------------------
-Cada peso pagado por un lote termina en exactamente uno de cuatro sitios:
-costo de lo vendido, costo de lo que se perdió como merma, costo de la borona que
-todavía no se ha vendido, o costo de lo que sigue en inventario. La función
-`repartir_lotes` garantiza esa igualdad peso a peso: el último trozo de cada
-reparto absorbe el residuo del redondeo, porque el usuario cuadra estas cifras
-a mano con calculadora.
+Cada peso pagado por una compra termina en exactamente uno de cuatro sitios:
+costo de lo vendido, costo de la borona vendida, costo de lo que se perdió como
+merma, o costo de lo que sigue en inventario. `repartir_lotes` garantiza esa
+igualdad peso a peso: el último trozo de cada reparto absorbe el residuo del
+redondeo, porque el usuario cuadra estas cifras a mano con calculadora.
 """
 from __future__ import annotations
 
@@ -65,6 +72,7 @@ class CompraEvento:
     productor: str
     kilos: Decimal  # kilos_netos: los que se pagan
     borona_kilos: Decimal  # la que llega con el lote y no se paga
+    precio_kilo: Decimal
     valor_total: Decimal
     saldo: Decimal  # lo que falta pagarle por esta compra
 
@@ -73,8 +81,10 @@ class CompraEvento:
 class VentaEvento:
     fecha: date
     orden: int
+    cliente: str
     tipo: str  # 'queso' | 'borona'
     kilos: Decimal
+    precio_kilo: Decimal
     valor_total: Decimal
     gasto_monto: Decimal
 
@@ -91,31 +101,180 @@ class AjusteEvento:
 
 # ---------------------------------------------------------------------- salida
 @dataclass
-class LoteCalculado:
-    fecha: date
-    productores: list[str] = field(default_factory=list)
-    compras: int = 0
-    # Lo comprado
-    kilos_comprados: Decimal = CERO
-    costo_total: Decimal = CERO
-    por_pagar: Decimal = CERO
-    borona_recibida: Decimal = CERO
-    # A dónde fue el queso del lote
+class CompraDelLote:
+    """Una compra dentro del lote, con lo que dejaron SUS kilos.
+
+    Los acumuladores se llenan durante el reparto: cada vez que una venta o un
+    ajuste se lleva kilos de esta compra, se anotan aquí. La ganancia que sale es
+    exacta —los kilos de este productor al precio que se le pagó a él— y no la del
+    lote repartida a prorrata.
+    """
+
+    productor: str
+    kilos: Decimal
+    borona_recibida: Decimal
+    precio_kilo: Decimal
+    valor_total: Decimal
+    saldo: Decimal
+    # A dónde fueron SUS kilos (los cuatro suman `kilos`)
     kilos_vendidos: Decimal = CERO
     kilos_a_borona: Decimal = CERO
     kilos_merma: Decimal = CERO
     kilos_sin_vender: Decimal = CERO
-    # Borona del lote (la recibida gratis + la que salió de su queso)
     borona_vendida: Decimal = CERO
     borona_sin_vender: Decimal = CERO
     # Plata
     ingreso_queso: Decimal = CERO
     ingreso_borona: Decimal = CERO
     gastos: Decimal = CERO
-    costo_vendido: Decimal = CERO  # costo de los kilos de queso que se vendieron
-    costo_borona_vendida: Decimal = CERO  # solo la borona que venía de queso
+    costo_vendido: Decimal = CERO
+    costo_borona_vendida: Decimal = CERO
     costo_merma: Decimal = CERO
-    costo_sin_vender: Decimal = CERO  # queso + borona que siguen en inventario
+    costo_sin_vender: Decimal = CERO
+
+    @property
+    def ingresos(self) -> Decimal:
+        return self.ingreso_queso + self.ingreso_borona
+
+    @property
+    def costo_realizado(self) -> Decimal:
+        return self.costo_vendido + self.costo_borona_vendida + self.costo_merma
+
+    @property
+    def ganancia(self) -> Decimal:
+        return self.ingresos - self.costo_realizado - self.gastos
+
+
+@dataclass
+class VentaDelLote:
+    """Una venta que se llevó kilos de este lote.
+
+    `kilos` son los que salieron de ESTE lote, que pueden ser menos que los de la
+    venta (`kilos_venta`): una venta grande se parte entre varios lotes. Se guardan
+    los dos para que en pantalla se vea cuándo se partió y no parezca que la venta
+    fue más pequeña de lo que fue.
+    """
+
+    fecha: date
+    cliente: str
+    tipo: str
+    kilos: Decimal
+    kilos_venta: Decimal
+    precio_kilo: Decimal
+    ingreso: Decimal
+    gasto: Decimal
+    costo: Decimal
+
+    @property
+    def partida(self) -> bool:
+        return self.kilos < self.kilos_venta
+
+    @property
+    def ganancia(self) -> Decimal:
+        return self.ingreso - self.costo - self.gasto
+
+
+@dataclass
+class LoteCalculado:
+    """Un lote. Todas sus cifras son la SUMA de las de sus compras.
+
+    Son propiedades calculadas y no campos acumulados a propósito: con una sola
+    fuente de verdad no puede pasar que el lote diga una cosa y el detalle por
+    productor otra, que es exactamente el error que el usuario detecta cuando suma
+    la columna con la calculadora.
+    """
+
+    fecha: date
+    detalle_compras: list[CompraDelLote] = field(default_factory=list)
+    detalle_ventas: list[VentaDelLote] = field(default_factory=list)
+
+    # ---------------------------------------------------------- lo comprado
+    @property
+    def compras(self) -> int:
+        return len(self.detalle_compras)
+
+    @property
+    def productores(self) -> list[str]:
+        """En el orden en que se registraron, sin repetir: un productor puede
+        tener dos compras el mismo día."""
+        vistos: list[str] = []
+        for compra in self.detalle_compras:
+            if compra.productor not in vistos:
+                vistos.append(compra.productor)
+        return vistos
+
+    def _suma(self, campo: str) -> Decimal:
+        return sum((getattr(c, campo) for c in self.detalle_compras), CERO)
+
+    @property
+    def kilos_comprados(self) -> Decimal:
+        return self._suma("kilos")
+
+    @property
+    def costo_total(self) -> Decimal:
+        return self._suma("valor_total")
+
+    @property
+    def por_pagar(self) -> Decimal:
+        return self._suma("saldo")
+
+    @property
+    def borona_recibida(self) -> Decimal:
+        return self._suma("borona_recibida")
+
+    # ------------------------------------------------- a dónde fue el queso
+    @property
+    def kilos_vendidos(self) -> Decimal:
+        return self._suma("kilos_vendidos")
+
+    @property
+    def kilos_a_borona(self) -> Decimal:
+        return self._suma("kilos_a_borona")
+
+    @property
+    def kilos_merma(self) -> Decimal:
+        return self._suma("kilos_merma")
+
+    @property
+    def kilos_sin_vender(self) -> Decimal:
+        return self._suma("kilos_sin_vender")
+
+    @property
+    def borona_vendida(self) -> Decimal:
+        return self._suma("borona_vendida")
+
+    @property
+    def borona_sin_vender(self) -> Decimal:
+        return self._suma("borona_sin_vender")
+
+    # --------------------------------------------------------------- plata
+    @property
+    def ingreso_queso(self) -> Decimal:
+        return self._suma("ingreso_queso")
+
+    @property
+    def ingreso_borona(self) -> Decimal:
+        return self._suma("ingreso_borona")
+
+    @property
+    def gastos(self) -> Decimal:
+        return self._suma("gastos")
+
+    @property
+    def costo_vendido(self) -> Decimal:
+        return self._suma("costo_vendido")
+
+    @property
+    def costo_borona_vendida(self) -> Decimal:
+        return self._suma("costo_borona_vendida")
+
+    @property
+    def costo_merma(self) -> Decimal:
+        return self._suma("costo_merma")
+
+    @property
+    def costo_sin_vender(self) -> Decimal:
+        return self._suma("costo_sin_vender")
 
     @property
     def ingresos(self) -> Decimal:
@@ -157,9 +316,19 @@ class RepartoLotes:
 # ------------------------------------------------------------ implementación
 @dataclass
 class _Trozo:
-    """Un pedazo de inventario con su dueño y su costo por kilo."""
+    """Un pedazo de inventario con su dueño y su costo por kilo.
+
+    Apunta a la COMPRA (donde se anota el reparto, y de cuya suma salen las cifras
+    del lote) y también al LOTE, para poder colgar ahí la fila de la venta sin
+    tener que buscarlo. Se guarda la referencia en vez de buscarla porque buscar
+    una compra dentro de las listas compararía dataclasses campo por campo, y dos
+    compras idénticas del mismo día (mismo productor, mismos kilos, mismo precio)
+    son iguales entre sí: la búsqueda encontraría la primera y además sería
+    cuadrática.
+    """
 
     lote: LoteCalculado
+    compra: CompraDelLote
     kilos: Decimal
     costo_kilo: Decimal
 
@@ -192,25 +361,25 @@ def _consumir(
 
 def _repartir_plata(
     asignados: list[tuple[_Trozo, Decimal]], total: Decimal, kilos_totales: Decimal
-) -> list[tuple[_Trozo, Decimal]]:
+) -> list[Decimal]:
     """Reparte `total` entre las asignaciones, en proporción a sus kilos.
 
     El ÚLTIMO trozo se lleva el residuo, de modo que la suma de los pedazos sea
-    exactamente `total`. Sin eso, repartir $17.122.600 entre tres lotes puede dar
-    un peso de diferencia, y esa diferencia hace que la columna no sume la cifra
-    grande —que es justo lo que el usuario verifica a mano—.
+    exactamente `total`. Sin eso, repartir $17.122.600 entre tres compras puede
+    dar un peso de diferencia, y esa diferencia hace que la columna no sume la
+    cifra grande —que es justo lo que el usuario verifica a mano—.
     """
     if not asignados or kilos_totales <= CERO:
-        return []
-    partes: list[tuple[_Trozo, Decimal]] = []
+        return [CERO for _ in asignados]
+    partes: list[Decimal] = []
     acumulado = CERO
-    for indice, (trozo, kilos) in enumerate(asignados):
+    for indice, (_, kilos) in enumerate(asignados):
         if indice == len(asignados) - 1:
             parte = total - acumulado
         else:
             parte = _q(total * kilos / kilos_totales)
             acumulado += parte
-        partes.append((trozo, parte))
+        partes.append(parte)
     return partes
 
 
@@ -219,7 +388,7 @@ def repartir_lotes(
     ventas: list[VentaEvento],
     ajustes: list[AjusteEvento],
 ) -> RepartoLotes:
-    """Reparte ventas y ajustes entre los lotes de compra, FIFO.
+    """Reparte ventas y ajustes entre las compras de cada lote, FIFO.
 
     Los eventos se ordenan por (fecha, orden). Dentro de un mismo día las compras
     van ANTES de las ventas: lo normal es comprar en la mañana y despachar en la
@@ -230,6 +399,10 @@ def repartir_lotes(
     por_fecha: dict[date, LoteCalculado] = {}
     cola_queso: list[_Trozo] = []
     cola_borona: list[_Trozo] = []
+    # Filas de venta ya abiertas, para no partir una venta en varias filas del
+    # mismo lote cuando se lleva kilos de dos compras suyas: el usuario piensa en
+    # ventas, no en trozos de inventario.
+    filas_venta: dict[tuple[date, int], VentaDelLote] = {}
 
     # (fecha, prioridad, orden): prioridad 0 = compra, 1 = ajuste, 2 = venta.
     # El ajuste va antes de la venta del mismo día porque un ajuste de merma suele
@@ -251,17 +424,20 @@ def repartir_lotes(
                 lote = LoteCalculado(fecha=compra.fecha)
                 por_fecha[compra.fecha] = lote
                 reparto.lotes.append(lote)
-            lote.compras += 1
-            if compra.productor not in lote.productores:
-                lote.productores.append(compra.productor)
-            lote.kilos_comprados += compra.kilos
-            lote.costo_total += compra.valor_total
-            lote.por_pagar += compra.saldo
-            lote.borona_recibida += compra.borona_kilos
+            registro = CompraDelLote(
+                productor=compra.productor,
+                kilos=compra.kilos,
+                borona_recibida=compra.borona_kilos,
+                precio_kilo=compra.precio_kilo,
+                valor_total=compra.valor_total,
+                saldo=compra.saldo,
+            )
+            lote.detalle_compras.append(registro)
             if compra.kilos > CERO:
                 cola_queso.append(
                     _Trozo(
                         lote=lote,
+                        compra=registro,
                         kilos=compra.kilos,
                         costo_kilo=compra.valor_total / compra.kilos,
                     )
@@ -269,7 +445,10 @@ def repartir_lotes(
             if compra.borona_kilos > CERO:
                 # Costo cero: la borona llega con el lote y no se paga
                 cola_borona.append(
-                    _Trozo(lote=lote, kilos=compra.borona_kilos, costo_kilo=CERO)
+                    _Trozo(
+                        lote=lote, compra=registro, kilos=compra.borona_kilos,
+                        costo_kilo=CERO,
+                    )
                 )
 
         elif clase == "ajuste":
@@ -278,14 +457,18 @@ def repartir_lotes(
             for trozo, kilos in asignados:
                 costo = _q(kilos * trozo.costo_kilo)
                 if ajuste.destino == DESTINO_MERMA:
-                    trozo.lote.kilos_merma += kilos
-                    trozo.lote.costo_merma += costo
+                    trozo.compra.kilos_merma += kilos
+                    trozo.compra.costo_merma += costo
                 else:
-                    trozo.lote.kilos_a_borona += kilos
-                    # La borona que sale de queso ARRASTRA el costo de ese queso:
-                    # si entrara con costo cero, la plata del lote desaparecería
+                    trozo.compra.kilos_a_borona += kilos
+                    # La borona que sale de queso ARRASTRA el costo de ese queso y
+                    # se le anota a la MISMA compra: si entrara con costo cero, la
+                    # plata de esa compra desaparecería.
                     cola_borona.append(
-                        _Trozo(lote=trozo.lote, kilos=kilos, costo_kilo=trozo.costo_kilo)
+                        _Trozo(
+                            lote=trozo.lote, compra=trozo.compra, kilos=kilos,
+                            costo_kilo=trozo.costo_kilo,
+                        )
                     )
             if faltante > CERO:
                 reparto.kilos_sin_lote += faltante
@@ -295,63 +478,94 @@ def repartir_lotes(
             cola = cola_borona if venta.tipo == TIPO_BORONA else cola_queso
             asignados, faltante = _consumir(cola, venta.kilos)
             kilos_cubiertos = venta.kilos - faltante
-            ingresos = _repartir_plata(asignados, venta.valor_total, venta.kilos)
-            gastos = _repartir_plata(asignados, venta.gasto_monto, venta.kilos)
             # Si parte de la venta no tuvo lote, esa parte de la plata tampoco es
             # de ningún lote: se reparte solo lo que corresponde a lo cubierto.
             if faltante > CERO and venta.kilos > CERO:
                 proporcion = kilos_cubiertos / venta.kilos
-                cubierto_valor = _q(venta.valor_total * proporcion)
-                cubierto_gasto = _q(venta.gasto_monto * proporcion)
-                ingresos = _repartir_plata(asignados, cubierto_valor, kilos_cubiertos)
-                gastos = _repartir_plata(asignados, cubierto_gasto, kilos_cubiertos)
-                reparto.ingreso_sin_lote += venta.valor_total - cubierto_valor
+                valor_reparto = _q(venta.valor_total * proporcion)
+                gasto_reparto = _q(venta.gasto_monto * proporcion)
+                reparto.ingreso_sin_lote += venta.valor_total - valor_reparto
                 if venta.tipo == TIPO_BORONA:
                     reparto.borona_sin_lote += faltante
                 else:
                     reparto.kilos_sin_lote += faltante
+                base_kilos = kilos_cubiertos
+            else:
+                valor_reparto = venta.valor_total
+                gasto_reparto = venta.gasto_monto
+                base_kilos = venta.kilos
 
-            for (trozo, kilos), (_, ingreso), (_, gasto) in zip(asignados, ingresos, gastos):
+            ingresos = _repartir_plata(asignados, valor_reparto, base_kilos)
+            gastos = _repartir_plata(asignados, gasto_reparto, base_kilos)
+
+            for (trozo, kilos), ingreso, gasto in zip(asignados, ingresos, gastos):
                 costo = _q(kilos * trozo.costo_kilo)
-                trozo.lote.gastos += gasto
+                registro = trozo.compra
+                registro.gastos += gasto
                 if venta.tipo == TIPO_BORONA:
-                    trozo.lote.borona_vendida += kilos
-                    trozo.lote.ingreso_borona += ingreso
-                    trozo.lote.costo_borona_vendida += costo
+                    registro.borona_vendida += kilos
+                    registro.ingreso_borona += ingreso
+                    registro.costo_borona_vendida += costo
                 else:
-                    trozo.lote.kilos_vendidos += kilos
-                    trozo.lote.ingreso_queso += ingreso
-                    trozo.lote.costo_vendido += costo
+                    registro.kilos_vendidos += kilos
+                    registro.ingreso_queso += ingreso
+                    registro.costo_vendido += costo
+
+                # La fila de la venta, a nivel de LOTE: si la venta se llevó kilos
+                # de dos compras del mismo lote, es UNA fila con los kilos sumados.
+                lote_de = trozo.lote
+                clave = (lote_de.fecha, venta.orden)
+                fila = filas_venta.get(clave)
+                if fila is None:
+                    fila = VentaDelLote(
+                        fecha=venta.fecha, cliente=venta.cliente, tipo=venta.tipo,
+                        kilos=CERO, kilos_venta=venta.kilos,
+                        precio_kilo=venta.precio_kilo,
+                        ingreso=CERO, gasto=CERO, costo=CERO,
+                    )
+                    filas_venta[clave] = fila
+                    lote_de.detalle_ventas.append(fila)
+                fila.kilos += kilos
+                fila.ingreso += ingreso
+                fila.gasto += gasto
+                fila.costo += costo
 
     # Lo que quedó en las colas es inventario sin vender, con su costo
     for trozo in cola_queso:
         if trozo.kilos > CERO:
-            trozo.lote.kilos_sin_vender += trozo.kilos
-            trozo.lote.costo_sin_vender += _q(trozo.kilos * trozo.costo_kilo)
+            trozo.compra.kilos_sin_vender += trozo.kilos
+            trozo.compra.costo_sin_vender += _q(trozo.kilos * trozo.costo_kilo)
     for trozo in cola_borona:
         if trozo.kilos > CERO:
-            trozo.lote.borona_sin_vender += trozo.kilos
-            trozo.lote.costo_sin_vender += _q(trozo.kilos * trozo.costo_kilo)
+            trozo.compra.borona_sin_vender += trozo.kilos
+            trozo.compra.costo_sin_vender += _q(trozo.kilos * trozo.costo_kilo)
 
-    # Cuadre peso a peso: los cuatro destinos del costo tienen que sumar
-    # exactamente lo pagado por el lote. Los redondeos de arriba pueden dejar
-    # centavos de diferencia; se le cargan al costo de lo que sigue en inventario,
-    # que es el único que no está pegado a un documento concreto (una venta o un
-    # ajuste ya impreso). Si el lote está vendido completo, al costo de lo vendido.
+    # Cuadre peso a peso, POR COMPRA: los cuatro destinos del costo tienen que
+    # sumar exactamente lo que se pagó por esa compra. Los redondeos de arriba
+    # pueden dejar centavos de diferencia; se le cargan al costo de lo que sigue en
+    # inventario, que es el único que no está pegado a un documento concreto (una
+    # venta o un ajuste ya impreso). Si la compra está vendida completa, al costo
+    # de lo vendido.
+    #
+    # Va por compra y no por lote a propósito: como las cifras del lote son la
+    # suma de las de sus compras, cuadrar cada compra hace que el lote cuadre solo,
+    # y además el detalle por productor cuadra también.
     for lote in reparto.lotes:
-        lote.kilos_comprados = _q(lote.kilos_comprados, KILOS)
-        repartido = (
-            lote.costo_vendido
-            + lote.costo_borona_vendida
-            + lote.costo_merma
-            + lote.costo_sin_vender
-        )
-        diferencia = _q(lote.costo_total) - repartido
-        if diferencia != CERO:
-            if lote.costo_sin_vender > CERO or lote.kilos_sin_vender > CERO:
-                lote.costo_sin_vender += diferencia
-            else:
-                lote.costo_vendido += diferencia
+        for compra_reg in lote.detalle_compras:
+            repartido = (
+                compra_reg.costo_vendido
+                + compra_reg.costo_borona_vendida
+                + compra_reg.costo_merma
+                + compra_reg.costo_sin_vender
+            )
+            diferencia = _q(compra_reg.valor_total) - repartido
+            if diferencia != CERO:
+                if compra_reg.kilos_sin_vender > CERO or compra_reg.borona_sin_vender > CERO:
+                    compra_reg.costo_sin_vender += diferencia
+                else:
+                    compra_reg.costo_vendido += diferencia
+        # Las ventas del lote, de la más reciente a la más vieja
+        lote.detalle_ventas.sort(key=lambda v: v.fecha, reverse=True)
 
     # De la más reciente a la más vieja: lo que interesa primero es el último lote
     reparto.lotes.sort(key=lambda l: l.fecha, reverse=True)

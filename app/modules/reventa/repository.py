@@ -107,7 +107,7 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
         sin razón. El filtro de fechas se aplica al final, a qué lotes se MUESTRAN.
 
         Devuelve (fecha, created_at, productor, kilos_netos, borona_kilos,
-        valor_total, saldo acotado en cero).
+        valor_total, saldo acotado en cero, precio_kilo).
         """
         return list(
             self.db.execute(
@@ -119,6 +119,7 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                     CompraQueso.borona_kilos,
                     CompraQueso.valor_total,
                     saldo_pendiente(CompraQueso.valor_total, CompraQueso.abonado),
+                    CompraQueso.precio_kilo,
                 )
                 .where(
                     CompraQueso.empresa_id == self.empresa_id,
@@ -385,7 +386,8 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
         """Todas las ventas vigentes en orden cronológico, para el reparto FIFO.
         Sin filtro de fechas, por lo mismo que en las compras.
 
-        Devuelve (fecha, created_at, tipo, kilos, valor_total, gasto_monto).
+        Devuelve (fecha, created_at, tipo, kilos, valor_total, gasto_monto,
+        cliente, precio_kilo).
         """
         return list(
             self.db.execute(
@@ -396,6 +398,8 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
                     VentaQueso.kilos,
                     VentaQueso.valor_total,
                     VentaQueso.gasto_monto,
+                    VentaQueso.cliente,
+                    VentaQueso.precio_kilo,
                 )
                 .where(
                     VentaQueso.empresa_id == self.empresa_id,

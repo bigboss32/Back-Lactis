@@ -56,8 +56,10 @@ from app.modules.reventa.schemas import (
     GananciaProducto,
     GananciaProductor,
     ResumenReventa,
+    CompraDelLoteRead,
     LoteResumen,
     LotesPanel,
+    VentaDelLoteRead,
     SugerenciasReventa,
     TemporadaResumen,
     TemporadasPanel,
@@ -1790,13 +1792,15 @@ class LoteService:
             CompraEvento(
                 fecha=fila[0], orden=indice, productor=fila[2],
                 kilos=Decimal(fila[3] or 0), borona_kilos=Decimal(fila[4] or 0),
+                precio_kilo=Decimal(fila[7] or 0),
                 valor_total=Decimal(fila[5] or 0), saldo=Decimal(fila[6] or 0),
             )
             for indice, fila in enumerate(self.compras.eventos_para_lotes())
         ]
         ventas = [
             VentaEvento(
-                fecha=fila[0], orden=indice, tipo=fila[2], kilos=Decimal(fila[3] or 0),
+                fecha=fila[0], orden=indice, cliente=fila[6], tipo=fila[2],
+                kilos=Decimal(fila[3] or 0), precio_kilo=Decimal(fila[7] or 0),
                 valor_total=Decimal(fila[4] or 0), gasto_monto=Decimal(fila[5] or 0),
             )
             for indice, fila in enumerate(self.ventas.eventos_para_lotes())
@@ -1884,4 +1888,47 @@ class LoteService:
                 else CERO
             ),
             cerrado=lote.cerrado,
+            detalle_compras=[
+                CompraDelLoteRead(
+                    productor=c.productor,
+                    kilos=c.kilos,
+                    borona_recibida=c.borona_recibida,
+                    precio_kilo=_dinero(c.precio_kilo),
+                    valor_total=_dinero(c.valor_total),
+                    saldo=_dinero(c.saldo),
+                    kilos_vendidos=c.kilos_vendidos,
+                    kilos_a_borona=c.kilos_a_borona,
+                    kilos_merma=c.kilos_merma,
+                    kilos_sin_vender=c.kilos_sin_vender,
+                    borona_vendida=c.borona_vendida,
+                    borona_sin_vender=c.borona_sin_vender,
+                    ingresos=_dinero(c.ingresos),
+                    gastos=_dinero(c.gastos),
+                    costo_realizado=_dinero(c.costo_realizado),
+                    costo_sin_vender=_dinero(c.costo_sin_vender),
+                    ganancia=_dinero(c.ganancia),
+                    margen_kilo=(
+                        _dinero(c.ganancia / (c.kilos_vendidos + c.borona_vendida))
+                        if (c.kilos_vendidos + c.borona_vendida) > CERO
+                        else CERO
+                    ),
+                )
+                for c in lote.detalle_compras
+            ],
+            detalle_ventas=[
+                VentaDelLoteRead(
+                    fecha=v.fecha,
+                    cliente=v.cliente,
+                    tipo=v.tipo,
+                    kilos=v.kilos,
+                    kilos_venta=v.kilos_venta,
+                    precio_kilo=_dinero(v.precio_kilo),
+                    ingreso=_dinero(v.ingreso),
+                    gasto=_dinero(v.gasto),
+                    costo=_dinero(v.costo),
+                    ganancia=_dinero(v.ganancia),
+                    partida=v.partida,
+                )
+                for v in lote.detalle_ventas
+            ],
         )
