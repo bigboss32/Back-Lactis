@@ -97,6 +97,38 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
         )
         return Decimal(total or 0)
 
+    def eventos_para_lotes(self) -> list[tuple]:
+        """Todas las compras vigentes en orden cronológico, para el reparto FIFO.
+
+        Va sin filtro de fechas A PROPÓSITO. El reparto por lotes necesita TODA la
+        historia: para saber qué había en inventario el 25 de julio hay que haber
+        procesado lo comprado y lo vendido antes. Filtrar aquí daría un inventario
+        inicial inventado, y las ventas de los primeros días se irían a "sin lote"
+        sin razón. El filtro de fechas se aplica al final, a qué lotes se MUESTRAN.
+
+        Devuelve (fecha, created_at, productor, kilos_netos, borona_kilos,
+        valor_total, saldo acotado en cero).
+        """
+        return list(
+            self.db.execute(
+                select(
+                    CompraQueso.fecha,
+                    CompraQueso.created_at,
+                    CompraQueso.productor,
+                    CompraQueso.kilos_netos,
+                    CompraQueso.borona_kilos,
+                    CompraQueso.valor_total,
+                    saldo_pendiente(CompraQueso.valor_total, CompraQueso.abonado),
+                )
+                .where(
+                    CompraQueso.empresa_id == self.empresa_id,
+                    CompraQueso.deleted_at.is_(None),
+                    CompraQueso.estado != "anulada",
+                )
+                .order_by(CompraQueso.fecha, CompraQueso.created_at)
+            ).all()
+        )
+
     def acumulados(self) -> tuple[Decimal, Decimal, Decimal]:
         """(kilos netos históricos, borona de compras, saldo por pagar).
 
@@ -349,6 +381,31 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
         )
         return Decimal(total or 0)
 
+    def eventos_para_lotes(self) -> list[tuple]:
+        """Todas las ventas vigentes en orden cronológico, para el reparto FIFO.
+        Sin filtro de fechas, por lo mismo que en las compras.
+
+        Devuelve (fecha, created_at, tipo, kilos, valor_total, gasto_monto).
+        """
+        return list(
+            self.db.execute(
+                select(
+                    VentaQueso.fecha,
+                    VentaQueso.created_at,
+                    VentaQueso.tipo,
+                    VentaQueso.kilos,
+                    VentaQueso.valor_total,
+                    VentaQueso.gasto_monto,
+                )
+                .where(
+                    VentaQueso.empresa_id == self.empresa_id,
+                    VentaQueso.deleted_at.is_(None),
+                    VentaQueso.estado != "anulada",
+                )
+                .order_by(VentaQueso.fecha, VentaQueso.created_at)
+            ).all()
+        )
+
     def gastos_periodo(self, desde: date, hasta: date, tipo: str | None = None) -> Decimal:
         """Suma de gastos de venta (transporte, etc.) del período. Con `tipo`
         solo cuenta las ventas de ese tipo ('queso' o 'borona')."""
@@ -576,6 +633,29 @@ class ConversionBoronaRepository(BaseRepository[ConversionBorona]):
             )
         ).one()
         return Decimal(fila[0]), Decimal(fila[1])
+
+    def eventos_para_lotes(self) -> list[tuple]:
+        """Todos los ajustes vigentes en orden cronológico, para el reparto FIFO.
+        Sin filtro de fechas, por lo mismo que en las compras.
+
+        Devuelve (fecha, created_at, kilos, destino).
+        """
+        return list(
+            self.db.execute(
+                select(
+                    ConversionBorona.fecha,
+                    ConversionBorona.created_at,
+                    ConversionBorona.kilos,
+                    ConversionBorona.destino,
+                )
+                .where(
+                    ConversionBorona.empresa_id == self.empresa_id,
+                    ConversionBorona.deleted_at.is_(None),
+                    ConversionBorona.estado == "activo",
+                )
+                .order_by(ConversionBorona.fecha, ConversionBorona.created_at)
+            ).all()
+        )
 
     # Los tres siguientes son HISTÓRICOS (sin filtro de fechas): sirven para el
     # inventario disponible hoy. NO usarlos en cálculos de un período: para eso

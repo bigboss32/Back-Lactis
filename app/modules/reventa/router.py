@@ -8,6 +8,7 @@ from app.core.deps import DbSession, require_permission
 from app.core.pagination import Page, PageParams, page_params
 from app.modules.reventa.schemas import (
     AbonoCreate,
+    LotesPanel,
     CompraQuesoCreate,
     CompraQuesoRead,
     CompraQuesoUpdate,
@@ -31,6 +32,7 @@ from app.modules.reventa.schemas import (
 )
 from app.modules.reventa.service import (
     CompraQuesoService,
+    LoteService,
     ConversionBoronaService,
     ReventaResumenService,
     SaldoAnteriorService,
@@ -538,3 +540,28 @@ def reabrir_temporada(
     ctx: RequestContext = Depends(require_permission("reventa", "editar")),
 ) -> TemporadaRead:
     return TemporadaService(db, ctx).reabrir(entity_id)
+
+
+# ---------------------------------------------------------------------- lotes
+@router.get(
+    "/lotes",
+    response_model=LotesPanel,
+    summary="Ganancia por lote de compra (las compras de una misma fecha)",
+)
+def panel_lotes(
+    db: DbSession,
+    desde: date | None = Query(None, description="Filtra qué lotes se muestran"),
+    hasta: date | None = Query(None, description="Filtra qué lotes se muestran"),
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+) -> LotesPanel:
+    """Qué dejó cada tanda de queso que se compró.
+
+    Un lote son todas las compras de queso de una misma fecha. Como las ventas no
+    dicen de qué lote salió el queso, se reparten FIFO: se vende del lote más
+    viejo primero, que es lo que pasa en la bodega porque el queso es perecedero.
+
+    `desde`/`hasta` recortan qué lotes se MUESTRAN, no el cálculo: el reparto se
+    hace siempre sobre toda la historia, porque para saber qué había en inventario
+    en una fecha hay que haber procesado lo de antes.
+    """
+    return LoteService(db, ctx).panel(desde, hasta)

@@ -480,3 +480,81 @@ class TemporadasPanel(BaseSchema):
     dias_sin_temporada: int = 0
     # Inicio que se propone para la próxima (día siguiente al último cierre)
     proximo_inicio: date | None = None
+
+
+# -------------------------------------------------------------------- lotes
+class LoteResumen(BaseSchema):
+    """Un lote de compra: todas las compras de queso de una misma fecha.
+
+    Así lo ve el usuario: "la compra del 25" es un lote y "las compras del 18" es
+    otro, aunque cada uno tenga varios productores.
+
+    Las ventas no dicen de qué lote salió el queso, así que se reparten FIFO: el
+    queso se vende del lote más viejo primero, que es lo que pasa en la bodega
+    porque el queso es perecedero. Cada lote tiene su propio costo por kilo, y a
+    una venta que se lleva K kilos de un lote se le carga K x ese costo.
+
+    Ojo con `ganancia`: es la de lo que YA se realizó (vendido y perdido), y NO le
+    resta el costo de lo que sigue en inventario. Restárselo haría que un lote
+    recién comprado apareciera con una pérdida enorme el mismo día, cuando lo que
+    pasa es que todavía no se ha vendido. Lo que sí se le resta es la merma, que
+    es plata perdida de ese lote.
+    """
+
+    fecha: date
+    productores: list[str] = []
+    compras: int
+    # Lo comprado
+    kilos_comprados: Decimal
+    costo_total: Decimal
+    costo_kilo: Decimal  # costo_total / kilos_comprados
+    por_pagar: Decimal  # lo que falta pagarles a los productores de ESTE lote
+    borona_recibida: Decimal  # la que llegó con el lote y no se paga
+    # A dónde fue el queso del lote (los cuatro suman kilos_comprados)
+    kilos_vendidos: Decimal
+    kilos_a_borona: Decimal
+    kilos_merma: Decimal
+    kilos_sin_vender: Decimal
+    # Borona del lote: la recibida gratis más la que salió de su propio queso
+    borona_vendida: Decimal
+    borona_sin_vender: Decimal
+    # Plata
+    ingreso_queso: Decimal
+    ingreso_borona: Decimal
+    ingresos: Decimal  # queso + borona
+    gastos: Decimal
+    costo_vendido: Decimal
+    costo_borona_vendida: Decimal  # solo la borona que venía de queso (la gratis cuesta 0)
+    costo_merma: Decimal
+    costo_sin_vender: Decimal
+    ganancia: Decimal  # ingresos - costo_vendido - costo_borona_vendida - costo_merma - gastos
+    margen_kilo: Decimal  # ganancia / kilos vendidos (queso + borona)
+    precio_venta_kilo: Decimal  # ingreso_queso / kilos_vendidos
+    # Si ya no queda nada del lote por vender
+    cerrado: bool
+
+
+class LotesPanel(BaseSchema):
+    """Los lotes con lo que dejó cada uno.
+
+    Los totales son la suma EXACTA de los lotes listados. `kilos_sin_lote` avisa
+    de los kilos vendidos que no encontraron lote de dónde salir: se vendió más de
+    lo comprado o se vendió antes de la primera compra registrada. No se esconden,
+    porque significan que falta cargar una compra y que la cuenta está incompleta.
+    """
+
+    lotes: list[LoteResumen] = []
+    total_ganancia: Decimal
+    total_kilos_comprados: Decimal
+    total_costo: Decimal
+    total_ingresos: Decimal
+    total_por_pagar: Decimal
+    # Todavía sin vender, de todos los lotes juntos
+    total_kilos_sin_vender: Decimal
+    total_costo_sin_vender: Decimal
+    mejor: date | None = None
+    peor: date | None = None
+    # Kilos vendidos o ajustados sin lote de origen (falta cargar una compra)
+    kilos_sin_lote: Decimal
+    borona_sin_lote: Decimal
+    ingreso_sin_lote: Decimal

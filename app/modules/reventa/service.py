@@ -31,6 +31,13 @@ from app.modules.reventa.models import (
     Temporada,
     VentaQueso,
 )
+from app.modules.reventa.lotes import (
+    AjusteEvento,
+    CompraEvento,
+    LoteCalculado,
+    VentaEvento,
+    repartir_lotes,
+)
 from app.modules.reventa.repository import (
     CompraQuesoRepository,
     ConversionBoronaRepository,
@@ -49,6 +56,8 @@ from app.modules.reventa.schemas import (
     GananciaProducto,
     GananciaProductor,
     ResumenReventa,
+    LoteResumen,
+    LotesPanel,
     SugerenciasReventa,
     TemporadaResumen,
     TemporadasPanel,
@@ -61,6 +70,13 @@ from app.utils.export import (
 
 CERO = Decimal("0")
 DOS_DECIMALES = Decimal("0.01")
+
+
+def _dinero(valor: Decimal) -> Decimal:
+    """Redondea a centavos. Se usa al FINAL, nunca antes de multiplicar: en el
+    detalle por productor, cuantizar antes de multiplicar dejaba la columna
+    cinco pesos por debajo de la cifra grande."""
+    return Decimal(valor).quantize(DOS_DECIMALES)
 
 # Textos del desglose por producto (los ve el usuario final tal cual)
 ETIQUETAS_PRODUCTO = {
@@ -1741,4 +1757,131 @@ class TemporadaService(BaseService[Temporada]):
             peor=peor,
             dias_sin_temporada=sin_temporada,
             proximo_inicio=(ultimo + timedelta(days=1)) if ultimo else None,
+        )
+
+
+# -------------------------------------------------------------------- lotes
+class LoteService:
+    """Ganancia por LOTE de compra: qué dejó cada tanda de queso que se compró.
+
+    Un lote son todas las compras de queso de una misma fecha. Toda la mecánica
+    del reparto FIFO y del costeo está en `app.modules.reventa.lotes`, que es una
+    función pura sin base de datos para poder probarla con casos armados a mano.
+    Aquí solo se leen los eventos, se llama al reparto y se arma la respuesta.
+
+    OJO: el reparto se hace SIEMPRE sobre toda la historia, aunque se pidan solo
+    los lotes de un mes. Para saber qué había en inventario el 25 de julio hay que
+    haber procesado lo de antes; si se filtrara la consulta, el inventario inicial
+    sería inventado y las ventas de los primeros días quedarían "sin lote". El
+    filtro de fechas se aplica al final, a qué lotes se muestran.
+    """
+
+    modulo = "reventa"
+
+    def __init__(self, db, ctx):
+        self.db = db
+        self.ctx = ctx
+        self.compras = CompraQuesoRepository(db, ctx.empresa_id)
+        self.ventas = VentaQuesoRepository(db, ctx.empresa_id)
+        self.ajustes = ConversionBoronaRepository(db, ctx.empresa_id)
+
+    def panel(self, desde: date | None = None, hasta: date | None = None) -> LotesPanel:
+        compras = [
+            CompraEvento(
+                fecha=fila[0], orden=indice, productor=fila[2],
+                kilos=Decimal(fila[3] or 0), borona_kilos=Decimal(fila[4] or 0),
+                valor_total=Decimal(fila[5] or 0), saldo=Decimal(fila[6] or 0),
+            )
+            for indice, fila in enumerate(self.compras.eventos_para_lotes())
+        ]
+        ventas = [
+            VentaEvento(
+                fecha=fila[0], orden=indice, tipo=fila[2], kilos=Decimal(fila[3] or 0),
+                valor_total=Decimal(fila[4] or 0), gasto_monto=Decimal(fila[5] or 0),
+            )
+            for indice, fila in enumerate(self.ventas.eventos_para_lotes())
+        ]
+        ajustes = [
+            AjusteEvento(
+                fecha=fila[0], orden=indice, kilos=Decimal(fila[2] or 0), destino=fila[3]
+            )
+            for indice, fila in enumerate(self.ajustes.eventos_para_lotes())
+        ]
+
+        reparto = repartir_lotes(compras, ventas, ajustes)
+
+        # El filtro recorta lo que se MUESTRA, no lo que se calculó
+        visibles = [
+            lote
+            for lote in reparto.lotes
+            if (desde is None or lote.fecha >= desde) and (hasta is None or lote.fecha <= hasta)
+        ]
+
+        filas = [self._fila(lote) for lote in visibles]
+        mejor = peor = None
+        if visibles:
+            mejor = max(visibles, key=lambda l: l.ganancia).fecha
+            peor = min(visibles, key=lambda l: l.ganancia).fecha
+
+        return LotesPanel(
+            lotes=filas,
+            total_ganancia=sum((f.ganancia for f in filas), CERO),
+            total_kilos_comprados=sum((f.kilos_comprados for f in filas), CERO),
+            total_costo=sum((f.costo_total for f in filas), CERO),
+            total_ingresos=sum((f.ingresos for f in filas), CERO),
+            total_por_pagar=sum((f.por_pagar for f in filas), CERO),
+            total_kilos_sin_vender=sum((f.kilos_sin_vender for f in filas), CERO),
+            total_costo_sin_vender=sum((f.costo_sin_vender for f in filas), CERO),
+            mejor=mejor,
+            peor=peor,
+            # Estos tres son del reparto COMPLETO y no del filtro: son un aviso de
+            # que falta cargar una compra, y esconderlo al cambiar de mes sería
+            # justo lo contrario de lo que se busca.
+            kilos_sin_lote=reparto.kilos_sin_lote,
+            borona_sin_lote=reparto.borona_sin_lote,
+            ingreso_sin_lote=reparto.ingreso_sin_lote,
+        )
+
+    @staticmethod
+    def _fila(lote: LoteCalculado) -> LoteResumen:
+        kilos_vendidos_totales = lote.kilos_vendidos + lote.borona_vendida
+        return LoteResumen(
+            fecha=lote.fecha,
+            productores=lote.productores,
+            compras=lote.compras,
+            kilos_comprados=lote.kilos_comprados,
+            costo_total=_dinero(lote.costo_total),
+            costo_kilo=(
+                _dinero(lote.costo_total / lote.kilos_comprados)
+                if lote.kilos_comprados > CERO
+                else CERO
+            ),
+            por_pagar=_dinero(lote.por_pagar),
+            borona_recibida=lote.borona_recibida,
+            kilos_vendidos=lote.kilos_vendidos,
+            kilos_a_borona=lote.kilos_a_borona,
+            kilos_merma=lote.kilos_merma,
+            kilos_sin_vender=lote.kilos_sin_vender,
+            borona_vendida=lote.borona_vendida,
+            borona_sin_vender=lote.borona_sin_vender,
+            ingreso_queso=_dinero(lote.ingreso_queso),
+            ingreso_borona=_dinero(lote.ingreso_borona),
+            ingresos=_dinero(lote.ingresos),
+            gastos=_dinero(lote.gastos),
+            costo_vendido=_dinero(lote.costo_vendido),
+            costo_borona_vendida=_dinero(lote.costo_borona_vendida),
+            costo_merma=_dinero(lote.costo_merma),
+            costo_sin_vender=_dinero(lote.costo_sin_vender),
+            ganancia=_dinero(lote.ganancia),
+            margen_kilo=(
+                _dinero(lote.ganancia / kilos_vendidos_totales)
+                if kilos_vendidos_totales > CERO
+                else CERO
+            ),
+            precio_venta_kilo=(
+                _dinero(lote.ingreso_queso / lote.kilos_vendidos)
+                if lote.kilos_vendidos > CERO
+                else CERO
+            ),
+            cerrado=lote.cerrado,
         )
