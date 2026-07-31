@@ -7,9 +7,11 @@ from app.core.context import RequestContext
 from app.core.deps import DbSession, require_permission
 from app.core.pagination import Page, PageParams, page_params
 from app.modules.usuarios.schemas import (
+    AsignarEmpresas,
     AsignarPermisos,
     AsignarRoles,
     CambiarPasswordAdmin,
+    MembresiaEmpresaRead,
     PermisoRead,
     RolCreate,
     RolRead,
@@ -39,6 +41,33 @@ def asignar_roles(
     ctx: RequestContext = Depends(require_permission("usuarios", "administrar")),
 ) -> UsuarioRead:
     return UsuarioService(db, ctx).asignar_roles(entity_id, payload.rol_ids)
+
+
+@router.get(
+    "/{entity_id}/empresas",
+    response_model=list[MembresiaEmpresaRead],
+    summary="Membresías de empresa de un usuario (solo superadmin)",
+)
+def listar_membresias(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("usuarios", "administrar")),
+) -> list[MembresiaEmpresaRead]:
+    return UsuarioService(db, ctx).listar_membresias(entity_id)
+
+
+@router.put(
+    "/{entity_id}/empresas",
+    response_model=list[MembresiaEmpresaRead],
+    summary="Asignar empresas y roles por empresa a un usuario (solo superadmin)",
+)
+def asignar_membresias(
+    entity_id: uuid.UUID,
+    payload: AsignarEmpresas,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("usuarios", "administrar")),
+) -> list[MembresiaEmpresaRead]:
+    return UsuarioService(db, ctx).asignar_membresias(entity_id, payload)
 
 
 @router.post("/{entity_id}/bloquear", response_model=UsuarioRead, summary="Bloquear usuario")

@@ -44,6 +44,11 @@ class CambiarPasswordRequest(BaseSchema):
         return validar_fortaleza_password(v)
 
 
+class EmpresaResumen(BaseSchema):
+    id: uuid.UUID
+    nombre: str
+
+
 class PerfilResponse(BaseSchema):
     id: uuid.UUID
     nombre: str
@@ -51,8 +56,13 @@ class PerfilResponse(BaseSchema):
     correo: str
     username: str
     foto_url: str | None
+    # Empresa ACTIVA del contexto (la del header X-Empresa-Id o la principal)
     empresa_id: uuid.UUID | None
     sucursal_id: uuid.UUID | None
+    # Roles y permisos EN la empresa activa (más los globales)
     roles: list[str]
     permisos: list[str]
     es_superadmin: bool
+    # Membresías del usuario; para el superadmin, TODAS las empresas activas
+    # (alimenta el selector de empresa con un solo endpoint)
+    empresas: list[EmpresaResumen] = []

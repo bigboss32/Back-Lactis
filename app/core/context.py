@@ -10,6 +10,9 @@ class RequestContext:
     user_id: uuid.UUID | None = None
     empresa_id: uuid.UUID | None = None
     sucursal_id: uuid.UUID | None = None
+    # Empresas de las que el usuario es miembro (derivadas de sus asignaciones
+    # de rol). El superadmin no las necesita: opera sobre cualquiera.
+    empresa_ids: frozenset[uuid.UUID] = field(default_factory=frozenset)
     roles: list[str] = field(default_factory=list)
     permisos: set[tuple[str, str]] = field(default_factory=set)
     is_superadmin: bool = False

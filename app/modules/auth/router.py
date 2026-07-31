@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.core.deps import Context, DbSession, get_current_user
 from app.modules.auth.schemas import (
     CambiarPasswordRequest,
+    EmpresaResumen,
     LogoutRequest,
     PerfilResponse,
     RecuperarPasswordRequest,
@@ -79,8 +80,33 @@ def cambiar_password(
 
 
 @router.get("/me", response_model=PerfilResponse, summary="Perfil y permisos del usuario actual")
-def perfil(ctx: Context) -> PerfilResponse:
+def perfil(ctx: Context, db: DbSession) -> PerfilResponse:
+    from sqlalchemy import select
+
+    from app.modules.empresas.models import Empresa
+
     user = ctx.user
+    if ctx.is_superadmin:
+        # El superadmin recibe TODAS las empresas activas: su selector de
+        # empresa se alimenta de este mismo endpoint
+        empresas = [
+            EmpresaResumen(id=e.id, nombre=e.nombre)
+            for e in db.scalars(
+                select(Empresa)
+                .where(Empresa.deleted_at.is_(None), Empresa.estado == "activo")
+                .order_by(Empresa.nombre)
+            )
+        ]
+    else:
+        vistas = {
+            a.empresa_id: a.empresa
+            for a in user.asignaciones
+            if a.empresa_id is not None and a.empresa is not None
+        }
+        empresas = sorted(
+            (EmpresaResumen(id=e.id, nombre=e.nombre) for e in vistas.values()),
+            key=lambda e: e.nombre,
+        )
     return PerfilResponse(
         id=user.id,
         nombre=user.nombre,
@@ -93,4 +119,5 @@ def perfil(ctx: Context) -> PerfilResponse:
         roles=ctx.roles,
         permisos=sorted(f"{m}:{a}" for m, a in ctx.permisos),
         es_superadmin=ctx.is_superadmin,
+        empresas=empresas,
     )

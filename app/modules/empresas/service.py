@@ -16,13 +16,13 @@ class EmpresaService(BaseService[Empresa]):
     modulo = "empresas"
 
     def listar(self, params: PageParams, **kwargs: Any) -> tuple[list[Empresa], int]:
-        # Un usuario no superadmin solo ve su propia empresa
+        # Un usuario no superadmin solo ve las empresas de las que es miembro
         if not self.ctx.is_superadmin:
-            kwargs.setdefault("extra_criteria", []).append(Empresa.id == self.ctx.empresa_id)
+            kwargs.setdefault("extra_criteria", []).append(Empresa.id.in_(self.ctx.empresa_ids))
         return super().listar(params, **kwargs)
 
     def obtener(self, entity_id: uuid.UUID) -> Empresa:
-        if not self.ctx.is_superadmin and entity_id != self.ctx.empresa_id:
+        if not self.ctx.is_superadmin and entity_id not in self.ctx.empresa_ids:
             raise ForbiddenError("No puede acceder a información de otra empresa")
         return super().obtener(entity_id)
 
@@ -31,7 +31,7 @@ class EmpresaService(BaseService[Empresa]):
             raise ConflictError(f"Ya existe una empresa con NIT {data['nit']}")
 
     def validar_actualizar(self, obj: Empresa, data: dict[str, Any]) -> None:
-        if not self.ctx.is_superadmin and obj.id != self.ctx.empresa_id:
+        if not self.ctx.is_superadmin and obj.id not in self.ctx.empresa_ids:
             raise ForbiddenError("No puede modificar otra empresa")
         if data.get("nit") and self.repo.exists_where(Empresa.nit == data["nit"], exclude_id=obj.id):
             raise ConflictError(f"Ya existe una empresa con NIT {data['nit']}")

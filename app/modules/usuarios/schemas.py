@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import EmailStr, Field, field_validator
+from pydantic import AliasChoices, EmailStr, Field, field_validator
 
 from app.common.schemas import AuditRead, BaseSchema
 
@@ -86,11 +86,36 @@ class UsuarioRead(AuditRead):
     sucursal_id: uuid.UUID | None
     ultimo_acceso: datetime | None
     bloqueado: bool
-    roles: list[RolResumen] = []
+    # roles_ctx (transitorio, roles de la empresa activa) tiene prioridad; si el
+    # service no lo adjuntó cae a la property roles (todas las empresas). El JSON
+    # de salida sigue llamándose "roles": la UI actual no se rompe.
+    roles: list[RolResumen] = Field(
+        default=[], validation_alias=AliasChoices("roles_ctx", "roles")
+    )
+    # Nombres de las empresas de las que el usuario es miembro
+    empresas: list[str] = Field(
+        default=[], validation_alias=AliasChoices("empresas_nombres", "empresas")
+    )
 
 
 class AsignarRoles(BaseSchema):
     rol_ids: list[uuid.UUID]
+
+
+class MembresiaEmpresaIn(BaseSchema):
+    empresa_id: uuid.UUID
+    rol_ids: list[uuid.UUID]
+
+
+class AsignarEmpresas(BaseSchema):
+    membresias: list[MembresiaEmpresaIn]
+    empresa_principal_id: uuid.UUID | None = None
+
+
+class MembresiaEmpresaRead(BaseSchema):
+    empresa_id: uuid.UUID
+    empresa_nombre: str
+    roles: list[RolResumen] = []
 
 
 class AsignarPermisos(BaseSchema):

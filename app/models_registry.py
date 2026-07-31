@@ -49,5 +49,6 @@ from app.modules.usuarios.models import (  # noqa: F401
     RefreshToken,
     Rol,
     Usuario,
+    UsuarioRol,
 )
 from app.modules.ventas.models import Pago, Venta, VentaDetalle  # noqa: F401

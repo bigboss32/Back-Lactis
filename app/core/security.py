@@ -39,6 +39,9 @@ def _create_token(subject: str, token_type: TokenType, expires_delta: timedelta,
 
 
 def create_access_token(user_id: uuid.UUID, empresa_id: uuid.UUID | None, roles: list[str]) -> str:
+    # Los claims empresa_id y roles son puramente INFORMATIVOS (depuración,
+    # inspección del token): la autorización real se resuelve SIEMPRE contra la
+    # base de datos en get_context; estos claims nunca se leen para autorizar.
     return _create_token(
         str(user_id),
         "access",

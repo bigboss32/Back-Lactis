@@ -32,7 +32,7 @@ def _client_ip(request: Request) -> str | None:
 
 
 def get_current_user(db: DbSession, token: str | None = Depends(oauth2_scheme)):
-    from app.modules.usuarios.models import Rol, Usuario
+    from app.modules.usuarios.models import Rol, Usuario, UsuarioRol
 
     if not token:
         raise UnauthorizedError("No autenticado")
@@ -40,7 +40,11 @@ def get_current_user(db: DbSession, token: str | None = Depends(oauth2_scheme)):
     user_id = uuid.UUID(payload["sub"])
     user = db.scalars(
         select(Usuario)
-        .options(selectinload(Usuario.roles).selectinload(Rol.permisos))
+        .options(
+            selectinload(Usuario.asignaciones)
+            .joinedload(UsuarioRol.rol)
+            .selectinload(Rol.permisos)
+        )
         .where(Usuario.id == user_id, Usuario.deleted_at.is_(None))
     ).first()
     if user is None:
@@ -58,27 +62,43 @@ def get_context(
     user=Depends(get_current_user),
     x_empresa_id: Annotated[str | None, Header(alias="X-Empresa-Id")] = None,
 ) -> RequestContext:
-    roles = [rol.nombre for rol in user.roles]
-    is_superadmin = ROL_SUPERADMIN in roles
-    permisos = {
-        (permiso.modulo, permiso.accion)
-        for rol in user.roles
-        for permiso in rol.permisos
-    }
+    # Superadmin = tiene el rol global (fila sin empresa) de Administrador General
+    is_superadmin = any(
+        asignacion.empresa_id is None
+        and asignacion.rol is not None
+        and asignacion.rol.nombre == ROL_SUPERADMIN
+        for asignacion in user.asignaciones
+    )
+    membresias = user.empresas_ids
     empresa_id = user.empresa_id
-    # El superadmin puede operar sobre cualquier empresa vía header X-Empresa-Id
-    if is_superadmin and x_empresa_id:
+    # El header X-Empresa-Id elige la empresa activa: el superadmin puede operar
+    # sobre cualquiera; un usuario normal solo sobre empresas de las que es miembro
+    if x_empresa_id:
         try:
-            empresa_id = uuid.UUID(x_empresa_id)
+            empresa_header = uuid.UUID(x_empresa_id)
         except ValueError as exc:
             raise ForbiddenError("X-Empresa-Id inválido") from exc
+        if not is_superadmin and empresa_header not in membresias:
+            raise ForbiddenError("No pertenece a la empresa indicada")
+        empresa_id = empresa_header
+    # Un usuario normal sin empresa resuelta no puede operar: sin este cierre
+    # vería datos sin filtro tenant (p. ej. usuarios de todas las empresas)
+    if not is_superadmin and empresa_id is None:
+        raise ForbiddenError("El usuario no tiene una empresa asignada. Contacte al administrador")
+    # Roles y permisos SOLO de la empresa activa (más los globales)
+    roles_ctx = user.roles_en(empresa_id)
     return RequestContext(
         user=user,
         user_id=user.id,
         empresa_id=empresa_id,
         sucursal_id=user.sucursal_id,
-        roles=roles,
-        permisos=permisos,
+        empresa_ids=membresias,
+        roles=[rol.nombre for rol in roles_ctx],
+        permisos={
+            (permiso.modulo, permiso.accion)
+            for rol in roles_ctx
+            for permiso in rol.permisos
+        },
         is_superadmin=is_superadmin,
         ip=_client_ip(request),
     )
