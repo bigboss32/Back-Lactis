@@ -34,6 +34,13 @@ from app.modules.reventa.router import router as reventa_router
 from app.modules.rutas.router import router as rutas_router
 from app.modules.sucursales.router import router as sucursales_router
 from app.modules.transportadores.router import router as transportadores_router
+from app.modules.transporte.router import (
+    documentos_router as transporte_documentos_router,
+    gastos_router as transporte_gastos_router,
+    mantenimientos_router as transporte_mantenimientos_router,
+    router as transporte_router,
+    vehiculos_router as transporte_vehiculos_router,
+)
 from app.modules.usuarios.router import permisos_router, roles_router
 from app.modules.usuarios.router import router as usuarios_router
 from app.modules.ventas.router import pagos_router
@@ -104,6 +111,11 @@ def create_app() -> FastAPI:
     app.include_router(pagos_router, prefix=f"{prefix}/pagos")
     app.include_router(gastos_router, prefix=f"{prefix}/gastos")
     app.include_router(categorias_gasto_router, prefix=f"{prefix}/categorias-gasto")
+    app.include_router(transporte_router, prefix=f"{prefix}/transporte")
+    app.include_router(transporte_vehiculos_router, prefix=f"{prefix}/transporte/vehiculos")
+    app.include_router(transporte_gastos_router, prefix=f"{prefix}/transporte/gastos")
+    app.include_router(transporte_mantenimientos_router, prefix=f"{prefix}/transporte/mantenimientos")
+    app.include_router(transporte_documentos_router, prefix=f"{prefix}/transporte/documentos")
     app.include_router(caja_router, prefix=f"{prefix}/caja")
     app.include_router(bancos_router, prefix=f"{prefix}/bancos/cuentas")
     app.include_router(mov_bancarios_router, prefix=f"{prefix}/bancos/movimientos")

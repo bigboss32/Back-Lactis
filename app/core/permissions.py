@@ -30,6 +30,7 @@ MODULOS: tuple[str, ...] = (
     "empleados",
     "ventas",
     "gastos",
+    "transporte",
     "caja",
     "bancos",
     "contabilidad",

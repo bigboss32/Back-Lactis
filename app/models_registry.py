@@ -33,6 +33,15 @@ from app.modules.reventa.models import (  # noqa: F401
 from app.modules.rutas.models import Ruta  # noqa: F401
 from app.modules.sucursales.models import Sucursal  # noqa: F401
 from app.modules.transportadores.models import Transportador  # noqa: F401
+from app.modules.transporte.models import (  # noqa: F401
+    AbonoFlete,
+    Vehiculo,
+    VehiculoDocumento,
+    VehiculoGasto,
+    VehiculoMantenimiento,
+    Viaje,
+    ViajeServicio,
+)
 from app.modules.usuarios.models import (  # noqa: F401
     LoginAudit,
     PasswordResetToken,

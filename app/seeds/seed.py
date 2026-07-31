@@ -56,11 +56,13 @@ ROLES_PERMISOS: dict[str, set[tuple[str, str]]] = {
         ("recepcion", "crear"), ("recepcion", "editar"), ("produccion", "crear"),
         ("produccion", "editar"), ("liquidaciones", "crear"), ("liquidaciones", "imprimir"),
         ("reportes", "exportar"), ("inventario", "crear"), ("notificaciones", "administrar"),
+        ("transporte", "crear"), ("transporte", "editar"),
     },
     "Auxiliar": {
         ("recepcion", "crear"), ("recepcion", "consultar"), ("proveedores", "consultar"),
         ("transportadores", "consultar"), ("rutas", "consultar"), ("inventario", "consultar"),
         ("inventario", "crear"), ("notificaciones", "consultar"),
+        ("transporte", "crear"), ("transporte", "consultar"),
     },
     "Producción": {
         ("produccion", "crear"), ("produccion", "editar"), ("produccion", "consultar"),
