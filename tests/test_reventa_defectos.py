@@ -231,3 +231,100 @@ def test_no_se_pueden_quitar_kilos_de_una_compra_ya_vendida(client, base_datos):
     mas = client.put(f"{API}/compras/{c['id']}", json={"kilos_brutos": "150"}, headers=h)
     print(f"  subirla a 150 kg:       {mas.status_code}")
     assert mas.status_code == 200, mas.text
+
+
+# ---------------------------------------------------------------------------
+# 5. Decisión del dueño: si el queso ya se vendió, la compra NO se anula
+# ---------------------------------------------------------------------------
+def test_no_se_anula_una_compra_cuyo_queso_ya_se_vendio(client, base_datos):
+    """Anularla borraría de la cuenta un queso que salió de verdad: el
+    inventario se iría a negativo y, con el inventario negativo, ninguna venta
+    vuelve a pasar el control. El dueño se queda sin poder trabajar."""
+    h = auth_headers(client, "admin.a")
+    c = comprar(client, h, "100", "10000")
+    vender(client, h, "80", "15000")
+
+    r = client.post(f"{API}/compras/{c['id']}/anular", headers=h)
+    print("\n===== 6. ANULAR UNA COMPRA YA VENDIDA =====")
+    print(f"  {r.status_code} · {r.json().get('error', {}).get('detail', '')}")
+    assert r.status_code == 422
+    assert "ya se vendió" in r.json()["error"]["detail"]
+
+
+def test_una_compra_sin_vender_si_se_anula(client, base_datos):
+    """El arreglo no puede volverse un estorbo: lo que no ha salido se anula."""
+    h = auth_headers(client, "admin.a")
+    c = comprar(client, h, "100", "10000")
+    r = client.post(f"{API}/compras/{c['id']}/anular", headers=h)
+    print("\n===== 7. ANULAR UNA SIN VENDER =====")
+    print(f"  {r.status_code}")
+    assert r.status_code == 200, r.text
+
+
+# ---------------------------------------------------------------------------
+# 6. Cuánto se ganó de verdad en unos días concretos
+# ---------------------------------------------------------------------------
+def test_la_ganancia_por_dia_es_exacta_y_los_dias_suman(client, base_datos):
+    """Lo que pidió el dueño: "cuánto gané en determinados días".
+
+    De cada venta de esos días se toma lo que entró menos lo que había costado
+    ESE queso (FIFO exacto, no un promedio) menos el flete.
+    """
+    h = auth_headers(client, "admin.a")
+    # Dos lotes a precios distintos, para que el FIFO tenga algo que decir
+    comprar(client, h, "100", "10000", dias=30)   # $10.000/kg
+    comprar(client, h, "100", "12000", dias=20)   # $12.000/kg
+
+    # Día A: 60 kg, todos del lote barato
+    vender(client, h, "60", "15000", dias=10)
+    # Día B: 60 kg, 40 del barato y 20 del caro
+    vender(client, h, "60", "16000", dias=9)
+
+    desde = str(date.today() - timedelta(days=12))
+    hasta = str(date.today() - timedelta(days=8))
+    r = client.get(f"{API}/ganancia-por-dia",
+                   params={"desde": desde, "hasta": hasta}, headers=h)
+    assert r.status_code == 200, r.text
+    d = r.json()
+
+    print("\n===== 8. GANANCIA POR DÍA =====")
+    for dia in d["dias"]:
+        print(f"  {dia['fecha']}  {dia['kilos']:>7} kg   entró {dia['ingresos']:>12}"
+              f"   costó {dia['costo']:>12}   ganó {dia['ganancia']:>12}")
+    print(f"  TOTAL                  entró {d['ingresos']:>12}"
+          f"   costó {d['costo']:>12}   ganó {d['ganancia']:>12}")
+
+    # Día A: 60 x 15.000 = 900.000, costó 60 x 10.000 = 600.000 -> ganó 300.000
+    dia_a = next(x for x in d["dias"] if D(x["kilos"]) == 60)
+    assert D(dia_a["ingresos"]) == D("900000")
+    assert D(dia_a["costo"]) == D("600000")
+    assert D(dia_a["ganancia"]) == D("300000")
+
+    # Día B: 60 x 16.000 = 960.000; costó 40x10.000 + 20x12.000 = 640.000
+    dia_b = next(x for x in d["dias"] if x is not dia_a)
+    assert D(dia_b["ingresos"]) == D("960000")
+    assert D(dia_b["costo"]) == D("640000")
+    assert D(dia_b["ganancia"]) == D("320000")
+
+    # Y los días SUMAN el total, sin sobrar ni faltar un peso
+    assert sum((D(x["ganancia"]) for x in d["dias"]), D(0)) == D(d["ganancia"])
+    assert sum((D(x["ingresos"]) for x in d["dias"]), D(0)) == D(d["ingresos"])
+    assert D(d["ganancia"]) == D("620000")
+
+
+def test_la_ganancia_por_dia_deja_fuera_lo_que_no_esta_en_el_rango(client, base_datos):
+    """Y solo cuenta lo de esos días: una venta de antes no se cuela."""
+    h = auth_headers(client, "admin.a")
+    comprar(client, h, "100", "10000", dias=30)
+    vender(client, h, "50", "15000", dias=25)   # fuera del rango
+    vender(client, h, "50", "15000", dias=5)    # dentro
+
+    r = client.get(f"{API}/ganancia-por-dia", params={
+        "desde": str(date.today() - timedelta(days=7)),
+        "hasta": str(date.today()),
+    }, headers=h)
+    d = r.json()
+    print("\n===== 9. SOLO LO DEL RANGO =====")
+    print(f"  días contados: {len(d['dias'])}  ·  ganancia {d['ganancia']}")
+    assert len(d["dias"]) == 1
+    assert D(d["ganancia"]) == D("250000")

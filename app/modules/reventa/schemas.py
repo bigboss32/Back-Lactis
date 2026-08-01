@@ -544,6 +544,37 @@ class CompraDelLoteRead(BaseSchema):
     margen_kilo: Decimal
 
 
+class GananciaDia(BaseSchema):
+    """Lo que dejó un día concreto: lo vendido ese día menos lo que costó."""
+
+    fecha: date
+    kilos: Decimal
+    ingresos: Decimal
+    costo: Decimal  # lo que había costado ESE queso (reparto FIFO, no promedio)
+    gastos: Decimal  # fletes de los despachos de ese día
+    ganancia: Decimal
+
+
+class GananciaPorDia(BaseSchema):
+    """Ganancia real entre dos fechas, día por día.
+
+    NO es la del resumen del período ("ventas menos compras"), que sale negativa
+    cuando se compra mucho y se vende poco aunque no se haya perdido nada. Aquí
+    las compras no restan: comprar es cambiar plata por queso, no gastarla.
+
+    Los días SUMAN los totales: el total se calcula sumándolos, no aparte.
+    """
+
+    desde: date
+    hasta: date
+    dias: list[GananciaDia] = []
+    kilos: Decimal
+    ingresos: Decimal
+    costo: Decimal
+    gastos: Decimal
+    ganancia: Decimal
+
+
 class VentaDelLoteRead(BaseSchema):
     """Una venta que se llevó kilos de este lote.
 

@@ -5,9 +5,11 @@ from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.core.context import RequestContext
 from app.core.deps import DbSession, require_permission
+from app.core.exceptions import BusinessError
 from app.core.pagination import Page, PageParams, page_params
 from app.modules.reventa.schemas import (
     AbonoCreate,
+    GananciaPorDia,
     LotesPanel,
     CompraQuesoCreate,
     CompraQuesoRead,
@@ -543,6 +545,29 @@ def reabrir_temporada(
 
 
 # ---------------------------------------------------------------------- lotes
+@router.get(
+    "/ganancia-por-dia",
+    response_model=GananciaPorDia,
+    summary="Cuánto se ganó de verdad entre dos fechas, día por día",
+)
+def ganancia_por_dia(
+    db: DbSession,
+    desde: date = Query(..., description="Primer día que se cuenta"),
+    hasta: date = Query(..., description="Último día que se cuenta"),
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+) -> GananciaPorDia:
+    """De cada venta de esos días: lo que entró, menos lo que había costado ESE
+    queso (el reparto FIFO lo sabe exacto, no es un promedio), menos el flete.
+
+    No es lo mismo que la ganancia del resumen, que resta las compras del
+    período: esa sale negativa cuando se compra mucho y se vende poco, aunque no
+    se haya perdido nada — el queso está en la bodega.
+    """
+    if hasta < desde:
+        raise BusinessError("La fecha final no puede ser anterior a la inicial")
+    return LoteService(db, ctx).ganancia_por_dia(desde, hasta)
+
+
 @router.get(
     "/lotes",
     response_model=LotesPanel,

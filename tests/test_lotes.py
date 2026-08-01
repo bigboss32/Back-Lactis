@@ -268,14 +268,20 @@ def test_la_merma_es_perdida_del_lote_que_la_sufrio(client, base_datos):
 # ---------------------------------------------------------------------------
 # 6. Lo que no se puede esconder: vender más de lo comprado
 # ---------------------------------------------------------------------------
-def test_anular_una_compra_ya_vendida_deja_kilos_sin_lote(client, base_datos):
-    """El backend NO deja vender mas de lo disponible, asi que "sin lote" solo
-    puede aparecer por un camino: anular (o rebajar) una compra DESPUES de haber
-    vendido contra ella. Pasa de verdad cuando se cae en cuenta de que una compra
-    estaba mal cargada.
+def test_no_se_puede_anular_una_compra_cuyo_queso_ya_se_vendio(client, base_datos):
+    """DECISION DEL DUENO (antes se permitia y dejaba "kilos sin lote").
 
-    Cuando pasa, la pantalla NO puede repartir esos kilos entre los lotes que si
-    existen, porque les inventaria un costo que nadie pago. Los declara aparte.
+    Anular una compra despues de haber vendido contra ella borra de la cuenta un
+    queso que salio de verdad: el inventario se va a negativo y, con el
+    inventario negativo, ninguna venta vuelve a pasar el control de existencias.
+    El dueno se queda sin poder trabajar sin entender por que.
+
+    Lo que hay que hacer cuando una compra estaba mal cargada es CORREGIRLA
+    (editarla) o anular primero las ventas que se llevaron ese queso.
+
+    El reparto sigue sabiendo declarar "kilos sin lote" —lo cubre la prueba de
+    abajo con datos heredados, que es el caso que queda—: lo que ya no se puede
+    es LLEGAR ahi anulando.
     """
     h = auth_headers(client, "admin.a")
     compra(client, h, fecha="2026-07-18", productor="Sebastian Ruiz",
@@ -285,26 +291,19 @@ def test_anular_una_compra_ya_vendida_deja_kilos_sin_lote(client, base_datos):
     # Se venden 700: 500 del primero y 200 del segundo
     venta(client, h, fecha="2026-07-20", cliente="Alba Nieto", kilos="700",
           precio_kilo="21000", pagada_de_contado=True)
-    # Y despues se anula la segunda compra
-    r = client.post(f"{API}/compras/{mal_cargada['id']}/anular", headers=h)
-    assert r.status_code == 200, r.text
 
-    p = panel(client, h)
-    l = p["lotes"][0]
+    r = client.post(f"{API}/compras/{mal_cargada['id']}/anular", headers=h)
     print("\n===== 6. ANULAR UNA COMPRA YA VENDIDA =====")
-    print(f"  queda un lote: {l['fecha']} con {l['kilos_comprados']} kg")
-    print(f"  vendidos del lote {l['kilos_vendidos']} kg -> {l['ingreso_queso']}")
-    print(f"  SIN LOTE: {p['kilos_sin_lote']} kg por {p['ingreso_sin_lote']}")
-    assert len(p["lotes"]) == 1
-    assert D(l["kilos_vendidos"]) == 500
-    # Solo la parte de la plata que corresponde a los kilos cubiertos:
-    # 500/700 de 14.700.000 = 10.500.000
-    assert D(l["ingreso_queso"]) == 10_500_000
-    assert D(p["kilos_sin_lote"]) == 200
-    assert D(p["ingreso_sin_lote"]) == 4_200_000
-    # La suma de las dos partes es la venta completa: no se pierde ni un peso
-    assert D(l["ingreso_queso"]) + D(p["ingreso_sin_lote"]) == 14_700_000
-    comprobar_cuadre(p, "sin lote")
+    print(f"  {r.status_code} - {r.json().get('error', {}).get('detail', '')}")
+    assert r.status_code == 422
+    assert "ya se vendio" in r.json()["error"]["detail"].replace("ó", "o")
+
+    # Y nada se movio: el panel sigue cuadrando y sin kilos huerfanos
+    p = panel(client, h)
+    print(f"  lotes: {len(p['lotes'])}  sin lote: {p['kilos_sin_lote']} kg")
+    assert len(p["lotes"]) == 2
+    assert D(p["kilos_sin_lote"]) == 0
+    comprobar_cuadre(p, "tras el intento de anular")
 
 
 def test_el_guardia_de_inventario_no_mira_fechas(client, base_datos):

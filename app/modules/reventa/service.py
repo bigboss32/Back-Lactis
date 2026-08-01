@@ -50,6 +50,8 @@ from app.modules.reventa.repository import (
 )
 from app.modules.reventa.schemas import (
     EstadoCuentaCliente,
+    GananciaDia,
+    GananciaPorDia,
     EstadoCuentaCompra,
     EstadoCuentaPago,
     EstadoCuentaPagoProductor,
@@ -389,6 +391,20 @@ class CompraQuesoService(BaseService[CompraQueso]):
         if compra.abonado > CERO:
             raise BusinessError(
                 "No se puede anular una compra con abonos registrados"
+            )
+        # Si el queso de esta compra YA SE VENDIÓ, no se anula. Anularla borraría
+        # de la cuenta un queso que salió de verdad: el inventario se iría a
+        # negativo y, con el inventario en negativo, ninguna venta vuelve a pasar
+        # el control de existencias — el dueño se queda sin poder trabajar sin
+        # entender por qué. Lo que hay que hacer en ese caso es corregir la
+        # compra (editarla) o anular primero las ventas que se llevaron ese queso.
+        disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
+        if disponible - Decimal(compra.kilos_netos) < CERO:
+            raise BusinessError(
+                f"No se puede anular: el queso de esta compra ya se vendió. "
+                f"Solo quedan {disponible} kg sin vender de los "
+                f"{compra.kilos_netos} kg que trajo. Anule primero las ventas "
+                f"que se lo llevaron, o corrija la compra en vez de anularla"
             )
         antes = compra.estado
         compra.estado = ESTADO_ANULADA
@@ -1899,7 +1915,12 @@ class LoteService:
         self.ventas = VentaQuesoRepository(db, ctx.empresa_id)
         self.ajustes = ConversionBoronaRepository(db, ctx.empresa_id)
 
-    def panel(self, desde: date | None = None, hasta: date | None = None) -> LotesPanel:
+    def _reparto(self):
+        """El reparto FIFO completo, que es la base de todo lo de aquí abajo.
+
+        Se calcula SIEMPRE sobre toda la historia, nunca sobre un filtro: para
+        saber qué había en bodega un día hay que haber procesado lo de antes.
+        """
         compras = [
             CompraEvento(
                 fecha=fila[0], orden=indice, productor=fila[2],
@@ -1924,7 +1945,10 @@ class LoteService:
             for indice, fila in enumerate(self.ajustes.eventos_para_lotes())
         ]
 
-        reparto = repartir_lotes(compras, ventas, ajustes)
+        return repartir_lotes(compras, ventas, ajustes)
+
+    def panel(self, desde: date | None = None, hasta: date | None = None) -> LotesPanel:
+        reparto = self._reparto()
 
         # El filtro recorta lo que se MUESTRA, no lo que se calculó
         visibles = [
@@ -1956,6 +1980,62 @@ class LoteService:
             kilos_sin_lote=reparto.kilos_sin_lote,
             borona_sin_lote=reparto.borona_sin_lote,
             ingreso_sin_lote=reparto.ingreso_sin_lote,
+        )
+
+    def ganancia_por_dia(self, desde: date, hasta: date) -> GananciaPorDia:
+        """Lo que se ganó DE VERDAD entre dos fechas, día por día.
+
+        Ojo con no confundirlo con la ganancia del resumen, que hace "ventas del
+        período menos compras del período". Eso mezcla dos cosas distintas: un
+        mes en que se compró mucho y se vendió poco sale en pérdida aunque no se
+        haya perdido nada — el queso está en la bodega, no desaparecido.
+
+        Esto es otra cuenta: de cada venta hecha en esos días se toma lo que
+        entró, lo que había costado ESE queso en concreto (el reparto FIFO ya lo
+        sabe, no es un promedio) y el flete que se pagó por despacharlo. Eso es
+        lo que se ganó ese día, y por eso los días suman el total sin sobrar ni
+        faltar un peso.
+
+        Las compras de esos días no restan aquí: comprar no es gastar, es
+        cambiar plata por queso. Se ve aparte, en la cartera y en el inventario.
+        """
+        reparto = self._reparto()
+        por_dia: dict[date, dict[str, Decimal]] = {}
+        for lote in reparto.lotes:
+            for v in lote.detalle_ventas:
+                if v.fecha < desde or v.fecha > hasta:
+                    continue
+                d = por_dia.setdefault(
+                    v.fecha,
+                    {"kilos": CERO, "ingresos": CERO, "costo": CERO, "gastos": CERO},
+                )
+                d["kilos"] += v.kilos
+                d["ingresos"] += v.ingreso
+                d["costo"] += v.costo
+                d["gastos"] += v.gasto
+
+        dias = [
+            GananciaDia(
+                fecha=fecha,
+                kilos=v["kilos"],
+                ingresos=v["ingresos"],
+                costo=v["costo"],
+                gastos=v["gastos"],
+                ganancia=v["ingresos"] - v["costo"] - v["gastos"],
+            )
+            for fecha, v in sorted(por_dia.items())
+        ]
+        return GananciaPorDia(
+            desde=desde,
+            hasta=hasta,
+            dias=dias,
+            kilos=sum((d.kilos for d in dias), CERO),
+            ingresos=sum((d.ingresos for d in dias), CERO),
+            costo=sum((d.costo for d in dias), CERO),
+            gastos=sum((d.gastos for d in dias), CERO),
+            # El total es la SUMA de los días, no una cuenta aparte: así el
+            # desglose cuadra por construcción y no por casualidad.
+            ganancia=sum((d.ganancia for d in dias), CERO),
         )
 
     @staticmethod
