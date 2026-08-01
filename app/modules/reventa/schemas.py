@@ -1,11 +1,41 @@
 import uuid
 from datetime import date
-from decimal import Decimal
-from typing import Literal
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from app.common.schemas import BaseSchema, TenantRead
+
+DOS_DECIMALES = Decimal("0.01")
+
+
+def _a_dos_decimales(valor: Any) -> Any:
+    """Redondea los kilos a dos decimales EN LA ENTRADA.
+
+    Las columnas de kilos son Numeric(12,2). Si entran tres decimales, Postgres
+    guarda el número redondeado pero el servicio calcula el total con el valor
+    CRUDO: la fila queda contradiciéndose sola. Con 10,005 kg a $1.000 se guarda
+    "10,01 kg" y "$10.005", y el dueño —que multiplica a mano— ve que no le da.
+
+    SQLite no delata nada de esto: se guarda los tres decimales tan tranquilo, y
+    por eso la suite pasaba con el defecto puesto.
+
+    Redondear aquí hace que lo validado, lo guardado y lo calculado sean el MISMO
+    número, en los dos motores. Se redondea hacia arriba en el medio (0,005 ->
+    0,01), que es lo que espera quien pesa en una báscula.
+    """
+    if valor is None or isinstance(valor, bool):
+        return valor
+    try:
+        return Decimal(str(valor)).quantize(DOS_DECIMALES, rounding=ROUND_HALF_UP)
+    except (ArithmeticError, TypeError, ValueError):
+        # Que lo rechace Pydantic con su mensaje, no un error raro desde aquí.
+        return valor
+
+
+# Kilos: siempre dos decimales, los mismos que caben en la base.
+Kilos = Annotated[Decimal, BeforeValidator(_a_dos_decimales)]
 
 
 class AbonoRead(BaseSchema):
@@ -25,8 +55,8 @@ class AbonoCreate(BaseSchema):
 class CompraQuesoCreate(BaseSchema):
     fecha: date
     productor: str = Field(min_length=2, max_length=150)
-    kilos_brutos: Decimal = Field(gt=0)
-    borona_kilos: Decimal = Field(default=Decimal("0"), ge=0)
+    kilos_brutos: Kilos = Field(gt=0)
+    borona_kilos: Kilos = Field(default=Decimal("0"), ge=0)
     precio_kilo: Decimal = Field(gt=0)
     observaciones: str | None = None
 
@@ -34,8 +64,8 @@ class CompraQuesoCreate(BaseSchema):
 class CompraQuesoUpdate(BaseSchema):
     fecha: date | None = None
     productor: str | None = Field(default=None, min_length=2, max_length=150)
-    kilos_brutos: Decimal | None = Field(default=None, gt=0)
-    borona_kilos: Decimal | None = Field(default=None, ge=0)
+    kilos_brutos: Kilos | None = Field(default=None, gt=0)
+    borona_kilos: Kilos | None = Field(default=None, ge=0)
     precio_kilo: Decimal | None = Field(default=None, gt=0)
     observaciones: str | None = None
 
@@ -59,7 +89,7 @@ class VentaQuesoCreate(BaseSchema):
     fecha: date
     cliente: str = Field(min_length=2, max_length=150)
     tipo: Literal["queso", "borona"] = "queso"
-    kilos: Decimal = Field(gt=0)
+    kilos: Kilos = Field(gt=0)
     precio_kilo: Decimal = Field(gt=0)
     gasto_concepto: str | None = Field(default=None, max_length=150)
     gasto_por_kilo: Decimal = Field(default=Decimal("0"), ge=0)
@@ -71,7 +101,7 @@ class VentaQuesoCreate(BaseSchema):
 class VentaQuesoUpdate(BaseSchema):
     fecha: date | None = None
     cliente: str | None = Field(default=None, min_length=2, max_length=150)
-    kilos: Decimal | None = Field(default=None, gt=0)
+    kilos: Kilos | None = Field(default=None, gt=0)
     precio_kilo: Decimal | None = Field(default=None, gt=0)
     gasto_concepto: str | None = Field(default=None, max_length=150)
     gasto_por_kilo: Decimal | None = Field(default=None, ge=0)
@@ -139,7 +169,7 @@ class SaldoAnteriorRead(TenantRead):
 # ------------------------------------------------------------ conversiones
 class ConversionCreate(BaseSchema):
     fecha: date
-    kilos: Decimal = Field(gt=0)
+    kilos: Kilos = Field(gt=0)
     destino: Literal["borona", "merma"] = "borona"
     precio_kilo: Decimal = Field(default=Decimal("0"), ge=0)
     observaciones: str | None = None

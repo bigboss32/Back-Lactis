@@ -8,6 +8,9 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from app.common.service import BaseService, serialize_entity
 from app.core.exceptions import BusinessError, NotFoundError
 from app.core.pagination import PageParams
@@ -211,6 +214,35 @@ def _estado_pago(valor_total: Decimal, abonado: Decimal) -> str:
     return ESTADO_PAGADA if abonado >= valor_total else ESTADO_PARCIAL
 
 
+def _bloquear(db: Session, entidad: Any) -> Any:
+    """Relee la fila con FOR UPDATE antes de tocarle la plata.
+
+    Sin esto, dos abonos a la vez sobre la misma deuda se pisan: los dos leen
+    `abonado` viejo, los dos validan contra el mismo saldo y el segundo escribe
+    encima del primero. Se pierde un pago —el productor reclama y en el sistema
+    no está— y la cartera deja de cuadrar.
+
+    Dos detalles que ya nos costaron caro antes en este proyecto:
+
+    - `populate_existing`: sin él, el FOR UPDATE bloquea la fila en la base pero
+      SQLAlchemy devuelve el objeto que ya tenía en memoria, CON LOS VALORES
+      VIEJOS. Y es peor de lo que suena: quien llega segundo se queda esperando
+      el candado justo mientras el primero escribe, así que al soltarse tiene en
+      la mano exactamente los datos de antes.
+    - Las relaciones de abonos son lazy="selectin", no "joined". Importa: con un
+      LEFT JOIN de por medio, Postgres rechaza el FOR UPDATE con 0A000.
+
+    SQLite descarta el FOR UPDATE en silencio, así que la suite no delata nada
+    de esto. La corrección se sostiene por lectura del código, no por la prueba.
+    """
+    return db.execute(
+        select(type(entidad))
+        .where(type(entidad).id == entidad.id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    ).scalar_one()
+
+
 class CompraQuesoService(BaseService[CompraQueso]):
     repository_cls = CompraQuesoRepository
     modulo = "reventa"
@@ -270,6 +302,19 @@ class CompraQuesoService(BaseService[CompraQueso]):
                 f"El total no puede quedar por debajo de lo ya abonado "
                 f"({pesos(actual.abonado)}); elimine primero los abonos que sobren"
             )
+        # Y tampoco se pueden quitar kilos que ya salieron vendidos. Bajar una
+        # compra de 100 kg a 10 cuando ya se vendieron 80 deja el inventario en
+        # -70: a partir de ahí NINGUNA venta pasa el control de existencias y el
+        # dueño se queda sin poder trabajar sin entender por qué.
+        nuevos = Decimal(data["kilos_netos"])
+        viejos = Decimal(actual.kilos_netos)
+        if nuevos < viejos:
+            disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
+            if (nuevos - viejos) + disponible < CERO:
+                raise BusinessError(
+                    f"No se pueden quitar tantos kilos: de esta compra ya salieron "
+                    f"vendidos. Solo quedan {disponible} kg sin vender"
+                )
         data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, self._canonizar(data))
 
@@ -281,6 +326,7 @@ class CompraQuesoService(BaseService[CompraQueso]):
 
     def registrar_abono(self, compra_id: uuid.UUID, payload: Any) -> CompraQueso:
         compra = self.repo.get_or_fail(compra_id)
+        compra = _bloquear(self.db, compra)
         if compra.estado == ESTADO_ANULADA:
             raise BusinessError("La compra está anulada")
         valor = Decimal(payload.valor)
@@ -303,12 +349,19 @@ class CompraQuesoService(BaseService[CompraQueso]):
         compra.estado = _estado_pago(compra.valor_total, compra.abonado)
         compra.updated_by = self.ctx.user_id
         self.db.flush()
+        # Se refresca la lista de abonos antes de devolverla. La relación es
+        # lazy="selectin": ya venía cargada de la lectura anterior, así que sin
+        # esto la respuesta sale con el `abonado` nuevo pero SIN el abono en la
+        # lista (o con el que se acaba de borrar todavía dentro). La pantalla
+        # pinta las dos cosas juntas y se contradicen a la vista.
+        self.db.refresh(compra, ["abonos"])
         self._audit("editar", compra.id, None, {"abono": float(valor), "estado": compra.estado})
         return compra
 
     def eliminar_abono(self, compra_id: uuid.UUID, abono_id: uuid.UUID) -> CompraQueso:
         """Elimina un abono mal registrado: baja el abonado y recalcula el estado."""
         compra = self.repo.get_or_fail(compra_id)
+        compra = _bloquear(self.db, compra)
         abono = next((a for a in compra.abonos if a.id == abono_id), None)
         if abono is None:
             raise NotFoundError("Abono no encontrado")
@@ -318,6 +371,12 @@ class CompraQuesoService(BaseService[CompraQueso]):
         compra.updated_by = self.ctx.user_id
         self.db.delete(abono)
         self.db.flush()
+        # Se refresca la lista de abonos antes de devolverla. La relación es
+        # lazy="selectin": ya venía cargada de la lectura anterior, así que sin
+        # esto la respuesta sale con el `abonado` nuevo pero SIN el abono en la
+        # lista (o con el que se acaba de borrar todavía dentro). La pantalla
+        # pinta las dos cosas juntas y se contradicen a la vista.
+        self.db.refresh(compra, ["abonos"])
         self._audit(
             "editar", compra.id, None,
             {"abono_eliminado": float(valor), "estado": compra.estado},
@@ -326,6 +385,7 @@ class CompraQuesoService(BaseService[CompraQueso]):
 
     def anular(self, compra_id: uuid.UUID) -> CompraQueso:
         compra = self.repo.get_or_fail(compra_id)
+        compra = _bloquear(self.db, compra)
         if compra.abonado > CERO:
             raise BusinessError(
                 "No se puede anular una compra con abonos registrados"
@@ -376,20 +436,39 @@ class VentaQuesoService(BaseService[VentaQueso]):
             )
         return data
 
+    def _exigir_existencias(
+        self, tipo: str, kilos: Decimal, actual: VentaQueso | None = None
+    ) -> None:
+        """No se puede vender más queso (o borona) del que hay.
+
+        Vive aquí, en un método, y no suelto dentro de `crear`, porque ESE fue el
+        defecto: la comprobación estaba solo al crear y `actualizar` no la hacía.
+        Se creaba una venta de 1 kg y se editaba a 500, y pasaba. El resumen
+        quedaba con kilos negativos y con una ganancia que no era la real, y el
+        desglose por lote decía otra cosa distinta que el resumen — que es
+        justo lo que el dueño ve al cuadrar a mano.
+
+        Al EDITAR hay que devolverle al inventario los kilos que esa misma venta
+        ya tenía apartados, o si no editar 100 kg a 100 kg fallaría por comparar
+        contra un disponible del que esos kilos ya están descontados.
+        """
+        if tipo == TIPO_VENTA_BORONA:
+            disponible = ReventaResumenService.borona_disponible(self.db, self.ctx)
+            que = "borona"
+        else:
+            disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
+            que = "queso"
+        if actual is not None and actual.estado != ESTADO_ANULADA and actual.tipo == tipo:
+            disponible += Decimal(actual.kilos)
+        if kilos > disponible:
+            raise BusinessError(f"Solo hay {disponible} kg de {que} disponibles")
+
     def crear(self, payload: Any) -> VentaQueso:
         data = self._canonizar(payload.model_dump(exclude_unset=True))
         de_contado = data.pop("pagada_de_contado", False)
         kilos = Decimal(data["kilos"])
-        # No permitir vender más queso o borona del disponible en inventario
         tipo = data.get("tipo", TIPO_VENTA_QUESO)
-        if tipo == TIPO_VENTA_BORONA:
-            disponible = ReventaResumenService.borona_disponible(self.db, self.ctx)
-            if kilos > disponible:
-                raise BusinessError(f"Solo hay {disponible} kg de borona disponibles")
-        else:
-            disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
-            if kilos > disponible:
-                raise BusinessError(f"Solo hay {disponible} kg de queso disponibles")
+        self._exigir_existencias(tipo, kilos)
         data["valor_total"] = (kilos * Decimal(data["precio_kilo"])).quantize(DOS_DECIMALES)
         # Gasto de venta por kilo (ej. transporte): el total es por_kilo * kilos.
         por_kilo = Decimal(data.get("gasto_por_kilo") or CERO)
@@ -416,6 +495,9 @@ class VentaQuesoService(BaseService[VentaQueso]):
         data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
         kilos = Decimal(data.get("kilos") or actual.kilos)
         precio = Decimal(data.get("precio_kilo") or actual.precio_kilo)
+        # La MISMA comprobación que al crear. Sin esto el guardia de la creación
+        # es de adorno: se crea la venta con un kilo y se edita a los que sea.
+        self._exigir_existencias(data.get("tipo") or actual.tipo, kilos, actual=actual)
         data["valor_total"] = (kilos * precio).quantize(DOS_DECIMALES)
         # Recalcula el gasto total (por_kilo * kilos) si cambió cualquiera de los dos.
         por_kilo = Decimal(
@@ -446,6 +528,7 @@ class VentaQuesoService(BaseService[VentaQueso]):
 
     def registrar_abono(self, venta_id: uuid.UUID, payload: Any) -> VentaQueso:
         venta = self.repo.get_or_fail(venta_id)
+        venta = _bloquear(self.db, venta)
         if venta.estado == ESTADO_ANULADA:
             raise BusinessError("La venta está anulada")
         valor = Decimal(payload.valor)
@@ -465,12 +548,19 @@ class VentaQuesoService(BaseService[VentaQueso]):
         venta.estado = _estado_pago(venta.valor_total, venta.abonado)
         venta.updated_by = self.ctx.user_id
         self.db.flush()
+        # Se refresca la lista de abonos antes de devolverla. La relación es
+        # lazy="selectin": ya venía cargada de la lectura anterior, así que sin
+        # esto la respuesta sale con el `abonado` nuevo pero SIN el abono en la
+        # lista (o con el que se acaba de borrar todavía dentro). La pantalla
+        # pinta las dos cosas juntas y se contradicen a la vista.
+        self.db.refresh(venta, ["abonos"])
         self._audit("editar", venta.id, None, {"abono": float(valor), "estado": venta.estado})
         return venta
 
     def eliminar_abono(self, venta_id: uuid.UUID, abono_id: uuid.UUID) -> VentaQueso:
         """Elimina un abono mal registrado: baja el abonado y recalcula el estado."""
         venta = self.repo.get_or_fail(venta_id)
+        venta = _bloquear(self.db, venta)
         abono = next((a for a in venta.abonos if a.id == abono_id), None)
         if abono is None:
             raise NotFoundError("Abono no encontrado")
@@ -480,6 +570,12 @@ class VentaQuesoService(BaseService[VentaQueso]):
         venta.updated_by = self.ctx.user_id
         self.db.delete(abono)
         self.db.flush()
+        # Se refresca la lista de abonos antes de devolverla. La relación es
+        # lazy="selectin": ya venía cargada de la lectura anterior, así que sin
+        # esto la respuesta sale con el `abonado` nuevo pero SIN el abono en la
+        # lista (o con el que se acaba de borrar todavía dentro). La pantalla
+        # pinta las dos cosas juntas y se contradicen a la vista.
+        self.db.refresh(venta, ["abonos"])
         self._audit(
             "editar", venta.id, None,
             {"abono_eliminado": float(valor), "estado": venta.estado},
@@ -488,6 +584,7 @@ class VentaQuesoService(BaseService[VentaQueso]):
 
     def anular(self, venta_id: uuid.UUID) -> VentaQueso:
         venta = self.repo.get_or_fail(venta_id)
+        venta = _bloquear(self.db, venta)
         if venta.abonado > CERO:
             raise BusinessError(
                 "No se puede anular una venta con abonos registrados"
@@ -620,6 +717,7 @@ class SaldoAnteriorService(BaseService[SaldoAnterior]):
 
     def registrar_abono(self, saldo_id: uuid.UUID, payload: Any) -> SaldoAnterior:
         saldo = self.repo.get_or_fail(saldo_id)
+        saldo = _bloquear(self.db, saldo)
         if saldo.estado == ESTADO_ANULADA:
             raise BusinessError("El saldo está anulado")
         valor = Decimal(payload.valor)
@@ -642,12 +740,19 @@ class SaldoAnteriorService(BaseService[SaldoAnterior]):
         saldo.estado = _estado_pago(saldo.valor_total, saldo.abonado)
         saldo.updated_by = self.ctx.user_id
         self.db.flush()
+        # Se refresca la lista de abonos antes de devolverla. La relación es
+        # lazy="selectin": ya venía cargada de la lectura anterior, así que sin
+        # esto la respuesta sale con el `abonado` nuevo pero SIN el abono en la
+        # lista (o con el que se acaba de borrar todavía dentro). La pantalla
+        # pinta las dos cosas juntas y se contradicen a la vista.
+        self.db.refresh(saldo, ["abonos"])
         self._audit("editar", saldo.id, None, {"abono": float(valor), "estado": saldo.estado})
         return saldo
 
     def eliminar_abono(self, saldo_id: uuid.UUID, abono_id: uuid.UUID) -> SaldoAnterior:
         """Elimina un abono mal registrado: baja el abonado y recalcula el estado."""
         saldo = self.repo.get_or_fail(saldo_id)
+        saldo = _bloquear(self.db, saldo)
         abono = next((a for a in saldo.abonos if a.id == abono_id), None)
         if abono is None:
             raise NotFoundError("Abono no encontrado")
@@ -659,6 +764,12 @@ class SaldoAnteriorService(BaseService[SaldoAnterior]):
         # colección en memoria queda igual que la base y la respuesta ya no lo trae.
         saldo.abonos.remove(abono)
         self.db.flush()
+        # Se refresca la lista de abonos antes de devolverla. La relación es
+        # lazy="selectin": ya venía cargada de la lectura anterior, así que sin
+        # esto la respuesta sale con el `abonado` nuevo pero SIN el abono en la
+        # lista (o con el que se acaba de borrar todavía dentro). La pantalla
+        # pinta las dos cosas juntas y se contradicen a la vista.
+        self.db.refresh(saldo, ["abonos"])
         self._audit(
             "editar", saldo.id, None,
             {"abono_eliminado": float(valor), "estado": saldo.estado},
@@ -667,6 +778,7 @@ class SaldoAnteriorService(BaseService[SaldoAnterior]):
 
     def anular(self, saldo_id: uuid.UUID) -> SaldoAnterior:
         saldo = self.repo.get_or_fail(saldo_id)
+        saldo = _bloquear(self.db, saldo)
         if saldo.abonado > CERO:
             raise BusinessError("No se puede anular un saldo con abonos registrados")
         antes = saldo.estado

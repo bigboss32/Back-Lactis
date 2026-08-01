@@ -215,7 +215,7 @@ def eliminar_abono_compra(
     entity_id: uuid.UUID,
     abono_id: uuid.UUID,
     db: DbSession,
-    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+    ctx: RequestContext = Depends(require_permission("reventa", "eliminar")),
 ) -> CompraQuesoRead:
     return CompraQuesoService(db, ctx).eliminar_abono(entity_id, abono_id)
 
@@ -332,7 +332,7 @@ def eliminar_abono_venta(
     entity_id: uuid.UUID,
     abono_id: uuid.UUID,
     db: DbSession,
-    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+    ctx: RequestContext = Depends(require_permission("reventa", "eliminar")),
 ) -> VentaQuesoRead:
     return VentaQuesoService(db, ctx).eliminar_abono(entity_id, abono_id)
 
@@ -432,7 +432,7 @@ def eliminar_abono_saldo_anterior(
     entity_id: uuid.UUID,
     abono_id: uuid.UUID,
     db: DbSession,
-    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+    ctx: RequestContext = Depends(require_permission("reventa", "eliminar")),
 ) -> SaldoAnteriorRead:
     return SaldoAnteriorService(db, ctx).eliminar_abono(entity_id, abono_id)
 
