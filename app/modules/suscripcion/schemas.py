@@ -27,6 +27,10 @@ class SuscripcionResumen(BaseSchema):
     pagada_hasta: date | None
     dias_restantes: int | None
     dias_gracia: int
+    # Cuántos días antes del vencimiento se avisa... y desde cuándo se puede
+    # pagar el mes siguiente. Son dos ajustes distintos (DIAS_AVISO y
+    # DIAS_GRACIA) y confundirlos hace que la pantalla dé una fecha falsa.
+    dias_aviso: int = 5
     tarifa: Decimal
     tiene_fuente_pago: bool
 

@@ -31,6 +31,7 @@ from app.core.logging_config import get_logger
 from app.core.pagination import PageParams
 from app.modules.empresas.models import Empresa
 from app.modules.suscripcion.estado import (
+    ESTADO_ACTIVA,
     ESTADO_BLOQUEADA,
     ESTADO_GRACIA,
     ResumenEstado,
@@ -75,6 +76,10 @@ EXPIRACION_PENDIENTE = timedelta(hours=24)
 EXPIRACION_SIN_RESPUESTA = timedelta(days=7)
 
 
+# Tras un rechazo, los cobros AUTOMÁTICOS esperan esto antes de reintentar
+COOLDOWN_RECHAZO = timedelta(hours=24)
+
+
 def _solo_digitos(texto: str) -> str:
     """Deja el teléfono en puros números.
 
@@ -87,8 +92,6 @@ def _solo_digitos(texto: str) -> str:
     if len(digitos) > 10 and digitos.startswith("57"):
         digitos = digitos[2:]
     return digitos
-# Tras un rechazo, los cobros AUTOMÁTICOS esperan esto antes de reintentar
-COOLDOWN_RECHAZO = timedelta(hours=24)
 
 
 def _utc(momento: datetime) -> datetime:
@@ -232,6 +235,7 @@ class SuscripcionService:
             "pagada_hasta": resultado.limite,
             "dias_restantes": resultado.dias_restantes,
             "dias_gracia": settings.SUSCRIPCION_DIAS_GRACIA,
+            "dias_aviso": settings.SUSCRIPCION_DIAS_AVISO,
             "tarifa": self._tarifa(empresa),
             "tiene_fuente_pago": fuente is not None,
             "exenta": empresa.exenta,
@@ -261,6 +265,7 @@ class SuscripcionService:
             "pagada_hasta": resultado.limite,
             "dias_restantes": resultado.dias_restantes,
             "dias_gracia": settings.SUSCRIPCION_DIAS_GRACIA,
+            "dias_aviso": settings.SUSCRIPCION_DIAS_AVISO,
             "tarifa": self._tarifa(empresa),
             "tiene_fuente_pago": fuente is not None,
         }
@@ -470,6 +475,12 @@ class SuscripcionService:
                 "La empresa está exenta de pago: no hay nada que cobrar",
                 code="empresa_exenta",
             )
+        # Va aquí y no solo en el camino manual: si la suscripción está al día,
+        # NADIE tiene que cobrar, ni una persona ni el cron. Los cobros
+        # automáticos ya solo miran las vencidas, así que para ellos esto es una
+        # red de seguridad contra la carrera —la empresa se puso al día justo
+        # mientras el barrido la tenía en la mano— y no un cambio de conducta.
+        self._exigir_que_haya_algo_que_pagar(empresa)
         if fuente is None:
             raise BusinessError(
                 "La empresa no tiene una fuente de pago registrada",
@@ -569,6 +580,32 @@ class SuscripcionService:
             code="sin_correo",
         )
 
+    def _exigir_que_haya_algo_que_pagar(self, empresa: Empresa) -> None:
+        """Con la suscripción al día no se deja pagar.
+
+        Lo pidió el dueño y tiene razón: con un mes entero por delante no hay
+        nada que pagar, y el botón disponible solo invita a pagar dos veces sin
+        darse cuenta —el dinero no se pierde, se acumula, pero nadie quiere
+        descubrir que adelantó tres meses por error—.
+
+        Se abre cuando falta poco: 'por_vencer' (los días de aviso), 'gracia' y
+        'bloqueada'. O sea que sí se puede pagar ANTES de que se venza, que es
+        lo sensato; lo que no se puede es pagar un mes que apenas empezó.
+
+        No vale con esconder el botón: el que sabe la dirección del endpoint
+        entra igual, y el cobro automático de la tarjeta usa este mismo camino.
+        """
+        resultado = self._estado(empresa)
+        if resultado.estado != ESTADO_ACTIVA:
+            return
+        raise BusinessError(
+            f"La suscripción ya está al día hasta el "
+            f"{resultado.limite.strftime('%d/%m/%Y') if resultado.limite else 'próximo período'}"
+            f" y no hay nada que pagar. Podrá pagar el mes siguiente cuando falten "
+            f"{settings.SUSCRIPCION_DIAS_AVISO} días o menos.",
+            code="suscripcion_al_dia",
+        )
+
     def _datos_del_pagador(self, empresa: Empresa, payload: Any) -> tuple[str, str]:
         """Nombre y teléfono de quien paga, que PSE exige en `customer_data`.
 
@@ -630,6 +667,7 @@ class SuscripcionService:
                 "La empresa está exenta de pago: no hay nada que cobrar",
                 code="empresa_exenta",
             )
+        self._exigir_que_haya_algo_que_pagar(empresa)
         pendiente = self._pago_pendiente(empresa.id)
         if pendiente is not None:
             # No se devuelve aquí la URL del banco: la pantalla recarga al
