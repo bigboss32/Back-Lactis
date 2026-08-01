@@ -23,10 +23,13 @@ from app.seeds.seed import seed_permisos, seed_roles
 
 NOMBRE_EN_CONFLICTO = "Reventa"
 
-# 7 acciones del módulo 'reventa' + notificaciones:consultar
-PERMISOS_ESPERADOS_ROL_SISTEMA = {("reventa", a) for a in ACCIONES} | {
-    ("notificaciones", "consultar")
-}
+# Las 7 acciones de 'reventa', las 3 de 'suscripcion' (este cliente es quien
+# paga la mensualidad) y notificaciones:consultar. Nada más.
+PERMISOS_ESPERADOS_ROL_SISTEMA = (
+    {("reventa", a) for a in ACCIONES}
+    | {("suscripcion", a) for a in ("consultar", "crear", "administrar")}
+    | {("notificaciones", "consultar")}
+)
 
 
 class _CapturaAvisos(logging.Handler):
@@ -111,7 +114,7 @@ def test_siembra_no_escala_privilegios_de_un_rol_de_usuario_homonimo(db_session)
 
 
 def test_siembra_crea_el_rol_de_sistema_reventa_si_nadie_ocupa_el_nombre(db_session):
-    """Sin conflicto, la siembra sí crea el rol de sistema con sus 8 permisos."""
+    """Sin conflicto, la siembra sí crea el rol de sistema con sus permisos."""
     permisos = seed_permisos(db_session)
 
     roles = seed_roles(db_session, permisos)
@@ -119,7 +122,46 @@ def test_siembra_crea_el_rol_de_sistema_reventa_si_nadie_ocupa_el_nombre(db_sess
     rol = roles[NOMBRE_EN_CONFLICTO]
     assert rol.es_sistema is True
     assert _claves(rol) == PERMISOS_ESPERADOS_ROL_SISTEMA
-    assert len(rol.permisos) == 8
+    assert len(rol.permisos) == len(PERMISOS_ESPERADOS_ROL_SISTEMA)
+
+
+def test_el_rol_reventa_puede_pagar_pero_no_administrar_la_empresa(db_session):
+    """Lo que este rol tiene que poder y lo que NO, dicho campo por campo.
+
+    El cliente de reventa no usa el ERP: solo compra y revende queso. Pero es
+    quien paga la mensualidad, así que necesita el módulo de suscripción — y
+    SOLO ese de todo Administración. Si se le colara 'usuarios' o 'roles' podría
+    darse a sí mismo el resto del sistema, y si se le colara 'empresas' vería
+    datos de la quesera que no le tocan.
+
+    Sin la suscripción el problema es el contrario y también real: al vencerse
+    quedaría bloqueado sin manera de pagar, esperando a que alguien con más
+    permisos entrara a hacerlo por él.
+    """
+    permisos = seed_permisos(db_session)
+    rol = seed_roles(db_session, permisos)[NOMBRE_EN_CONFLICTO]
+    claves = _claves(rol)
+    modulos = sorted({m for m, _ in claves})
+
+    print("\n===== QUÉ VE EL ROL 'REVENTA' =====")
+    for modulo in modulos:
+        acciones = sorted(a for m, a in claves if m == modulo)
+        print(f"  {modulo:16} {', '.join(acciones)}")
+
+    # Puede pagar, de las tres formas que hacen falta
+    assert ("suscripcion", "consultar") in claves      # ver cómo va
+    assert ("suscripcion", "crear") in claves          # pagar (tarjeta o PSE)
+    assert ("suscripcion", "administrar") in claves    # guardar la tarjeta
+
+    # Y NO puede nada más de Administración
+    prohibidos = ("usuarios", "roles", "empresas", "empleados", "sucursales", "auditoria")
+    colados = [m for m in prohibidos if any(mod == m for mod, _ in claves)]
+    print(f"  módulos prohibidos que se colaron: {colados or 'ninguno'}")
+    assert colados == []
+
+    # Ni contabilidad, ni reportes (de ahí cuelga Estadísticas del ERP)
+    assert not any(mod in ("contabilidad", "reportes") for mod, _ in claves)
+    assert modulos == ["notificaciones", "reventa", "suscripcion"]
 
 
 def test_siembra_repetida_no_duplica_ni_cambia_permisos(db_session):

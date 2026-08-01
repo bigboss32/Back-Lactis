@@ -86,10 +86,24 @@ ROLES_PERMISOS: dict[str, set[tuple[str, str]]] = {
     # Lleva TODAS las acciones de 'reventa', incluidas 'eliminar' y 'administrar'
     # (la que anula compras y ventas): es el dueño de su propio negocio, nadie más
     # va a corregirle los registros y el daño posible no sale de su módulo y su
-    # empresa. Fuera de 'reventa' solo ve sus notificaciones, como los demás roles
-    # operativos; nada de usuarios, roles, empresas, auditoría, contabilidad ni
-    # reportes (de este último cuelga la pantalla de Estadísticas del ERP).
-    "Reventa": {("reventa", a) for a in ACCIONES} | {("notificaciones", "consultar")},
+    # empresa.
+    #
+    # Y 'suscripcion' completo, que es lo ÚNICO que se lleva de Administración:
+    # este cliente es quien paga la mensualidad. Sin esto el menú no le mostraba
+    # por dónde pagar y, cuando la suscripción se venciera, quedaría bloqueado
+    # sin manera de arreglarlo él mismo — dependiendo de que alguien con más
+    # permisos entrara a pagarle. Van las tres acciones porque las tres son de
+    # pagar: 'consultar' para ver cómo va, 'crear' para pagar (tarjeta o PSE) y
+    # 'administrar' para guardar la tarjeta del cobro automático; sin esa última
+    # tendría que pagar a mano todos los meses.
+    #
+    # Lo demás de Administración NO va: nada de usuarios, roles, empresas,
+    # empleados, sucursales ni auditoría. Tampoco contabilidad ni reportes (de
+    # este último cuelga la pantalla de Estadísticas del ERP). Fuera de eso,
+    # solo sus notificaciones, como los demás roles operativos.
+    "Reventa": {("reventa", a) for a in ACCIONES}
+    | {("suscripcion", a) for a in ("consultar", "crear", "administrar")}
+    | {("notificaciones", "consultar")},
 }
 
 # Datos reales tomados de la hoja 'LITROS Y TRANSPORTE' de la 1ª quincena de junio
