@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.common.schemas import MessageResponse
@@ -80,10 +80,11 @@ def cambiar_password(
 
 
 @router.get("/me", response_model=PerfilResponse, summary="Perfil y permisos del usuario actual")
-def perfil(ctx: Context, db: DbSession) -> PerfilResponse:
+def perfil(ctx: Context, db: DbSession, background: BackgroundTasks) -> PerfilResponse:
     from sqlalchemy import select
 
     from app.modules.empresas.models import Empresa
+    from app.modules.suscripcion.service import SuscripcionService
 
     user = ctx.user
     if ctx.is_superadmin:
@@ -107,6 +108,11 @@ def perfil(ctx: Context, db: DbSession) -> PerfilResponse:
             (EmpresaResumen(id=e.id, nombre=e.nombre) for e in vistas.values()),
             key=lambda e: e.nombre,
         )
+    # Bloque de suscripción de la empresa activa (null si superadmin sin
+    # header). Si está vencida y hay tarjeta, resumen_perfil encola el cobro
+    # automático en BackgroundTasks: corre DESPUÉS de responder, con sesión
+    # propia, así que /auth/me no paga la latencia de Wompi.
+    suscripcion = SuscripcionService(db, ctx).resumen_perfil(background)
     return PerfilResponse(
         id=user.id,
         nombre=user.nombre,
@@ -120,4 +126,5 @@ def perfil(ctx: Context, db: DbSession) -> PerfilResponse:
         permisos=sorted(f"{m}:{a}" for m, a in ctx.permisos),
         es_superadmin=ctx.is_superadmin,
         empresas=empresas,
+        suscripcion=suscripcion,
     )

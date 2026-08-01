@@ -37,6 +37,9 @@ MODULOS: tuple[str, ...] = (
     "reportes",
     "notificaciones",
     "auditoria",
+    # Suscripción de la plataforma: el Administrador Empresa gestiona SU tarjeta
+    # y SUS pagos; la tarifa y la exención viven bajo empresas + superadmin.
+    "suscripcion",
 )
 
 ROL_SUPERADMIN = "Administrador General"

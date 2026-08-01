@@ -10,6 +10,7 @@ TIPO_STOCK_BAJO = "stock_bajo"
 TIPO_SIN_LIQUIDAR = "proveedores_sin_liquidar"
 TIPO_PAGOS_PENDIENTES = "pagos_pendientes"
 TIPO_USUARIO_BLOQUEADO = "usuario_bloqueado"
+TIPO_SUSCRIPCION_POR_VENCER = "suscripcion_por_vencer"
 
 
 class Notificacion(TenantMixin, AuditMixin, Base):

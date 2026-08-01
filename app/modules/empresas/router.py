@@ -10,6 +10,7 @@ from app.modules.empresas.schemas import (
     EmpresaRead,
     EmpresaUpdate,
     ReinicioEmpresa,
+    SuscripcionEmpresaUpdate,
 )
 from app.modules.empresas.service import EmpresaService
 
@@ -44,3 +45,17 @@ def reiniciar(
     ctx: Context,
 ) -> dict[str, int]:
     return EmpresaService(db, ctx).reiniciar(entity_id, payload.confirmacion)
+
+
+@router.put(
+    "/{entity_id}/suscripcion",
+    response_model=EmpresaRead,
+    summary="Actualizar la suscripción de una empresa (tarifa, exención, vigencia) — solo superadmin",
+)
+def actualizar_suscripcion(
+    entity_id: uuid.UUID,
+    payload: SuscripcionEmpresaUpdate,
+    db: DbSession,
+    ctx: Context,
+) -> EmpresaRead:
+    return EmpresaService(db, ctx).actualizar_suscripcion(entity_id, payload)

@@ -1,8 +1,9 @@
-"""Dependencias de inyección: sesión de BD, usuario actual, contexto multi-tenant
-y verificación de permisos RBAC.
+"""Dependencias de inyección: sesión de BD, usuario actual, contexto multi-tenant,
+verificación de permisos RBAC y paywall de suscripción.
 """
 import uuid
 from collections.abc import Callable
+from datetime import date
 from typing import Annotated
 
 from fastapi import Depends, Header, Request
@@ -107,10 +108,69 @@ def get_context(
 Context = Annotated[RequestContext, Depends(get_context)]
 
 
+# Módulos accesibles aunque la suscripción esté vencida: el propio módulo de
+# suscripción ES el paywall — sin él la empresa bloqueada no podría pagar para
+# desbloquearse. Nótese que /auth/me usa get_context (no require_permission),
+# así que la sesión sigue viva para mostrar el aviso y el botón de pagar.
+MODULOS_EXENTOS_SUSCRIPCION: tuple[str, ...] = ("suscripcion",)
+
+
+def _verificar_suscripcion_vigente(
+    request: Request, db: Session, ctx: RequestContext, modulo: str
+) -> None:
+    """Paywall: con la suscripción vencida más allá de la gracia se corta el
+    acceso a los módulos de negocio. El superadmin nunca se bloquea."""
+    if ctx.is_superadmin or ctx.empresa_id is None or modulo in MODULOS_EXENTOS_SUSCRIPCION:
+        return
+    # Memoizado en request.state: varios chequeos de permiso en la misma
+    # petición no repiten la consulta ni el cálculo.
+    if not hasattr(request.state, "suscripcion_bloqueo"):
+        # Imports perezosos, como en get_current_user: deps.py lo importa todo el mundo
+        from app.modules.empresas.models import Empresa
+        from app.modules.suscripcion.estado import ESTADO_BLOQUEADA, estado_suscripcion
+
+        empresa = db.get(Empresa, ctx.empresa_id)
+        # Si la empresa no está, CIERRA. No abre.
+        #
+        # Antes esto caía en un `bloqueo = None` y la empresa borrada pasaba a
+        # TODOS los módulos sin pagar: el soft delete le quitaba el cobro al
+        # cliente en vez de quitarle el acceso, que es justo lo contrario de lo
+        # que espera quien borra un cliente moroso. Cuando no se puede
+        # establecer que está al día, hay que cerrar.
+        if empresa is None or empresa.deleted_at is not None:
+            raise ForbiddenError(
+                "La empresa no está disponible. Contacte al administrador",
+                code="empresa_no_disponible",
+            )
+        resultado = estado_suscripcion(
+            exenta=empresa.exenta,
+            pagada_hasta=empresa.pagada_hasta,
+            creada=empresa.created_at.date(),
+            hoy=date.today(),
+            dias_aviso=settings.SUSCRIPCION_DIAS_AVISO,
+            dias_gracia=settings.SUSCRIPCION_DIAS_GRACIA,
+            dias_prueba=settings.SUSCRIPCION_DIAS_PRUEBA,
+        )
+        bloqueo = None
+        if resultado.estado == ESTADO_BLOQUEADA:
+            bloqueo = {
+                "pagada_hasta": resultado.limite.isoformat(),
+                "dias_vencidos": -resultado.dias_restantes,
+            }
+        request.state.suscripcion_bloqueo = bloqueo
+    if request.state.suscripcion_bloqueo is not None:
+        raise ForbiddenError(
+            "La suscripción de la empresa está vencida. Regularice el pago para continuar",
+            code="suscripcion_vencida",
+            extra=request.state.suscripcion_bloqueo,
+        )
+
+
 def require_permission(modulo: str, accion: str) -> Callable[..., RequestContext]:
-    def dependency(ctx: Context) -> RequestContext:
+    def dependency(request: Request, db: DbSession, ctx: Context) -> RequestContext:
         if not ctx.tiene_permiso(modulo, accion):
             raise ForbiddenError(f"No tiene permiso para '{accion}' en el módulo '{modulo}'")
+        _verificar_suscripcion_vigente(request, db, ctx, modulo)
         return ctx
 
     return dependency

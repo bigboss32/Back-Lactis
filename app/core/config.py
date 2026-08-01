@@ -35,6 +35,23 @@ class Settings(BaseSettings):
     FIRST_ADMIN_EMAIL: str = "admin@quesera.local"
     SEED_DEMO_DATA: bool = True
 
+    # ---- Suscripción mensual (pasarela Wompi) ----
+    # Las llaves viven SOLO en el .env local (gitignored) y en el dashboard del
+    # hosting. Vacías por defecto: la app arranca sin Wompi y falla con un error
+    # legible (wompi_no_configurado) al primer uso, nunca al importar.
+    WOMPI_BASE_URL: str = "https://sandbox.wompi.co/v1"
+    WOMPI_PUBLIC_KEY: str = ""
+    WOMPI_PRIVATE_KEY: str = ""
+    WOMPI_INTEGRITY_SECRET: str = ""
+    WOMPI_EVENT_SECRET: str = ""
+    # Tarifa mensual en COP para empresas sin tarifa propia (empresas.tarifa_mensual NULL)
+    SUSCRIPCION_TARIFA_DEFAULT: int = 100000
+    SUSCRIPCION_DIAS_GRACIA: int = 5
+    SUSCRIPCION_DIAS_AVISO: int = 5
+    SUSCRIPCION_DIAS_PRUEBA: int = 30
+    # Secreto del endpoint POST /suscripcion/cobrar-vencidas (vacío = cron deshabilitado)
+    SUSCRIPCION_CRON_SECRET: str = ""
+
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT == "production"

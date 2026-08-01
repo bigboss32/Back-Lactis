@@ -1,9 +1,12 @@
 import uuid
+from datetime import date, timedelta
 from typing import Any
 
 from fastapi import UploadFile
+from pydantic import BaseModel
 
-from app.common.service import BaseService
+from app.common.service import BaseService, serialize_entity
+from app.core.config import settings
 from app.core.exceptions import BusinessError, ConflictError, ForbiddenError, NotFoundError
 from app.core.pagination import PageParams
 from app.modules.empresas.models import Empresa
@@ -30,6 +33,26 @@ class EmpresaService(BaseService[Empresa]):
         if self.repo.exists_where(Empresa.nit == data["nit"]):
             raise ConflictError(f"Ya existe una empresa con NIT {data['nit']}")
 
+    def _prepare_create_data(self, data: dict[str, Any]) -> dict[str, Any]:
+        data = super()._prepare_create_data(data)
+        # Toda empresa nueva arranca con el periodo de prueba ya materializado:
+        # así la fecha queda visible (y editable por el superadmin) desde el día uno
+        if not data.get("pagada_hasta"):
+            data["pagada_hasta"] = date.today() + timedelta(days=settings.SUSCRIPCION_DIAS_PRUEBA)
+        return data
+
+    def validar_eliminar(self, obj: Empresa) -> None:
+        """Solo el superadmin borra empresas.
+
+        Sin esto corría el no-op de BaseService, y como Empresa NO tiene columna
+        empresa_id el repositorio tampoco recorta por tenant: cualquiera con el
+        permiso (empresas, eliminar) borraba la empresa de OTRO cliente, o la
+        suya. Encadenado con el paywall, borrar la propia empresa era además la
+        forma de dejar de pagar. Mismo criterio que `reiniciar`.
+        """
+        if not self.ctx.is_superadmin:
+            raise ForbiddenError("Solo el Administrador General puede eliminar una empresa")
+
     def validar_actualizar(self, obj: Empresa, data: dict[str, Any]) -> None:
         if not self.ctx.is_superadmin and obj.id not in self.ctx.empresa_ids:
             raise ForbiddenError("No puede modificar otra empresa")
@@ -40,6 +63,30 @@ class EmpresaService(BaseService[Empresa]):
         empresa = self.obtener(entity_id)
         ruta = save_upload(file, empresa_id=empresa.id, subdir="logos")
         return self.actualizar(entity_id, {"logo_url": ruta})
+
+    def actualizar_suscripcion(self, entity_id: uuid.UUID, payload: BaseModel) -> Empresa:
+        """Ajusta tarifa, exención y vigencia de la suscripción de una empresa.
+        Solo superadmin (patrón reiniciar: el chequeo vive aquí, no en el
+        router) y sin scoping de membresía: administra CUALQUIER empresa."""
+        if not self.ctx.is_superadmin:
+            raise ForbiddenError(
+                "Solo el Administrador General puede modificar la suscripción de una empresa"
+            )
+        empresa = self.db.get(Empresa, entity_id)
+        if empresa is None or empresa.deleted_at is not None:
+            raise NotFoundError("Empresa no encontrada")
+        # exclude_unset: los null EXPLÍCITOS también aplican (tarifa_mensual
+        # null = volver a la tarifa global; pagada_hasta null = volver a prueba)
+        data = payload.model_dump(exclude_unset=True)
+        if not data:
+            raise BusinessError("No se envió ningún campo de suscripción para actualizar")
+        antes = serialize_entity(empresa)
+        for campo, valor in data.items():
+            setattr(empresa, campo, valor)
+        empresa.updated_by = self.ctx.user_id
+        self.db.flush()
+        self._audit("suscripcion", empresa.id, antes, serialize_entity(empresa))
+        return empresa
 
     def reiniciar(self, entity_id: uuid.UUID, confirmacion: str) -> dict[str, int]:
         """Borra TODOS los datos transaccionales de una empresa (conservando

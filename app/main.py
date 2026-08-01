@@ -33,6 +33,7 @@ from app.modules.reportes.router import router as reportes_router
 from app.modules.reventa.router import router as reventa_router
 from app.modules.rutas.router import router as rutas_router
 from app.modules.sucursales.router import router as sucursales_router
+from app.modules.suscripcion.router import router as suscripcion_router
 from app.modules.transportadores.router import router as transportadores_router
 from app.modules.transporte.router import (
     documentos_router as transporte_documentos_router,
@@ -123,6 +124,7 @@ def create_app() -> FastAPI:
     app.include_router(reportes_router, prefix=f"{prefix}/reportes")
     app.include_router(notificaciones_router, prefix=f"{prefix}/notificaciones")
     app.include_router(auditoria_router, prefix=f"{prefix}/auditoria")
+    app.include_router(suscripcion_router, prefix=f"{prefix}/suscripcion")
 
     uploads_dir = Path(settings.UPLOADS_DIR)
     uploads_dir.mkdir(parents=True, exist_ok=True)

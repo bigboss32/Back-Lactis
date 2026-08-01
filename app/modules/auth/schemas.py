@@ -3,6 +3,7 @@ import uuid
 from pydantic import EmailStr, field_validator
 
 from app.common.schemas import BaseSchema
+from app.modules.suscripcion.schemas import SuscripcionResumen
 from app.modules.usuarios.schemas import validar_fortaleza_password
 
 
@@ -66,3 +67,6 @@ class PerfilResponse(BaseSchema):
     # Membresías del usuario; para el superadmin, TODAS las empresas activas
     # (alimenta el selector de empresa con un solo endpoint)
     empresas: list[EmpresaResumen] = []
+    # Suscripción de la empresa ACTIVA (banner y guard del frontend);
+    # null para el superadmin sin header X-Empresa-Id
+    suscripcion: SuscripcionResumen | None = None

@@ -7,17 +7,25 @@ from datetime import date, timedelta
 from sqlalchemy import select
 
 from app.common.service import BaseService
+from app.core.config import settings
 from app.core.pagination import PageParams
+from app.modules.empresas.models import Empresa
 from app.modules.inventario.repository import ProductoRepository
 from app.modules.notificaciones.models import (
     TIPO_PAGOS_PENDIENTES,
     TIPO_SIN_LIQUIDAR,
     TIPO_STOCK_BAJO,
+    TIPO_SUSCRIPCION_POR_VENCER,
     TIPO_USUARIO_BLOQUEADO,
     Notificacion,
 )
 from app.modules.notificaciones.repository import NotificacionRepository
 from app.modules.recepcion.models import RecepcionLeche
+from app.modules.suscripcion.estado import (
+    ESTADO_GRACIA,
+    ESTADO_POR_VENCER,
+    estado_suscripcion,
+)
 from app.modules.usuarios.models import Usuario
 from app.modules.ventas.models import Venta
 from app.utils.export import pesos
@@ -74,6 +82,7 @@ class NotificacionService(BaseService[Notificacion]):
             TIPO_SIN_LIQUIDAR: self._alertas_sin_liquidar(),
             TIPO_PAGOS_PENDIENTES: self._alertas_pagos_pendientes(),
             TIPO_USUARIO_BLOQUEADO: self._alertas_usuarios_bloqueados(),
+            TIPO_SUSCRIPCION_POR_VENCER: self._alertas_suscripcion(),
         }
         self.db.flush()
         return contadores
@@ -151,3 +160,42 @@ class NotificacionService(BaseService[Notificacion]):
                 f"usuario:{usuario.id}",
             )
         return emitidas
+
+    def _alertas_suscripcion(self) -> int:
+        """Avisa cuando la suscripción de la empresa activa está por vencer o
+        ya en gracia (bloqueada no: ahí el paywall habla solo). La referencia
+        lleva el límite vigente: al pagar cambia la fecha y el aviso del
+        siguiente periodo vuelve a salir sin desduplicarse con el anterior."""
+        empresa = self.db.get(Empresa, self.ctx.empresa_id)
+        if empresa is None or empresa.deleted_at is not None or empresa.exenta:
+            return 0
+        resultado = estado_suscripcion(
+            exenta=empresa.exenta,
+            pagada_hasta=empresa.pagada_hasta,
+            creada=empresa.created_at.date(),
+            hoy=date.today(),
+            dias_aviso=settings.SUSCRIPCION_DIAS_AVISO,
+            dias_gracia=settings.SUSCRIPCION_DIAS_GRACIA,
+            dias_prueba=settings.SUSCRIPCION_DIAS_PRUEBA,
+        )
+        if resultado.estado not in (ESTADO_POR_VENCER, ESTADO_GRACIA):
+            return 0
+        if resultado.estado == ESTADO_POR_VENCER:
+            titulo = "Suscripción por vencer"
+            mensaje = (
+                f"La suscripción vence el {resultado.limite.strftime('%d/%m/%Y')} "
+                f"({resultado.dias_restantes} día(s)). Verifique su método de pago"
+            )
+        else:
+            titulo = "Suscripción vencida"
+            mensaje = (
+                f"La suscripción venció el {resultado.limite.strftime('%d/%m/%Y')}; "
+                f"quedan {settings.SUSCRIPCION_DIAS_GRACIA + resultado.dias_restantes} día(s) "
+                "de gracia antes del bloqueo"
+            )
+        return self._emitir(
+            TIPO_SUSCRIPCION_POR_VENCER,
+            titulo,
+            mensaje,
+            f"suscripcion:{empresa.id}:{resultado.limite}",
+        )
