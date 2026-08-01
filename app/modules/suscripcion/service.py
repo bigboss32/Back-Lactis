@@ -73,6 +73,20 @@ EXPIRACION_PENDIENTE = timedelta(hours=24)
 # NUNCA. Siete días es muchísimo más que la vida de cualquier PSE, así que
 # llegar aquí significa que algo está roto y por eso se registra como error.
 EXPIRACION_SIN_RESPUESTA = timedelta(days=7)
+
+
+def _solo_digitos(texto: str) -> str:
+    """Deja el teléfono en puros números.
+
+    La gente lo escribe como quiere: "310 765 0926", "(310) 765-0926",
+    "+57 310...". Wompi quiere el número y nada más. El indicativo del país se
+    quita porque el prefijo va aparte y mandarlo pegado hace que el banco no
+    reconozca el número.
+    """
+    digitos = "".join(c for c in texto if c.isdigit())
+    if len(digitos) > 10 and digitos.startswith("57"):
+        digitos = digitos[2:]
+    return digitos
 # Tras un rechazo, los cobros AUTOMÁTICOS esperan esto antes de reintentar
 COOLDOWN_RECHAZO = timedelta(hours=24)
 
@@ -521,6 +535,46 @@ class SuscripcionService:
             code="sin_correo",
         )
 
+    def _datos_del_pagador(self, empresa: Empresa, payload: Any) -> tuple[str, str]:
+        """Nombre y teléfono de quien paga, que PSE exige en `customer_data`.
+
+        Wompi no perdona que falte: responde INPUT_VALIDATION_ERROR y el pago no
+        llega a crearse. El sandbox sí lo deja pasar, así que esto solo se ve
+        con llaves de producción.
+
+        Se toma lo que mande la pantalla y, si no manda nada, lo que ya sabemos:
+        primero el usuario que está pagando, después la empresa. Solo se le pide
+        a la persona lo que de verdad no tengamos.
+        """
+        from app.modules.usuarios.models import Usuario
+
+        usuario = self.db.get(Usuario, self.ctx.user_id) if self.ctx.user_id else None
+
+        nombre = (getattr(payload, "nombre_completo", None) or "").strip()
+        if not nombre and usuario is not None:
+            nombre = f"{usuario.nombre} {usuario.apellido}".strip()
+        if not nombre:
+            nombre = (empresa.nombre or "").strip()
+
+        telefono = _solo_digitos(getattr(payload, "telefono", None) or "")
+        if not telefono and usuario is not None:
+            telefono = _solo_digitos(usuario.telefono or "")
+        if not telefono:
+            telefono = _solo_digitos(empresa.telefono or "")
+
+        if len(nombre) < 3:
+            raise BusinessError(
+                "Para pagar por PSE hace falta el nombre de quien paga",
+                code="sin_nombre_pagador",
+            )
+        if len(telefono) < 7:
+            raise BusinessError(
+                "Para pagar por PSE hace falta un teléfono de contacto: "
+                "escríbalo en el formulario o agréguelo a los datos de la empresa",
+                code="sin_telefono",
+            )
+        return nombre[:100], telefono[:20]
+
     def bancos_pse(self) -> list[dict[str, Any]]:
         """Los bancos habilitados para PSE, frescos de Wompi."""
         return WompiClient().bancos_pse()
@@ -597,6 +651,7 @@ class SuscripcionService:
                 code="pago_pendiente",
             ) from None
 
+        nombre_pagador, telefono_pagador = self._datos_del_pagador(empresa, payload)
         try:
             datos = WompiClient().crear_transaccion_pse(
                 referencia=referencia,
@@ -608,6 +663,8 @@ class SuscripcionService:
                 tipo_documento=payload.tipo_documento,
                 documento=payload.documento,
                 descripcion=f"Suscripcion Lactis {empresa.nombre}"[:64],
+                nombre_completo=nombre_pagador,
+                telefono=telefono_pagador,
                 redirect_url=settings.WOMPI_REDIRECT_URL or None,
             )
         except BusinessError:

@@ -279,6 +279,8 @@ class WompiClient:
         tipo_documento: str,
         documento: str,
         descripcion: str,
+        nombre_completo: str,
+        telefono: str,
         redirect_url: str | None = None,
     ) -> dict[str, Any]:
         """POST /transactions con método PSE.
@@ -312,6 +314,15 @@ class WompiClient:
                 "user_legal_id": documento,
                 "financial_institution_code": banco,
                 "payment_description": descripcion,
+            },
+            # OBLIGATORIO en PSE. No se ve en sandbox —allá pasa sin él— pero en
+            # producción Wompi responde INPUT_VALIDATION_ERROR con
+            # "customer_data: No está presente" y el pago no se crea.
+            "customer_data": {
+                "full_name": nombre_completo,
+                "phone_number": telefono,
+                "legal_id": documento,
+                "legal_id_type": tipo_documento,
             },
         }
         if redirect_url:

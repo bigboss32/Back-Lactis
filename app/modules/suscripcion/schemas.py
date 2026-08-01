@@ -124,6 +124,11 @@ class PagarPseRequest(BaseSchema):
     tipo_persona: Literal["0", "1"] = "0"
     tipo_documento: Literal["CC", "CE", "NIT", "TI", "PP"] = "CC"
     documento: str = Field(min_length=4, max_length=20)
+    # Los dos van a `customer_data`, que PSE exige. Se dejan opcionales para que
+    # una pantalla vieja en caché no se rompa: el backend los completa con lo
+    # que sepa del usuario o de la empresa (ver `_datos_del_pagador`).
+    nombre_completo: str | None = Field(default=None, max_length=100)
+    telefono: str | None = Field(default=None, max_length=20)
 
 
 class PagarPseResponse(BaseSchema):

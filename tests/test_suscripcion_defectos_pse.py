@@ -429,7 +429,94 @@ def test_el_cron_no_cobra_a_quien_se_puso_al_dia_durante_el_barrido(
 
 
 # ---------------------------------------------------------------------------
-# 6. Higiene: la URL del banco solo se acepta si es http(s)
+# 7. PSE exige customer_data, y el sandbox NO lo delata
+# ---------------------------------------------------------------------------
+def test_a_wompi_se_le_manda_customer_data(client, db_session, base_datos, monkeypatch):
+    """Esto reventó en producción: "customer_data: No está presente".
+
+    El sandbox crea la transacción igual sin ese bloque, así que la prueba con
+    dobles pasaba y el pago fallaba solo con llaves de verdad. Aquí se fija la
+    forma del cuerpo que sale hacia Wompi.
+    """
+    enviados = {}
+
+    class WompiQueMira:
+        def __init__(self):
+            pass
+
+        def tokens_aceptacion(self):
+            return {
+                "presigned_acceptance": {"acceptance_token": "tok", "permalink": "x"},
+                "presigned_personal_data_auth": {"acceptance_token": "tok2", "permalink": "y"},
+            }
+
+        def crear_transaccion_pse(self, **kwargs):
+            enviados.update(kwargs)
+            return {
+                "id": "tx-cd",
+                "status": "PENDING",
+                "payment_method": {"type": "PSE", "extra": {"async_payment_url": "https://b/x"}},
+            }
+
+        def consultar_transaccion(self, transaction_id):
+            return {"id": transaction_id, "status": "PENDING"}
+
+    import app.modules.suscripcion.service as servicio
+
+    monkeypatch.setattr(servicio, "WompiClient", WompiQueMira)
+
+    empresa = base_datos["empresa_a"]
+    empresa.tarifa_mensual = D(80000)
+    empresa.pagada_hasta = date.today() - timedelta(days=3)
+    empresa.correo = "quesera@ejemplo.co"
+    db_session.commit()
+
+    r = client.post(
+        f"{API}/pse/pagar",
+        json={
+            "banco": "1", "tipo_persona": "0", "tipo_documento": "CC",
+            "documento": "1094123456",
+            "nombre_completo": "Miguel Garzón",
+            # Como lo escribe la gente: con indicativo, espacios y paréntesis
+            "telefono": "+57 (310) 765 0926",
+        },
+        headers=auth_headers(client, "admin.a"),
+    )
+    assert r.status_code == 200, r.text
+    print("\n===== 9. CUSTOMER_DATA =====")
+    print(f"  nombre:   {enviados['nombre_completo']}")
+    print(f"  teléfono: {enviados['telefono']}  (se limpió y se le quitó el 57)")
+    assert enviados["nombre_completo"] == "Miguel Garzón"
+    assert enviados["telefono"] == "3107650926"
+
+
+def test_sin_telefono_en_ningun_lado_se_explica_que_falta(
+    client, db_session, base_datos, monkeypatch
+):
+    """Y si no hay teléfono en ninguna parte, se dice qué falta en vez de dejar
+    que Wompi conteste con un error que no se entiende."""
+    from app.core.context import RequestContext
+    from app.core.exceptions import BusinessError
+    from app.modules.suscripcion.service import SuscripcionService
+
+    empresa = base_datos["empresa_a"]
+    empresa.telefono = None
+    db_session.commit()
+
+    class SinNada:
+        nombre_completo = None
+        telefono = None
+
+    servicio = SuscripcionService(db_session, RequestContext(empresa_id=empresa.id))
+    print("\n===== 10. SIN TELÉFONO =====")
+    with pytest.raises(BusinessError) as exc:
+        servicio._datos_del_pagador(empresa, SinNada())
+    print(f"  {exc.value.code}: {exc.value.detail}")
+    assert exc.value.code == "sin_telefono"
+
+
+# ---------------------------------------------------------------------------
+# 8. Higiene: la URL del banco solo se acepta si es http(s)
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "url,vale",

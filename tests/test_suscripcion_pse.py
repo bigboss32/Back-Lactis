@@ -88,11 +88,17 @@ def wompi(monkeypatch):
 
 
 def preparar(client, db_session, base_datos, tarifa="80000", vencida_hace=10):
-    """Empresa vencida con tarifa, lista para pagar."""
+    """Empresa vencida con tarifa, lista para pagar.
+
+    Con correo y teléfono: los dos se los exige PSE a la pasarela (van en
+    `customer_data`) y sin ellos el pago ni se intenta. Que falten se prueba
+    aparte, en test_suscripcion_defectos_pse.py.
+    """
     empresa = base_datos["empresa_a"]
     empresa.tarifa_mensual = D(tarifa)
     empresa.pagada_hasta = date.today() - timedelta(days=vencida_hace)
     empresa.correo = "quesera@ejemplo.co"
+    empresa.telefono = "3107650926"
     db_session.commit()
     return empresa
 
