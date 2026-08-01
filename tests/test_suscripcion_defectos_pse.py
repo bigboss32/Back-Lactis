@@ -516,7 +516,96 @@ def test_sin_telefono_en_ningun_lado_se_explica_que_falta(
 
 
 # ---------------------------------------------------------------------------
-# 8. Higiene: la URL del banco solo se acepta si es http(s)
+# 8. "Ya pagué, actualizar": la salida cuando el webhook no llega
+# ---------------------------------------------------------------------------
+def test_el_boton_de_actualizar_pregunta_aunque_el_pago_sea_recien_nacido(
+    client, db_session, base_datos, monkeypatch
+):
+    """El poll perezoso normal espera 2 minutos antes de molestar a Wompi. Un
+    botón que respetara esa espera sería inútil justo cuando se usa: la persona
+    acaba de aprobar en el banco y quiere saber YA."""
+    import app.modules.suscripcion.service as servicio
+
+    WompiQueAprueba.consultas = []
+    monkeypatch.setattr(servicio, "WompiClient", WompiQueAprueba)
+    # Recién creado: cero horas de edad
+    empresa, pago = empresa_con_pse_pendiente(db_session, base_datos, edad_horas=0)
+    antes = empresa.pagada_hasta
+
+    # El resumen normal NO consulta: es demasiado nuevo
+    client.get(API, headers=auth_headers(client, "admin.a"))
+    print("\n===== 11. EL BOTÓN DE ACTUALIZAR =====")
+    print(f"  consultas del resumen normal: {WompiQueAprueba.consultas}")
+    assert WompiQueAprueba.consultas == []
+
+    # El botón sí
+    r = client.post(f"{API}/actualizar-estado", headers=auth_headers(client, "admin.a"))
+    assert r.status_code == 200, r.text
+    d = r.json()
+    print(f"  consultas del botón:          {WompiQueAprueba.consultas}")
+    print(f"  cambio={d['cambio']}  estado={d['estado_pago']}")
+    print(f"  pagada_hasta: {antes} -> {d['suscripcion']['pagada_hasta']}")
+    assert WompiQueAprueba.consultas == ["tx-perdida"]
+    assert d["cambio"] is True
+    assert d["estado_pago"] == "APPROVED"
+    assert d["suscripcion"]["pago_pendiente"] is False
+
+
+def test_si_el_banco_no_ha_contestado_el_boton_lo_dice_sin_inventar(
+    client, db_session, base_datos, monkeypatch
+):
+    """Y si sigue pendiente, `cambio` es falso: la pantalla dice "todavía no" en
+    vez de dar por bueno un pago que el banco no ha confirmado."""
+    import app.modules.suscripcion.service as servicio
+
+    class WompiPendiente:
+        def __init__(self):
+            pass
+
+        def consultar_transaccion(self, transaction_id):
+            return {"id": transaction_id, "status": "PENDING",
+                    "payment_method": {"type": "PSE", "extra": {}}}
+
+    monkeypatch.setattr(servicio, "WompiClient", WompiPendiente)
+    empresa_con_pse_pendiente(db_session, base_datos, edad_horas=0)
+
+    d = client.post(
+        f"{API}/actualizar-estado", headers=auth_headers(client, "admin.a")
+    ).json()
+    print("\n===== 12. EL BANCO NO HA CONTESTADO =====")
+    print(f"  cambio={d['cambio']}  estado={d['estado_pago']}")
+    assert d["cambio"] is False
+    assert d["estado_pago"] == "PENDING"
+    assert d["suscripcion"]["pago_pendiente"] is True
+
+
+def test_actualizar_sin_nada_en_curso_no_se_rompe(client, db_session, base_datos):
+    """Sin pago pendiente el botón no tiene a quién preguntarle. Que no reviente
+    y que lo diga: estado_pago en None."""
+    empresa = base_datos["empresa_a"]
+    empresa.tarifa_mensual = D(80000)
+    db_session.commit()
+    d = client.post(
+        f"{API}/actualizar-estado", headers=auth_headers(client, "admin.a")
+    ).json()
+    print("\n===== 13. NADA EN CURSO =====")
+    print(f"  cambio={d['cambio']}  estado={d['estado_pago']}")
+    assert d["cambio"] is False
+    assert d["estado_pago"] is None
+
+
+def test_actualizar_exige_permiso_pero_solo_el_de_consultar(client, db_session, base_datos):
+    """No cobra nada: solo pregunta. Pedir `crear` dejaría fuera a quien puede
+    ver la suscripción pero no pagarla, y esa persona también necesita saber."""
+    empresa_con_pse_pendiente(db_session, base_datos, edad_horas=0)
+    r = client.post(f"{API}/actualizar-estado")
+    print("\n===== 14. PERMISOS DEL BOTÓN =====")
+    print(f"  sin sesión: {r.status_code}")
+    assert r.status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# 9. Higiene: la URL del banco solo se acepta si es http(s)
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "url,vale",

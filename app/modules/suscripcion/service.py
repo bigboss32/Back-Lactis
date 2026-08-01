@@ -213,13 +213,18 @@ class SuscripcionService:
         return datetime.now(timezone.utc) - _utc(ultimo.updated_at) < COOLDOWN_RECHAZO
 
     # ---------------------------------------------------------------- lecturas
-    def resumen(self) -> dict[str, Any]:
+    def resumen(self, forzar_poll: bool = False) -> dict[str, Any]:
         """Estado completo de la suscripción de la empresa activa. Antes de
         calcular hace el poll perezoso: si hay un PENDING viejo, le pregunta a
         Wompi (o lo expira) para que la pantalla no se quede esperando un
-        webhook que quizá nunca llegó (Render dormido, red, etc.)."""
+        webhook que quizá nunca llegó (Render dormido, red, etc.).
+
+        `forzar_poll` salta la edad mínima. Es para cuando lo pide una persona
+        a propósito (el botón "Actualizar estado"): ahí esperar dos minutos no
+        tiene sentido, quien acaba de pagar quiere saber YA.
+        """
         empresa = self._empresa()
-        self._poll_pendiente(empresa.id)
+        self._poll_pendiente(empresa.id, forzar=forzar_poll)
         fuente = self._fuente_activa(empresa.id)
         resultado = self._estado(empresa)
         return {
@@ -260,6 +265,35 @@ class SuscripcionService:
             "tiene_fuente_pago": fuente is not None,
         }
 
+    def actualizar_estado(self) -> dict[str, Any]:
+        """Le pregunta a Wompi AHORA cómo quedó el pago que está en curso.
+
+        Es la salida cuando el webhook no llega: Wompi lo reintenta tres veces
+        en 24 horas y si el backend estaba dormido en las tres, el pago se queda
+        pendiente para siempre desde el punto de vista de la pantalla, aunque el
+        banco ya haya debitado. Con esto la persona pregunta ella misma en vez
+        de quedarse mirando.
+
+        Devuelve además cómo quedó, para poder decírselo con palabras en vez de
+        dejar que adivine mirando una tabla.
+        """
+        empresa = self._empresa()
+        pendiente = self._pago_pendiente(empresa.id)
+        id_pendiente = pendiente.id if pendiente is not None else None
+
+        detalle = self.resumen(forzar_poll=True)
+
+        estado_pago = None
+        if id_pendiente is not None:
+            pago = self.db.get(PagoSuscripcion, id_pendiente)
+            estado_pago = pago.estado_transaccion if pago is not None else None
+        return {
+            "suscripcion": detalle,
+            # Hubo pago en curso y dejó de estar pendiente: algo cambió
+            "cambio": id_pendiente is not None and estado_pago != TRANSACCION_PENDIENTE,
+            "estado_pago": estado_pago,
+        }
+
     def listar_pagos(self, params: PageParams) -> tuple[list[PagoSuscripcion], int]:
         empresa = self._empresa()
         repo = PagoSuscripcionRepository(self.db, empresa.id)
@@ -290,7 +324,7 @@ class SuscripcionService:
             },
         }
 
-    def _poll_pendiente(self, empresa_id: uuid.UUID) -> None:
+    def _poll_pendiente(self, empresa_id: uuid.UUID, forzar: bool = False) -> None:
         """Poll perezoso del PENDING contra Wompi, que es la fuente de la verdad.
 
         EL ORDEN DE AQUÍ IMPORTA MÁS QUE NADA. Antes se miraba primero la edad:
@@ -316,7 +350,7 @@ class SuscripcionService:
         # Un PSE sin URL del banco es un pago que nadie puede aprobar: se busca
         # YA, sin esperar la edad mínima. Wompi publica esa URL un instante
         # después de crear la transacción, no en la respuesta de creación.
-        urgente = pago.metodo == METODO_PSE and not pago.url_banco
+        urgente = forzar or (pago.metodo == METODO_PSE and not pago.url_banco)
         if edad < EDAD_MINIMA_POLL and not urgente:
             return
 

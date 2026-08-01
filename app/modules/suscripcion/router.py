@@ -25,6 +25,7 @@ from app.modules.suscripcion.schemas import (
     PagarPseResponse,
     PagarResponse,
     PagoSuscripcionRead,
+    ActualizarEstadoResponse,
     SuscripcionDetalle,
 )
 from app.modules.suscripcion.service import SuscripcionService
@@ -39,6 +40,20 @@ def estado(
     ctx: RequestContext = Depends(require_permission("suscripcion", "consultar")),
 ) -> Any:
     return SuscripcionService(db, ctx).resumen()
+
+
+@router.post(
+    "/actualizar-estado",
+    response_model=ActualizarEstadoResponse,
+    summary="Preguntarle a la pasarela cómo quedó el pago en curso",
+)
+def actualizar_estado(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("suscripcion", "consultar")),
+) -> Any:
+    """La salida cuando el webhook no llega. Pide `consultar` y no `crear`
+    porque no cobra nada: solo pregunta y refleja lo que responda Wompi."""
+    return SuscripcionService(db, ctx).actualizar_estado()
 
 
 @router.get("/pagos", response_model=Page[PagoSuscripcionRead], summary="Historial de pagos de la suscripción")

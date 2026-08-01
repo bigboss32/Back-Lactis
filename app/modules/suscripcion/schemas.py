@@ -131,6 +131,16 @@ class PagarPseRequest(BaseSchema):
     telefono: str | None = Field(default=None, max_length=20)
 
 
+class ActualizarEstadoResponse(BaseSchema):
+    """Resultado de preguntarle a la pasarela cómo quedó el pago en curso."""
+
+    suscripcion: SuscripcionDetalle
+    # ¿Se resolvió el pago que estaba pendiente?
+    cambio: bool
+    # Cómo quedó: APPROVED, DECLINED, ERROR... o None si no había nada en curso
+    estado_pago: str | None
+
+
 class PagarPseResponse(BaseSchema):
     """El pago queda PENDING y la persona tiene que ir al banco a aprobarlo.
 
