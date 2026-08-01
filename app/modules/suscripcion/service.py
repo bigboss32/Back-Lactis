@@ -39,6 +39,8 @@ from app.modules.suscripcion.estado import (
     sumar_un_mes,
 )
 from app.modules.suscripcion.models import (
+    METODO_PSE,
+    METODO_TARJETA,
     ESTADOS_TRANSACCION_FINALES,
     FUENTE_ACTIVA,
     FUENTE_REEMPLAZADA,
@@ -57,7 +59,7 @@ from app.modules.suscripcion.repository import (
     PagoSuscripcionRepository,
 )
 from app.modules.suscripcion.schemas import FuentePagoCreate
-from app.modules.suscripcion.wompi import WompiClient
+from app.modules.suscripcion.wompi import WompiClient, url_del_banco
 
 logger = get_logger("suscripcion")
 
@@ -65,6 +67,12 @@ logger = get_logger("suscripcion")
 # más viejo que la expiración se da por muerto y se marca ERROR local.
 EDAD_MINIMA_POLL = timedelta(minutes=2)
 EXPIRACION_PENDIENTE = timedelta(hours=24)
+# Techo para el PENDING que ni siquiera llegó a la pasarela o cuya consulta
+# lleva días fallando. No es un plazo de negocio, es una válvula: sin él, un
+# pago atascado deja el candado puesto y la empresa no puede volver a pagar
+# NUNCA. Siete días es muchísimo más que la vida de cualquier PSE, así que
+# llegar aquí significa que algo está roto y por eso se registra como error.
+EXPIRACION_SIN_RESPUESTA = timedelta(days=7)
 # Tras un rechazo, los cobros AUTOMÁTICOS esperan esto antes de reintentar
 COOLDOWN_RECHAZO = timedelta(hours=24)
 
@@ -162,14 +170,23 @@ class SuscripcionService:
         ).first()
 
     def _en_cooldown(self, empresa_id: uuid.UUID) -> bool:
-        """True si el último intento rechazado/errado es de hace menos de 24h.
-        Solo frena a los orígenes automáticos: no se martilla la tarjeta del
-        cliente, pero su 'Pagar ahora' manual siempre puede."""
+        """True si el último intento CON TARJETA rechazado/errado es de hace
+        menos de 24h. Solo frena a los orígenes automáticos: no se martilla la
+        tarjeta del cliente, pero su 'Pagar ahora' manual siempre puede.
+
+        Solo cuentan los pagos con tarjeta, y por lo que protege el cooldown:
+        no machacar una tarjeta que el emisor acaba de rechazar. Un PSE que se
+        abandonó en el portal del banco no dice absolutamente nada sobre la
+        tarjeta, y contarlo apagaba el cobro automático 24 horas de una tarjeta
+        perfectamente cobrable: la empresa se comía la gracia y terminaba
+        bloqueada teniendo con qué pagar.
+        """
         ultimo = self.db.scalars(
             select(PagoSuscripcion)
             .where(
                 PagoSuscripcion.empresa_id == empresa_id,
                 PagoSuscripcion.deleted_at.is_(None),
+                PagoSuscripcion.metodo == METODO_TARJETA,
                 PagoSuscripcion.estado_transaccion.in_(
                     (TRANSACCION_RECHAZADA, TRANSACCION_ERROR)
                 ),
@@ -260,29 +277,77 @@ class SuscripcionService:
         }
 
     def _poll_pendiente(self, empresa_id: uuid.UUID) -> None:
-        """Poll perezoso del PENDING: >2 minutos se consulta contra Wompi;
-        >24 horas sin resolverse se marca ERROR local (expiró). Es cortesía:
-        si Wompi no responde, el resumen no se rompe."""
+        """Poll perezoso del PENDING contra Wompi, que es la fuente de la verdad.
+
+        EL ORDEN DE AQUÍ IMPORTA MÁS QUE NADA. Antes se miraba primero la edad:
+        un PENDING de más de 24 horas se marcaba ERROR sin preguntarle a nadie.
+        Con tarjeta casi no dolía (una tarjeta resuelve en segundos, un PENDING
+        de un día sí está muerto). Con PSE es un desastre: el pago pendiente
+        largo es LO NORMAL, y si el webhook se perdió —Render dormido, un
+        redespliegue, la red— se escribía ERROR sobre un pago que el banco ya
+        había debitado. Plata cobrada, mes no acreditado, empresa bloqueada, y
+        además el candado del índice parcial liberado, o sea vía libre para
+        pagar dos veces el mismo mes.
+
+        Ahora: si hay transacción en la pasarela, se le pregunta a la pasarela.
+        Solo se da por muerto lo que Wompi confirma muerto, lo que nunca llegó a
+        crearse allá, o lo que lleva tantos días sin respuesta que dejarlo
+        pendiente sería peor (ver EXPIRACION_SIN_RESPUESTA).
+        """
         pago = self._pago_pendiente(empresa_id)
         if pago is None:
             return
         edad = datetime.now(timezone.utc) - _utc(pago.created_at)
+
+        # Un PSE sin URL del banco es un pago que nadie puede aprobar: se busca
+        # YA, sin esperar la edad mínima. Wompi publica esa URL un instante
+        # después de crear la transacción, no en la respuesta de creación.
+        urgente = pago.metodo == METODO_PSE and not pago.url_banco
+        if edad < EDAD_MINIMA_POLL and not urgente:
+            return
+
+        if pago.wompi_transaction_id:
+            try:
+                datos = WompiClient().consultar_transaccion(pago.wompi_transaction_id)
+            except BusinessError:
+                # Wompi no contestó. NO se da nada por muerto con la pasarela
+                # muda: se reintenta en el siguiente poll. La única excepción es
+                # el pago tan viejo que dejarlo pendiente ya hace más daño.
+                if edad > EXPIRACION_SIN_RESPUESTA:
+                    logger.error(
+                        "Pago %s lleva %s sin que la pasarela responda: se cierra como ERROR "
+                        "para no dejar a la empresa sin poder pagar. REVISAR A MANO.",
+                        pago.id,
+                        edad,
+                    )
+                    self.aplicar_resultado(
+                        pago,
+                        TRANSACCION_ERROR,
+                        detalle="La pasarela no respondió durante días; revisar a mano",
+                    )
+                return
+            if not pago.url_banco:
+                url = url_del_banco(datos)
+                if url:
+                    pago.url_banco = url
+                    self.db.commit()
+            estado = (datos.get("status") or "").upper()
+            if estado in ESTADOS_TRANSACCION_FINALES:
+                self.aplicar_resultado(pago, estado, detalle=datos.get("status_message"))
+            # Si Wompi lo sigue dando por PENDING, sigue PENDING. Da igual la
+            # edad: quien manda es la pasarela, no nuestro reloj.
+            return
+
+        # Sin id de transacción no hay a quién preguntarle: la transacción nunca
+        # llegó a existir en la pasarela (se cayó entre el commit del pago y la
+        # llamada). Ese sí se puede cerrar al expirar, y hay que hacerlo o el
+        # candado del PENDING deja a la empresa sin poder pagar nunca más.
         if edad > EXPIRACION_PENDIENTE:
             self.aplicar_resultado(
                 pago,
                 TRANSACCION_ERROR,
-                detalle="Expirado: sin respuesta de la pasarela en 24 horas",
+                detalle="Expirado: la pasarela nunca confirmó la transacción",
             )
-            return
-        if edad < EDAD_MINIMA_POLL or not pago.wompi_transaction_id:
-            return
-        try:
-            datos = WompiClient().consultar_transaccion(pago.wompi_transaction_id)
-        except BusinessError:
-            return
-        estado = (datos.get("status") or "").upper()
-        if estado in ESTADOS_TRANSACCION_FINALES:
-            self.aplicar_resultado(pago, estado, detalle=datos.get("status_message"))
 
     # ------------------------------------------------------------ fuente de pago
     def guardar_fuente(self, payload: FuentePagoCreate) -> FuentePagoSuscripcion:
@@ -432,6 +497,150 @@ class SuscripcionService:
             self.db.flush()
         return pago
 
+
+    # ------------------------------------------------------------------- PSE
+    def _correo_de_cobro(self, empresa: Empresa) -> str:
+        """A qué correo se le asocia el pago en la pasarela.
+
+        El de la empresa, y si no lo tiene, el de quien está pagando. PSE lo
+        exige, y mandarlo vacío hace que Wompi rechace la transacción con un
+        mensaje que no dice nada útil; mejor fallar aquí y explicar qué falta.
+
+        En la tarjeta esto no hacía falta porque el correo viene con la fuente
+        de pago, que lo pidió al guardarla.
+        """
+        if empresa.correo:
+            return empresa.correo
+        from app.modules.usuarios.models import Usuario
+
+        usuario = self.db.get(Usuario, self.ctx.user_id) if self.ctx.user_id else None
+        if usuario is not None and usuario.correo:
+            return usuario.correo
+        raise BusinessError(
+            "Para pagar por PSE hace falta un correo: agréguele uno a la empresa",
+            code="sin_correo",
+        )
+
+    def bancos_pse(self) -> list[dict[str, Any]]:
+        """Los bancos habilitados para PSE, frescos de Wompi."""
+        return WompiClient().bancos_pse()
+
+    def pagar_con_pse(self, payload: Any) -> tuple[PagoSuscripcion, str | None, dict[str, Any]]:
+        """Arranca un pago por PSE y devuelve a dónde mandar a la persona.
+
+        NO cobra nada aquí: crea la transacción en Wompi, que nace PENDING, y
+        entrega la URL del portal del banco. El resultado llega después por el
+        webhook, que ya sabe acreditar por referencia — el mismo camino que usa
+        la tarjeta, así que la vigencia se extiende igual y sin código nuevo.
+
+        PSE no deja fuente de pago guardada: paga ESTE mes y ya. Quien quiera que
+        se le cobre solo cada mes tiene que guardar una tarjeta.
+        """
+        empresa = self._empresa()
+        if empresa.exenta:
+            raise BusinessError(
+                "La empresa está exenta de pago: no hay nada que cobrar",
+                code="empresa_exenta",
+            )
+        pendiente = self._pago_pendiente(empresa.id)
+        if pendiente is not None:
+            # No se devuelve aquí la URL del banco: la pantalla recarga al
+            # cerrar el diálogo y ya pinta el aviso de "continuar en el banco"
+            # con el enlace, que sale de la lista de pagos. Un campo extra que
+            # nadie lee solo sirve para que alguien crea que sí se usa.
+            raise BusinessError(
+                "Ya hay un pago en proceso para esta empresa",
+                code="pago_pendiente",
+            )
+        tarifa = self._tarifa(empresa)
+        if tarifa <= 0:
+            raise BusinessError("La tarifa mensual debe ser mayor que cero", code="tarifa_invalida")
+
+        # El token de aceptación se pide FRESCO: es un JWT que expira.
+        datos_comercio = WompiClient().tokens_aceptacion()
+        aceptacion = (datos_comercio.get("presigned_acceptance") or {}).get("acceptance_token")
+        if not aceptacion:
+            raise BusinessError(
+                "La pasarela de pagos no devolvió el token de aceptación",
+                code="wompi_error",
+            )
+
+        referencia = f"susc-{empresa.id.hex}-{uuid.uuid4().hex[:12]}"
+        pago = PagoSuscripcion(
+            empresa_id=empresa.id,
+            fuente_pago_id=None,  # PSE no deja fuente guardada
+            metodo=METODO_PSE,
+            referencia=referencia,
+            monto=tarifa,
+            moneda="COP",
+            estado_transaccion=TRANSACCION_PENDIENTE,
+            origen=ORIGEN_MANUAL,  # PSE siempre lo inicia una persona
+            created_by=self.ctx.user_id,
+            updated_by=self.ctx.user_id,
+        )
+        self.db.add(pago)
+        # Mismo commit anticipado que en `cobrar`, y por lo mismo: el webhook
+        # llega por otra conexión y tiene que encontrar la referencia. En PSE
+        # pesa todavía más, porque entre crear la transacción y que el banco
+        # responda pueden pasar minutos.
+        try:
+            self.db.flush()
+            self._audit(
+                "pagar_pse", "PagoSuscripcion", pago.id, None, serialize_entity(pago),
+                empresa_id=empresa.id,
+            )
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            raise BusinessError(
+                "Ya hay un pago en proceso para esta empresa",
+                code="pago_pendiente",
+            ) from None
+
+        try:
+            datos = WompiClient().crear_transaccion_pse(
+                referencia=referencia,
+                monto_en_centavos=int((tarifa * 100).to_integral_value()),
+                customer_email=self._correo_de_cobro(empresa),
+                acceptance_token=aceptacion,
+                banco=payload.banco,
+                tipo_persona=payload.tipo_persona,
+                tipo_documento=payload.tipo_documento,
+                documento=payload.documento,
+                descripcion=f"Suscripcion Lactis {empresa.nombre}"[:64],
+                redirect_url=settings.WOMPI_REDIRECT_URL or None,
+            )
+        except BusinessError:
+            # La transacción no se creó: se cierra el pago para no dejar el
+            # candado de PENDING puesto sin nada detrás que lo resuelva.
+            self.aplicar_resultado(
+                pago, TRANSACCION_ERROR, detalle="No se pudo iniciar el pago con PSE"
+            )
+            self.db.commit()
+            raise
+
+        pago.wompi_transaction_id = datos.get("id")
+        # La URL del banco casi nunca viene en la respuesta de creación (se
+        # verificó contra el sandbox): Wompi la publica un segundo después. Si
+        # no está, se le pregunta unas pocas veces antes de responder, porque
+        # sin ella la persona se queda mirando un pago que no puede aprobar.
+        pago.url_banco = url_del_banco(datos)
+        if not pago.url_banco and pago.wompi_transaction_id:
+            pago.url_banco = WompiClient().esperar_url_del_banco(pago.wompi_transaction_id)
+        estado = (datos.get("status") or TRANSACCION_PENDIENTE).upper()
+        if estado in ESTADOS_TRANSACCION_FINALES:
+            # Raro en PSE (nace PENDING), pero si Wompi ya resolvió, se aplica
+            self.aplicar_resultado(pago, estado, detalle=datos.get("status_message"))
+        else:
+            self.db.flush()
+        self.db.commit()
+        # El resumen PRIMERO: por dentro hace el poll perezoso, que puede
+        # rescatar la url_banco. Python evalúa la tupla de izquierda a derecha,
+        # así que leer `pago.url_banco` antes devolvería el valor de antes del
+        # rescate — justo el caso en que hace falta.
+        resumen = self.resumen()
+        return pago, pago.url_banco, resumen
+
     def aplicar_resultado(
         self,
         pago: PagoSuscripcion,
@@ -454,6 +663,14 @@ class SuscripcionService:
             # una venta con su cliente. SQLite no lo delata: descarta FOR UPDATE
             # en silencio, así que las pruebas pasaban con el defecto puesto.
             .options(lazyload(PagoSuscripcion.fuente_pago))
+            # populate_existing: sin esto el FOR UPDATE bloquea la fila pero
+            # SQLAlchemy devuelve el objeto que ya tenía en memoria, con los
+            # valores VIEJOS. Y es peor de lo que parece: quien llega segundo se
+            # queda esperando el candado justo mientras el primero acredita, así
+            # que al soltarse el candado sus datos son exactamente los de antes
+            # de la acreditación. Las dos guardas de idempotencia de abajo leían
+            # ese estado rancio y podían acreditar el mismo mes dos veces.
+            .execution_options(populate_existing=True)
             .with_for_update()
         ).scalar_one()
         if pago.estado_transaccion == nuevo_estado:
@@ -467,7 +684,13 @@ class SuscripcionService:
         pago.updated_by = self.ctx.user_id
         if nuevo_estado == TRANSACCION_APROBADA:
             empresa = self.db.execute(
-                select(Empresa).where(Empresa.id == pago.empresa_id).with_for_update()
+                # Igual que arriba: hay que releer la fila que se acaba de
+                # bloquear. `pagada_hasta` rancio significa sumarle un mes a una
+                # fecha que otro proceso ya movió, o sea perder un mes pagado.
+                select(Empresa)
+                .where(Empresa.id == pago.empresa_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
             ).scalar_one()
             # El pago cubre UN MES desde donde iba la vigencia (o desde hoy si
             # ya estaba vencida: los días perdidos no se cobran dos veces).
@@ -499,15 +722,57 @@ class SuscripcionService:
             return "ignorado"
         transaccion = (payload.get("data") or {}).get("transaction") or {}
         referencia = transaccion.get("reference")
+        transaccion_id = transaccion.get("id")
+
+        # SE BUSCA POR EL ID DE LA TRANSACCIÓN, NO POR LA REFERENCIA.
+        #
+        # El checksum solo cubre lo que exige PROPIEDADES_OBLIGATORIAS: el id,
+        # el estado y el importe. La `reference` NO va firmada. Buscar por ella
+        # dejaba abierto lo siguiente: tomar un evento legítimo de aprobación,
+        # cambiarle la referencia por la de OTRA empresa y reenviarlo. El
+        # checksum seguía cuadrando (los tres campos firmados no se tocaron) y
+        # el mes se le acreditaba a quien no pagó. Buscando por el id firmado,
+        # el evento solo puede tocar la transacción que él mismo declara.
         pago = None
-        if referencia:
+        if transaccion_id:
             pago = self.db.scalars(
-                select(PagoSuscripcion).where(PagoSuscripcion.referencia == referencia)
+                select(PagoSuscripcion).where(
+                    PagoSuscripcion.wompi_transaction_id == str(transaccion_id)
+                )
+            ).first()
+        if pago is None and referencia:
+            # Respaldo para la única ventana legítima: el webhook llegó tan
+            # rápido que el id todavía no estaba guardado. Se acepta solo si el
+            # pago no tiene id puesto; si lo tiene y es otro, no es este evento.
+            pago = self.db.scalars(
+                select(PagoSuscripcion).where(
+                    PagoSuscripcion.referencia == referencia,
+                    PagoSuscripcion.wompi_transaction_id.is_(None),
+                )
             ).first()
         if pago is None:
             return "desconocida"
-        if not pago.wompi_transaction_id and transaccion.get("id"):
-            pago.wompi_transaction_id = str(transaccion["id"])
+
+        # El importe también va firmado: si no cuadra con lo que se cobró, este
+        # evento no habla de este pago por mucho que el id coincida.
+        centavos = transaccion.get("amount_in_cents")
+        if centavos is not None:
+            try:
+                esperados = int((Decimal(str(pago.monto)) * 100).to_integral_value())
+                if int(centavos) != esperados:
+                    logger.warning(
+                        "Evento de Wompi con importe que no cuadra para el pago %s: "
+                        "%s centavos contra %s esperados",
+                        pago.id,
+                        centavos,
+                        esperados,
+                    )
+                    return "desconocida"
+            except (TypeError, ValueError, ArithmeticError):
+                return "desconocida"
+
+        if not pago.wompi_transaction_id and transaccion_id:
+            pago.wompi_transaction_id = str(transaccion_id)
         estado = (transaccion.get("status") or "").upper()
         if estado not in ESTADOS_TRANSACCION_FINALES:
             return "ignorado"
@@ -527,10 +792,29 @@ class SuscripcionService:
             "omitidas": 0,
             "errores": 0,
         }
-        empresas = self.db.scalars(
-            select(Empresa).where(Empresa.deleted_at.is_(None), Empresa.estado == "activo")
-        ).all()
-        for empresa in empresas:
+        # Solo los ids: el barrido tarda (una llamada a la pasarela por
+        # empresa) y las filas cambian mientras corre. Cada empresa se relee
+        # justo antes de decidir sobre ella.
+        ids = list(
+            self.db.scalars(
+                select(Empresa.id).where(
+                    Empresa.deleted_at.is_(None), Empresa.estado == "activo"
+                )
+            ).all()
+        )
+        for empresa_id in ids:
+            # RELEER, no confiar en la foto del principio. Si mientras el cron
+            # iba por otras empresas el webhook acreditó el PSE de ésta, la foto
+            # vieja seguiría diciendo "vencida" y se le debitaría la tarjeta por
+            # un mes ya pagado. Con populate_existing la fila se trae fresca
+            # aunque el objeto siga en la sesión (expire_on_commit=False).
+            empresa = self.db.scalars(
+                select(Empresa)
+                .where(Empresa.id == empresa_id)
+                .execution_options(populate_existing=True)
+            ).first()
+            if empresa is None or empresa.deleted_at is not None or empresa.estado != "activo":
+                continue
             resultado = self._estado(empresa)
             if resultado.estado not in (ESTADO_GRACIA, ESTADO_BLOQUEADA):
                 continue

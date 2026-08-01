@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     WOMPI_PRIVATE_KEY: str = ""
     WOMPI_INTEGRITY_SECRET: str = ""
     WOMPI_EVENT_SECRET: str = ""
+    # A dónde devuelve Wompi a la persona cuando termina en el portal del
+    # banco (PSE). Si queda vacío, Wompi la deja en su propia pantalla y la
+    # persona tiene que volver a la aplicación a mano.
+    WOMPI_REDIRECT_URL: str = ""
     # Tarifa mensual en COP para empresas sin tarifa propia (empresas.tarifa_mensual NULL)
     SUSCRIPCION_TARIFA_DEFAULT: int = 100000
     SUSCRIPCION_DIAS_GRACIA: int = 5

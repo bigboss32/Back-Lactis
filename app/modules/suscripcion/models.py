@@ -39,6 +39,16 @@ ESTADOS_TRANSACCION_FINALES = (
     TRANSACCION_ERROR,
 )
 
+# Con qué se pagó.
+#
+# La diferencia que importa: la TARJETA se guarda como fuente de pago y se puede
+# cobrar sola cada mes; PSE no. PSE es un débito de una cuenta bancaria que exige
+# que la persona entre al portal de su banco y lo apruebe, así que sirve para
+# pagar ESTE mes y nada más. Por eso el cobro automático solo mira las tarjetas
+# (cobrar_vencidas busca una fuente activa, y un pago PSE no crea ninguna).
+METODO_TARJETA = "CARD"
+METODO_PSE = "PSE"
+
 # Quién disparó el cobro
 ORIGEN_MANUAL = "manual"          # botón "Pagar ahora"
 ORIGEN_AUTOMATICO = "automatico"  # gatillo perezoso de /auth/me
@@ -84,6 +94,15 @@ class PagoSuscripcion(AuditMixin, Base):
         ForeignKey("fuentes_pago_suscripcion.id"), index=True
     )
     # Referencia propia enviada a Wompi: por ella el webhook encuentra el pago
+    # Con qué se pagó: 'CARD' (tarjeta guardada) o 'PSE' (débito por el banco).
+    metodo: Mapped[str] = mapped_column(
+        String(10), default=METODO_TARJETA, server_default=METODO_TARJETA, nullable=False
+    )
+    # Solo en PSE: la URL del portal del banco a la que hay que mandar a la
+    # persona. Se guarda para poder RETOMAR el pago si cerró la pestaña: sin
+    # esto, el candado de "ya hay un pago en proceso" la dejaría esperando el
+    # vencimiento sin forma de terminar lo que empezó.
+    url_banco: Mapped[str | None] = mapped_column(Text)
     referencia: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     wompi_transaction_id: Mapped[str | None] = mapped_column(String(100), unique=True)
     monto: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)

@@ -16,10 +16,13 @@ from app.core.deps import DbSession, require_permission
 from app.core.exceptions import AppException, ForbiddenError
 from app.core.pagination import Page, PageParams, page_params
 from app.modules.suscripcion.schemas import (
+    BancoPSE,
     CobrarVencidasResponse,
     ConfigWompiResponse,
     FuentePagoCreate,
     FuentePagoRead,
+    PagarPseRequest,
+    PagarPseResponse,
     PagarResponse,
     PagoSuscripcionRead,
     SuscripcionDetalle,
@@ -132,3 +135,35 @@ def cobrar_vencidas(
     ):
         raise ForbiddenError("Secreto de cron inválido", code="cron_secret_invalido")
     return SuscripcionService(db, system_context()).cobrar_vencidas()
+
+
+# ---------------------------------------------------------------------- PSE
+@router.get(
+    "/pse/bancos",
+    response_model=list[BancoPSE],
+    summary="Bancos habilitados para pagar por PSE",
+)
+def bancos_pse(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("suscripcion", "consultar")),
+) -> Any:
+    """La lista se pide fresca a Wompi en cada carga del formulario: los bancos
+    entran, salen y se ponen en mantenimiento, y una lista guardada mandaría a
+    la persona a un banco que hoy no funciona."""
+    return SuscripcionService(db, ctx).bancos_pse()
+
+
+@router.post(
+    "/pse/pagar",
+    response_model=PagarPseResponse,
+    summary="Pagar la mensualidad por PSE (devuelve la URL del banco)",
+)
+def pagar_pse(
+    payload: PagarPseRequest,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("suscripcion", "crear")),
+) -> Any:
+    """No cobra aquí: deja el pago PENDING y devuelve a dónde mandar a la
+    persona. El banco responde después, por el webhook."""
+    pago, url_banco, resumen = SuscripcionService(db, ctx).pagar_con_pse(payload)
+    return {"pago": pago, "url_banco": url_banco, "suscripcion": resumen}

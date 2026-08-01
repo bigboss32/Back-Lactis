@@ -1,8 +1,9 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
-from pydantic import EmailStr
+from pydantic import EmailStr, Field
 
 from app.common.schemas import BaseSchema
 
@@ -49,6 +50,11 @@ class PagoSuscripcionRead(BaseSchema):
     periodo_desde: date | None
     periodo_hasta: date | None
     created_at: datetime
+    # Con qué se pagó: 'CARD' o 'PSE'
+    metodo: str = "CARD"
+    # Solo en PSE y mientras esté PENDING: el portal del banco donde quedó el
+    # pago a medias, para poder retomarlo en vez de esperar a que expire.
+    url_banco: str | None = None
 
 
 class TokenAceptacion(BaseSchema):
@@ -94,3 +100,39 @@ class CobrarVencidasResponse(BaseSchema):
     pendientes: int
     omitidas: int
     errores: int
+
+
+# ------------------------------------------------------------------- PSE
+class BancoPSE(BaseSchema):
+    """Un banco habilitado para PSE, como lo devuelve Wompi."""
+
+    financial_institution_code: str
+    financial_institution_name: str
+
+
+class PagarPseRequest(BaseSchema):
+    """Lo que hay que saber para mandar a la persona al portal de su banco.
+
+    Son los datos que exige PSE, no un capricho: el banco identifica a quien
+    debita por su documento, y necesita saber si es persona natural o empresa
+    porque el débito sale de cuentas distintas.
+    """
+
+    banco: str = Field(min_length=1, max_length=20, description="Código del banco en Wompi")
+    # PSE lo maneja así: "0" natural, "1" jurídica. Se deja como texto porque es
+    # lo que espera la pasarela y convertirlo a número solo invita a un 0 perdido.
+    tipo_persona: Literal["0", "1"] = "0"
+    tipo_documento: Literal["CC", "CE", "NIT", "TI", "PP"] = "CC"
+    documento: str = Field(min_length=4, max_length=20)
+
+
+class PagarPseResponse(BaseSchema):
+    """El pago queda PENDING y la persona tiene que ir al banco a aprobarlo.
+
+    `url_banco` es a donde hay que mandarla. No hay un resultado que mostrar
+    todavía: llega por el webhook cuando el banco responde.
+    """
+
+    pago: PagoSuscripcionRead
+    url_banco: str | None
+    suscripcion: SuscripcionDetalle

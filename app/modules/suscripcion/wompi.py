@@ -7,6 +7,7 @@
 """
 import hashlib
 import hmac
+import time
 from typing import Any
 
 import httpx
@@ -218,3 +219,130 @@ class WompiClient:
         return self._request(
             "GET", f"/transactions/{transaction_id}", llave=settings.WOMPI_PRIVATE_KEY
         )
+
+    def esperar_url_del_banco(
+        self, transaction_id: str, intentos: int = 3, espera: float = 1.0
+    ) -> str | None:
+        """Sonsaca la URL del portal del banco consultando la transacción.
+
+        HACE FALTA, no es cinturón y tirantes: se comprobó contra el sandbox que
+        la respuesta de POST /transactions NO trae `async_payment_url`. Wompi la
+        publica un instante después, y solo aparece al consultar la transacción.
+        Sin ella el pago existe pero la persona no tiene a dónde ir a aprobarlo.
+
+        La espera es CORTA y acotada a propósito: son segundos que alguien pasa
+        mirando un botón girar. Si no aparece, el pago igual quedó bien creado y
+        la pantalla la recupera después (ver `_poll_pendiente` en el servicio),
+        que es mucho mejor que dejar la petición colgada medio minuto.
+        """
+        for intento in range(intentos):
+            if intento:
+                time.sleep(espera)
+            try:
+                datos = self.consultar_transaccion(transaction_id)
+            except BusinessError:
+                # La transacción ya está creada: que la consulta falle no puede
+                # tumbar el pago. Se reintenta y, si no, se sigue sin URL.
+                continue
+            url = url_del_banco(datos)
+            if url:
+                return url
+        logger.warning(
+            "Wompi no publicó la URL del banco para la transacción %s en %s intentos",
+            transaction_id,
+            intentos,
+        )
+        return None
+
+    def bancos_pse(self) -> list[dict[str, Any]]:
+        """GET /pse/financial_institutions: los bancos habilitados para PSE.
+
+        Va con la llave PÚBLICA porque es un catálogo, no una operación. La lista
+        cambia (bancos que entran, salen o están en mantenimiento), así que se
+        pide fresca cada vez que se abre el formulario en vez de guardarla.
+        """
+        datos = self._request(
+            "GET", "/pse/financial_institutions", llave=settings.WOMPI_PUBLIC_KEY
+        )
+        # Wompi devuelve una lista aquí, no un objeto; _request ya sacó "data".
+        return datos if isinstance(datos, list) else []
+
+    def crear_transaccion_pse(
+        self,
+        *,
+        referencia: str,
+        monto_en_centavos: int,
+        customer_email: str,
+        acceptance_token: str,
+        banco: str,
+        tipo_persona: str,
+        tipo_documento: str,
+        documento: str,
+        descripcion: str,
+        redirect_url: str | None = None,
+    ) -> dict[str, Any]:
+        """POST /transactions con método PSE.
+
+        A diferencia de la tarjeta, esto NO cobra: crea una transacción que nace
+        PENDING y devuelve la URL del portal del banco, donde la persona tiene
+        que entrar a aprobar el débito. El resultado llega después por el webhook.
+
+        Por eso PSE no puede ser recurrente y no se guarda como fuente de pago:
+        cada débito exige que alguien entre al banco y lo apruebe.
+        """
+        if not settings.WOMPI_INTEGRITY_SECRET:
+            raise BusinessError(
+                "La pasarela de pagos no está configurada: falta el secreto de integridad",
+                code="wompi_no_configurado",
+            )
+        moneda = "COP"
+        cuerpo: dict[str, Any] = {
+            "amount_in_cents": monto_en_centavos,
+            "currency": moneda,
+            "signature": firma_integridad(
+                referencia, monto_en_centavos, moneda, settings.WOMPI_INTEGRITY_SECRET
+            ),
+            "customer_email": customer_email,
+            "reference": referencia,
+            "acceptance_token": acceptance_token,
+            "payment_method": {
+                "type": "PSE",
+                "user_type": tipo_persona,
+                "user_legal_id_type": tipo_documento,
+                "user_legal_id": documento,
+                "financial_institution_code": banco,
+                "payment_description": descripcion,
+            },
+        }
+        if redirect_url:
+            cuerpo["redirect_url"] = redirect_url
+        return self._request(
+            "POST", "/transactions", llave=settings.WOMPI_PRIVATE_KEY, json=cuerpo
+        )
+
+
+def url_del_banco(datos: dict[str, Any]) -> str | None:
+    """Saca del resultado de Wompi la URL a la que hay que mandar a la persona.
+
+    Está en payment_method.extra.async_payment_url. Se lee con cuidado y no con
+    encadenamiento directo porque si Wompi cambiara la forma de la respuesta, un
+    KeyError aquí dejaría el pago creado en Wompi y perdido para nosotros.
+
+    Solo se aceptan http/https: esta URL termina en un `href` del navegador y un
+    `javascript:` ahí sería ejecutable. Hoy viene de Wompi y es de fiar, pero el
+    filtro cuesta una línea y no depende de que eso siga siendo cierto.
+    """
+    metodo = datos.get("payment_method")
+    if not isinstance(metodo, dict):
+        return None
+    extra = metodo.get("extra")
+    if not isinstance(extra, dict):
+        return None
+    url = extra.get("async_payment_url") or extra.get("url")
+    if not url:
+        return None
+    texto = str(url).strip()
+    if not texto.lower().startswith(("http://", "https://")):
+        logger.warning("Wompi devolvió una URL de banco con un esquema inesperado")
+        return None
+    return texto
