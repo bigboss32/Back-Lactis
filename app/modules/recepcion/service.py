@@ -10,6 +10,7 @@ from app.core.exceptions import BusinessError, ConflictError
 from app.core.pagination import PageParams
 from app.modules.proveedores.models import Proveedor
 from app.modules.proveedores.repository import ProveedorRepository
+from app.modules.proveedores.service import exigir_proveedor_activo
 from app.modules.recepcion.models import RecepcionLeche
 from app.modules.recepcion.repository import RecepcionRepository
 from app.modules.recepcion.schemas import (
@@ -32,6 +33,18 @@ class RecepcionService(BaseService[RecepcionLeche]):
         """Completa precio/ruta desde el proveedor y calcula los valores monetarios."""
         proveedor_id = data.get("proveedor_id") or (actual.proveedor_id if actual else None)
         proveedor = ProveedorRepository(self.db, self.ctx.empresa_id).get_or_fail(proveedor_id)
+
+        # Al proveedor inactivo no se le recibe leche nueva. Se revisa al crear y
+        # también cuando una recepción existente se le quiere pasar a otro
+        # proveedor que está inactivo.
+        #
+        # Lo que NO se bloquea es corregir una recepción que YA era de ese
+        # proveedor: si se retiró a mitad de quincena, la última quincena todavía
+        # hay que cuadrarla y liquidársela, y dejarla congelada obligaría a
+        # reactivarlo solo para arreglarle un dato. Apartarlo es para que no
+        # entre leche nueva, no para volverle la historia de solo lectura.
+        if actual is None or proveedor_id != actual.proveedor_id:
+            exigir_proveedor_activo(proveedor)
 
         if data.get("precio_litro") is None and actual is None:
             data["precio_litro"] = proveedor.precio_litro
