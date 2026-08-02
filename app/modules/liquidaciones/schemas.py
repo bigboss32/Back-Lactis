@@ -60,6 +60,10 @@ class PreLiquidacionRead(BaseSchema):
 
 
 class LiquidacionDetalleRead(BaseSchema):
+    # El id viaja al frontend porque el día es editable: sin él, la pantalla
+    # tendría que señalar la fila por fecha y dos días iguales (o un cambio de
+    # orden) apuntarían al renglón equivocado.
+    id: uuid.UUID
     fecha: date
     litros: Decimal
     precio_litro: Decimal
@@ -89,6 +93,20 @@ class LiquidacionRead(TenantRead):
 
 class LiquidacionUpdate(BaseSchema):
     observaciones: str | None = None
+
+
+class LiquidacionDetallePrecioUpdate(BaseSchema):
+    """Corrección del precio por litro de UN día de la liquidación.
+
+    El tope de 1.000.000 no es capricho: el precio del litro anda por los $1.800
+    y quien teclea "1800000" por error se lleva una liquidación de cientos de
+    millones. Mejor que rebote a que el dueño la descubra en el comprobante.
+    """
+
+    # Los topes van como enteros a propósito: el manejador de errores de
+    # validación serializa el contexto del error a JSON tal cual, y un Decimal
+    # ahí revienta la respuesta con un 500 en vez de devolver el 422.
+    precio_litro: Decimal = Field(gt=0, le=1_000_000)
 
 
 class AnticipoCreate(BaseSchema):

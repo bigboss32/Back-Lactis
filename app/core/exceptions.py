@@ -2,6 +2,7 @@
 from typing import Any
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -67,9 +68,17 @@ def register_exception_handlers(app: FastAPI) -> None:
             mensaje = errores[0].get("msg", "")
             if campo:
                 detalle = f"Dato inválido en '{campo}': {mensaje}"
+        # El detalle de pydantic trae el valor del límite tal cual está declarado,
+        # y en los campos de plata ese límite es un Decimal, que json.dumps no
+        # sabe escribir: la respuesta reventaba y salía un 500 "Error interno del
+        # servidor" donde tenía que salir "El valor debe ser mayor que 0". Pasaba
+        # con cualquier campo Decimal con tope (el valor de un anticipo, por
+        # ejemplo). jsonable_encoder los baja a tipos que sí se pueden escribir.
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={"error": {"code": "validation_error", "detail": detalle, "errors": errores}},
+            content=jsonable_encoder(
+                {"error": {"code": "validation_error", "detail": detalle, "errors": errores}}
+            ),
         )
 
     @app.exception_handler(Exception)

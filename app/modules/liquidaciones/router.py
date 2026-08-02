@@ -12,6 +12,7 @@ from app.modules.liquidaciones.schemas import (
     AnticipoRead,
     AnticipoUpdate,
     GenerarLiquidaciones,
+    LiquidacionDetallePrecioUpdate,
     LiquidacionRead,
     LiquidacionUpdate,
     PreLiquidacionRead,
@@ -106,6 +107,27 @@ def actualizar(
     ctx: RequestContext = Depends(require_permission("liquidaciones", "editar")),
 ) -> LiquidacionRead:
     return _to_read(LiquidacionService(db, ctx).actualizar(entity_id, payload))
+
+
+@router.put(
+    "/{entity_id}/detalles/{detalle_id}",
+    response_model=LiquidacionRead,
+    summary="Corregir el precio por litro de un día (solo en borrador)",
+)
+def actualizar_precio_detalle(
+    entity_id: uuid.UUID,
+    detalle_id: uuid.UUID,
+    payload: LiquidacionDetallePrecioUpdate,
+    db: DbSession,
+    # Mismo permiso que ya exige editar la liquidación: corregir el precio de un
+    # día es editarla, no administrarla.
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "editar")),
+) -> LiquidacionRead:
+    return _to_read(
+        LiquidacionService(db, ctx).actualizar_precio_detalle(
+            entity_id, detalle_id, payload.precio_litro
+        )
+    )
 
 
 @router.post("/{entity_id}/aprobar", response_model=LiquidacionRead, summary="Aprobar liquidación")

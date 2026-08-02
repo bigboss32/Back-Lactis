@@ -5,7 +5,7 @@ replicando el proceso que la quesera llevaba en Excel.
 import uuid
 from collections import defaultdict
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from app.common.service import BaseService, serialize_entity
@@ -36,6 +36,17 @@ from app.modules.transportadores.repository import TransportadorRepository
 from app.utils.export import build_liquidacion_pdf, litros, pesos
 
 CERO = Decimal("0")
+CENTAVOS = Decimal("0.01")
+
+
+def _centavos(valor: Decimal) -> Decimal:
+    """Redondea a centavos como lo haría una persona: el medio centavo sube.
+
+    Se usa al recalcular un día corregido a mano. El resto de las cifras de la
+    liquidación NO se re-redondean: se suman tal como están guardadas, para que
+    el total sea exactamente la suma de los renglones que el dueño ve.
+    """
+    return Decimal(valor).quantize(CENTAVOS, rounding=ROUND_HALF_UP)
 
 
 class LiquidacionService(BaseService[Liquidacion]):
@@ -313,6 +324,165 @@ class LiquidacionService(BaseService[Liquidacion]):
                 for a in anticipos
             ],
         )
+
+    # --------------------------------------------- corrección de un día suelto
+    def _recepciones_de(self, liquidacion: Liquidacion) -> list[RecepcionLeche]:
+        """Las recepciones que esta liquidación tiene apartadas.
+
+        Va por el repositorio para no saltarse el filtro por empresa ni el de
+        borrados: son datos de plata de un tenant y aquí se reescriben.
+        """
+        stmt = (
+            RecepcionRepository(self.db, self.ctx.empresa_id)
+            .base_query()
+            .where(RecepcionLeche.liquidacion_id == liquidacion.id)
+            .order_by(RecepcionLeche.fecha)
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def _recalcular_desde_recepciones(self, liquidacion: Liquidacion) -> None:
+        """Rearma el detalle y los totales desde las recepciones del período.
+
+        Se recalcula TODO en vez de "ajustar la diferencia" porque el dueño suma
+        la columna Valor a mano y compara con el total: si el total se arrastrara
+        de un cálculo anterior, un peso de diferencia lo mandaría a buscar un
+        error que no existe.
+
+        La clave del cuadre está en que el valor del día se arma con las MISMAS
+        piezas que se suman arriba (bruto + bonificaciones - descuentos) y no
+        leyendo `valor_neto`: así la suma de los días es idéntica al valor total,
+        sin depender de cómo redondeó cada quien.
+        """
+        recepciones = self._recepciones_de(liquidacion)
+        por_fecha = {r.fecha: r for r in recepciones}
+
+        valor_por_dia = {
+            r.fecha: Decimal(r.valor_bruto) + Decimal(r.bonificaciones) - Decimal(r.descuentos)
+            for r in recepciones
+        }
+        for detalle in liquidacion.detalles:
+            recepcion = por_fecha.get(detalle.fecha)
+            if recepcion is None:
+                continue
+            detalle.litros = recepcion.cantidad_litros
+            detalle.precio_litro = recepcion.precio_litro
+            detalle.valor = valor_por_dia[detalle.fecha]
+            detalle.updated_by = self.ctx.user_id
+
+        total_litros = sum((Decimal(r.cantidad_litros) for r in recepciones), CERO)
+        valor_bruto = sum((Decimal(r.valor_bruto) for r in recepciones), CERO)
+        bonificaciones = sum((Decimal(r.bonificaciones) for r in recepciones), CERO)
+        descuentos = sum((Decimal(r.descuentos) for r in recepciones), CERO)
+        valor_total = valor_bruto + bonificaciones - descuentos
+
+        liquidacion.total_litros = total_litros
+        liquidacion.valor_bruto = valor_bruto
+        liquidacion.bonificaciones = bonificaciones
+        liquidacion.descuentos = descuentos
+        liquidacion.valor_transporte = sum((Decimal(r.valor_transporte) for r in recepciones), CERO)
+        liquidacion.precio_promedio = (
+            (valor_bruto / total_litros).quantize(CENTAVOS) if total_litros else CERO
+        )
+        liquidacion.valor_total = valor_total
+        # Los anticipos no se tocan: ya quedaron aplicados a esta liquidación al
+        # generarla y corregir un precio no cambia lo que se le adelantó.
+        liquidacion.saldo = valor_total - Decimal(liquidacion.anticipos)
+
+    def actualizar_precio_detalle(
+        self, entity_id: uuid.UUID, detalle_id: uuid.UUID, precio_litro: Decimal
+    ) -> Liquidacion:
+        """Corrige el precio por litro de un día sin salir del comprobante.
+
+        Nace de un caso real: la liquidación salió a $1.800 el litro cuando no
+        era ese el precio, y arreglarlo obligaba a anular la liquidación entera.
+
+        SOLO en borrador y SOLO de proveedor:
+        - Aprobada o anulada no se toca ni por la dirección del endpoint: ese
+          precio ya se le pagó a alguien (o la liquidación ya se dio de baja).
+        - En la de transportador el "precio" del renglón es la tarifa de flete
+          del día y agrupa varias recepciones de la ruta; cambiarla ahí sería
+          otra cosa, y se cruzaría con el transporte que ya lleva la liquidación
+          del proveedor. Se deja por fuera a propósito.
+        """
+        liquidacion = self.repo.get_or_fail(entity_id)
+        if liquidacion.estado != ESTADO_BORRADOR:
+            raise BusinessError(
+                f"Esta liquidación está en '{liquidacion.estado}': solo se puede "
+                "corregir el precio mientras sea un borrador"
+            )
+        if liquidacion.tipo != TIPO_PROVEEDOR:
+            raise BusinessError(
+                "Solo se puede corregir el precio por litro en liquidaciones de proveedor"
+            )
+
+        detalle = next(
+            (d for d in liquidacion.detalles if d.id == detalle_id and d.deleted_at is None), None
+        )
+        if detalle is None:
+            raise NotFoundError("Ese día no pertenece a la liquidación")
+
+        recepcion = self.db.scalars(
+            RecepcionRepository(self.db, self.ctx.empresa_id)
+            .base_query()
+            .where(
+                RecepcionLeche.liquidacion_id == liquidacion.id,
+                RecepcionLeche.proveedor_id == liquidacion.proveedor_id,
+                RecepcionLeche.fecha == detalle.fecha,
+            )
+        ).first()
+        if recepcion is None:
+            raise BusinessError(
+                "No se encontró la recepción de ese día; anule la liquidación y vuelva a generarla"
+            )
+
+        precio = _centavos(precio_litro)
+        nuevo_bruto = _centavos(Decimal(recepcion.cantidad_litros) * precio)
+        nuevo_neto = nuevo_bruto + Decimal(recepcion.bonificaciones) - Decimal(recepcion.descuentos)
+        # Se valida ANTES de escribir nada: si el precio nuevo deja el día en rojo
+        # la corrección no debe dejar a medias ni la recepción ni la liquidación.
+        if nuevo_neto < CERO:
+            raise BusinessError(
+                "Con ese precio el valor del día queda negativo: revise los descuentos"
+            )
+
+        antes_recepcion = serialize_entity(recepcion)
+        antes_liquidacion = serialize_entity(liquidacion)
+
+        recepcion.precio_litro = precio
+        recepcion.valor_bruto = nuevo_bruto
+        recepcion.valor_neto = nuevo_neto
+        recepcion.updated_by = self.ctx.user_id
+        # La sesión no hace autoflush: sin este flush, el recálculo volvería a
+        # consultar las recepciones y el día corregido podría releerse con el
+        # precio viejo. Se baja el cambio antes de sumar.
+        self.db.flush()
+
+        self._recalcular_desde_recepciones(liquidacion)
+        liquidacion.updated_by = self.ctx.user_id
+        self.db.flush()
+
+        # Se auditan las dos cosas: la liquidación, que es donde el dueño ve el
+        # cambio, y la recepción del día, que es el dato de origen que quedó
+        # corregido. La de recepción se arma a mano —y no con self._audit— para
+        # que en el libro quede bajo su propio módulo y entidad; si no, saldría
+        # como si alguien hubiera editado una liquidación con el id de otra cosa.
+        from app.modules.auditoria.models import Auditoria
+
+        self._audit("editar", liquidacion.id, antes_liquidacion, serialize_entity(liquidacion))
+        self.db.add(
+            Auditoria(
+                empresa_id=self.ctx.empresa_id,
+                usuario_id=self.ctx.user_id,
+                ip=self.ctx.ip,
+                modulo="recepcion",
+                accion="editar",
+                entidad="RecepcionLeche",
+                entidad_id=recepcion.id,
+                antes=antes_recepcion,
+                despues=serialize_entity(recepcion),
+            )
+        )
+        return liquidacion
 
     # ------------------------------------------------------------ transiciones
     def _transicionar(self, entity_id: uuid.UUID, desde: tuple[str, ...], hacia: str) -> Liquidacion:
