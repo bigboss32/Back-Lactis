@@ -44,3 +44,10 @@ class RecepcionLeche(TenantMixin, AuditMixin, Base):
     proveedor = relationship("Proveedor", lazy="joined")
     transportador = relationship("Transportador", lazy="joined")
     ruta = relationship("Ruta", lazy="joined")
+
+    # NO es una columna: lo llena RecepcionService._marcar_estado_liquidacion con
+    # el estado de la liquidación que manda sobre este día (la más trabada de las
+    # dos marcas de arriba). Se deja declarado aquí, con valor por omisión, para
+    # que RecepcionRead siempre encuentre el atributo aunque la lectura venga por
+    # un camino que no lo llene.
+    liquidacion_estado = None

@@ -8,6 +8,14 @@ from sqlalchemy import select
 from app.common.service import BaseService
 from app.core.exceptions import BusinessError, ConflictError
 from app.core.pagination import PageParams
+from app.modules.liquidaciones.models import (
+    ESTADO_APROBADA,
+    ESTADO_BORRADOR,
+    ESTADO_PAGADA,
+    TIPO_PROVEEDOR,
+    Liquidacion,
+)
+from app.modules.liquidaciones.repository import LiquidacionRepository
 from app.modules.proveedores.models import Proveedor
 from app.modules.proveedores.repository import ProveedorRepository
 from app.modules.proveedores.service import exigir_proveedor_activo
@@ -24,10 +32,151 @@ from app.modules.transportadores.repository import TransportadorRepository
 
 CERO = Decimal("0")
 
+# De más trabada a menos. Un día puede estar en DOS liquidaciones a la vez (la
+# leche al proveedor y el flete al transportador): la que manda para el candado
+# es la más trabada de las dos, porque basta con que UNA ya se haya pagado para
+# que ese día no se pueda tocar.
+_ORDEN_DE_CANDADO = (ESTADO_PAGADA, ESTADO_APROBADA, ESTADO_BORRADOR)
+
+
+def _estado_que_manda(estados: list[str]) -> str | None:
+    for estado in _ORDEN_DE_CANDADO:
+        if estado in estados:
+            return estado
+    return None
+
 
 class RecepcionService(BaseService[RecepcionLeche]):
     repository_cls = RecepcionRepository
     modulo = "recepcion"
+
+    # ------------------------------------------- liquidaciones de una recepción
+    def _liquidaciones_de(self, recepcion: RecepcionLeche) -> list[Liquidacion]:
+        """Las liquidaciones que hoy tienen apartado este día: leche y/o flete.
+
+        Va por el repositorio para no saltarse el filtro por empresa ni el de
+        borrados: de esto depende si se deja o no tocar plata de un tenant.
+        """
+        ids = {
+            liq_id
+            for liq_id in (recepcion.liquidacion_id, recepcion.liquidacion_transporte_id)
+            if liq_id is not None
+        }
+        if not ids:
+            return []
+        stmt = (
+            LiquidacionRepository(self.db, self.ctx.empresa_id)
+            .base_query()
+            .where(Liquidacion.id.in_(ids))
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def _exigir_no_pagada(self, recepcion: RecepcionLeche, verbo: str) -> list[Liquidacion]:
+        """El candado de verdad: solo se traba cuando ya se PAGÓ.
+
+        Antes se trababa apenas la recepción tuviera liquidación, sin mirar el
+        estado, y el dueño se quedaba sin poder corregir un día desde que la
+        generaba —aunque todavía no le hubiera pagado a nadie—. Ahora en borrador
+        y en aprobada se deja corregir (la liquidación se recuadra sola, ver
+        `_recuadrar`) y solo se dice que no cuando la plata ya salió.
+
+        Devuelve las liquidaciones tocadas, para recuadrarlas después de escribir.
+        """
+        liquidaciones = self._liquidaciones_de(recepcion)
+        pagadas = [liq for liq in liquidaciones if liq.estado == ESTADO_PAGADA]
+        if pagadas:
+            de_quien = "la leche" if pagadas[0].tipo == TIPO_PROVEEDOR else "el flete"
+            raise BusinessError(
+                f"No se puede {verbo} este día: {de_quien} ya se pagó en una "
+                "liquidación. Si la cifra está mala, corríjala por fuera del sistema "
+                "o registre el ajuste en la quincena siguiente"
+            )
+        return liquidaciones
+
+    def _marcas_a_soltar(
+        self,
+        actual: RecepcionLeche,
+        liquidaciones: list[Liquidacion],
+        data: dict[str, Any],
+        nueva_fecha: date,
+    ) -> dict[str, None]:
+        """Cuándo un día deja de pertenecer a la liquidación que lo tenía apartado.
+
+        Editar un día ya no está prohibido, pero hay dos cambios que lo sacan de
+        su liquidación y que —si no se atienden— le pagarían a quien no era o
+        meterían leche de otra quincena en un comprobante ya emitido:
+
+        · Cambia el TRANSPORTADOR: el flete de ese día es de otra persona. Se
+          suelta de la liquidación de flete vieja (que se recuadra sin él) y
+          queda disponible para liquidárselo al que sí recogió.
+        · La FECHA se sale del período de la liquidación: esa leche pertenece a
+          otra quincena. Se suelta para que entre en la liquidación que le toca;
+          si se quedara, el comprobante de junio traería un día de julio.
+
+        Un cambio de fecha DENTRO del mismo período no suelta nada: es la
+        corrección de todos los días y la liquidación simplemente se recuadra.
+        """
+        por_id = {liq.id: liq for liq in liquidaciones}
+        nuevo_transportador = data.get("transportador_id", actual.transportador_id)
+        soltar: dict[str, None] = {}
+
+        def fuera_de_periodo(liq_id: uuid.UUID | None) -> bool:
+            liq = por_id.get(liq_id) if liq_id else None
+            return liq is not None and not (liq.periodo_inicio <= nueva_fecha <= liq.periodo_fin)
+
+        if fuera_de_periodo(actual.liquidacion_id):
+            soltar["liquidacion_id"] = None
+        if actual.liquidacion_transporte_id is not None and (
+            nuevo_transportador != actual.transportador_id
+            or fuera_de_periodo(actual.liquidacion_transporte_id)
+        ):
+            soltar["liquidacion_transporte_id"] = None
+        return soltar
+
+    def _recuadrar(self, liquidaciones: list[Liquidacion]) -> None:
+        """Vuelve a cuadrar las liquidaciones cuyo día se acaba de tocar.
+
+        Se importa aquí adentro y no arriba a propósito: el servicio de
+        liquidaciones ya usa el repositorio de recepciones, y con el import
+        arriba las dos hojas quedarían amarradas en tiempo de carga.
+        """
+        if not liquidaciones:
+            return
+        from app.modules.liquidaciones.service import LiquidacionService
+
+        servicio = LiquidacionService(self.db, self.ctx)
+        for liquidacion in liquidaciones:
+            servicio.recuadrar(liquidacion.id)
+
+    def _marcar_estado_liquidacion(self, recepciones: list[RecepcionLeche]) -> None:
+        """Le cuelga a cada recepción el estado de la liquidación que manda.
+
+        No es una columna: se resuelve de un solo golpe para toda la lista (una
+        consulta, no una por fila) y se expone en `RecepcionRead` para que la
+        pantalla sepa cuándo poner el candado y cuándo avisar que al tocar el día
+        se va a mover una liquidación ya generada.
+        """
+        ids = {
+            liq_id
+            for r in recepciones
+            for liq_id in (r.liquidacion_id, r.liquidacion_transporte_id)
+            if liq_id is not None
+        }
+        estados: dict[uuid.UUID, str] = {}
+        if ids:
+            stmt = (
+                LiquidacionRepository(self.db, self.ctx.empresa_id)
+                .base_query()
+                .where(Liquidacion.id.in_(ids))
+            )
+            estados = {liq.id: liq.estado for liq in self.db.scalars(stmt).all()}
+        for r in recepciones:
+            propios = [
+                estados[liq_id]
+                for liq_id in (r.liquidacion_id, r.liquidacion_transporte_id)
+                if liq_id in estados
+            ]
+            r.liquidacion_estado = _estado_que_manda(propios)
 
     def _completar_y_calcular(self, data: dict[str, Any], actual: RecepcionLeche | None = None) -> dict[str, Any]:
         """Completa precio/ruta desde el proveedor y calcula los valores monetarios."""
@@ -90,22 +239,57 @@ class RecepcionService(BaseService[RecepcionLeche]):
     def crear(self, payload: Any) -> RecepcionLeche:
         data = payload.model_dump(exclude_unset=True)
         data = self._completar_y_calcular(data)
-        return super().crear(data)
+        recepcion = super().crear(data)
+        self._marcar_estado_liquidacion([recepcion])
+        return recepcion
 
     def actualizar(self, entity_id: uuid.UUID, payload: Any) -> RecepcionLeche:
         actual = self.repo.get_or_fail(entity_id)
-        if actual.liquidacion_id is not None:
-            raise BusinessError("No se puede modificar una recepción ya liquidada")
+        # El candado es "ya se pagó", no "ya se liquidó": ver `_exigir_no_pagada`.
+        # Las liquidaciones se apuntan ANTES de escribir, porque después de
+        # guardar hay que volver a cuadrarlas con la cifra nueva.
+        liquidaciones = self._exigir_no_pagada(actual, "modificar")
         data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
         nueva_fecha = data.get("fecha", actual.fecha)
         if self.repo.existe_registro_dia(actual.proveedor_id, nueva_fecha, exclude_id=entity_id):
             raise ConflictError("Ya existe una recepción de este proveedor en esa fecha")
         data = self._completar_y_calcular(data, actual)
-        return super().actualizar(entity_id, data)
+        data.update(self._marcas_a_soltar(actual, liquidaciones, data, nueva_fecha))
+
+        recepcion = super().actualizar(entity_id, data)
+        # Se baja el cambio antes de recuadrar: la sesión no hace autoflush y el
+        # recálculo vuelve a leer las recepciones desde la base.
+        self.db.flush()
+        self._recuadrar(liquidaciones)
+        self._marcar_estado_liquidacion([recepcion])
+        return recepcion
 
     def validar_eliminar(self, obj: RecepcionLeche) -> None:
-        if obj.liquidacion_id is not None:
-            raise BusinessError("No se puede eliminar una recepción ya liquidada")
+        self._exigir_no_pagada(obj, "eliminar")
+
+    def eliminar(self, entity_id: uuid.UUID) -> None:
+        """Borra el día y deja cuadradas las liquidaciones que lo tenían.
+
+        Sin el recuadre, la liquidación se quedaría con el renglón de un día que
+        ya no existe y su total dejaría de ser la suma de sus recepciones: el
+        descuadre silencioso que el dueño detecta cuadrando a mano.
+        """
+        recepcion = self.repo.get_or_fail(entity_id)
+        liquidaciones = self._exigir_no_pagada(recepcion, "eliminar")
+        super().eliminar(entity_id)
+        self.db.flush()
+        self._recuadrar(liquidaciones)
+
+    # ---------------------------------------------------------------- lecturas
+    def obtener(self, entity_id: uuid.UUID) -> RecepcionLeche:
+        recepcion = super().obtener(entity_id)
+        self._marcar_estado_liquidacion([recepcion])
+        return recepcion
+
+    def listar(self, params: PageParams, **kwargs: Any) -> tuple[list[RecepcionLeche], int]:
+        items, total = super().listar(params, **kwargs)
+        self._marcar_estado_liquidacion(items)
+        return items, total
 
     def listar_filtrado(
         self,
@@ -132,7 +316,9 @@ class RecepcionService(BaseService[RecepcionLeche]):
                 Proveedor.nombre.ilike(f"%{search.strip()}%"),
             )
             extra.append(RecepcionLeche.proveedor_id.in_(proveedores))
-        return self.repo.list_paginated(params, filters=filters, extra_criteria=extra)
+        items, total = self.repo.list_paginated(params, filters=filters, extra_criteria=extra)
+        self._marcar_estado_liquidacion(items)
+        return items, total
 
     def grilla_quincena(
         self,
@@ -186,6 +372,10 @@ class RecepcionService(BaseService[RecepcionLeche]):
         if transportador_id is not None:
             consulta = consulta.where(RecepcionLeche.transportador_id == transportador_id)
         recepciones = list(self.db.scalars(consulta).all())
+        # De un solo golpe para toda la quincena: cada celda necesita saber si su
+        # día está trabado (liquidación pagada) o solo apartado en una liquidación
+        # sin pagar, que se puede editar pero avisando.
+        self._marcar_estado_liquidacion(recepciones)
 
         activos = ProveedorRepository(self.db, self.ctx.empresa_id).all(estado="activo")
         activos_ids = {p.id for p in activos}
@@ -242,7 +432,12 @@ class RecepcionService(BaseService[RecepcionLeche]):
             fila.celdas[clave] = CeldaGrilla(
                 recepcion_id=r.id,
                 litros=r.cantidad_litros,
-                liquidada=r.liquidacion_id is not None,
+                # "liquidada" es apenas "ya está dentro de una liquidación
+                # generada" (la de la leche o la del flete): es una seña, no un
+                # candado. El candado es "pagada".
+                liquidada=r.liquidacion_estado is not None,
+                pagada=r.liquidacion_estado == ESTADO_PAGADA,
+                liquidacion_estado=r.liquidacion_estado,
                 con_transporte=r.transportador_id is not None,
             )
             fila.total_litros += r.cantidad_litros

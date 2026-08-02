@@ -340,6 +340,34 @@ class LiquidacionService(BaseService[Liquidacion]):
         )
         return list(self.db.scalars(stmt).all())
 
+    def _renglon_del_dia(self, liquidacion: Liquidacion, fecha: date) -> LiquidacionDetalle:
+        """El renglón de ese día, creándolo si la liquidación todavía no lo tiene.
+
+        Hace falta porque los renglones ya no son fijos: desde que se puede
+        corregir un día que pertenece a una liquidación sin pagar, un día puede
+        aparecer (una recepción que cambió de fecha) o desaparecer (una recepción
+        borrada). Ver `_quitar_renglones_sin_dia`.
+        """
+        for detalle in liquidacion.detalles:
+            if detalle.fecha == fecha:
+                return detalle
+        detalle = LiquidacionDetalle(
+            fecha=fecha, created_by=self.ctx.user_id, updated_by=self.ctx.user_id
+        )
+        liquidacion.detalles.append(detalle)
+        return detalle
+
+    def _quitar_renglones_sin_dia(self, liquidacion: Liquidacion, fechas: set[date]) -> None:
+        """Bota los renglones de días que ya no tienen recepción detrás.
+
+        Si se quedaran, la columna Valor del comprobante dejaría de sumar el
+        VALOR TOTAL —que se calcula desde las recepciones que quedan—, y ese
+        cuadre es justo el que el dueño verifica a mano contra el cuaderno.
+        Con cascade delete-orphan, sacarlo de la colección lo borra.
+        """
+        for sobrante in [d for d in liquidacion.detalles if d.fecha not in fechas]:
+            liquidacion.detalles.remove(sobrante)
+
     def _recalcular_desde_recepciones(self, liquidacion: Liquidacion) -> None:
         """Rearma el detalle y los totales desde las recepciones del período.
 
@@ -356,18 +384,20 @@ class LiquidacionService(BaseService[Liquidacion]):
         recepciones = self._recepciones_de(liquidacion)
         por_fecha = {r.fecha: r for r in recepciones}
 
-        valor_por_dia = {
-            r.fecha: Decimal(r.valor_bruto) + Decimal(r.bonificaciones) - Decimal(r.descuentos)
-            for r in recepciones
-        }
-        for detalle in liquidacion.detalles:
-            recepcion = por_fecha.get(detalle.fecha)
-            if recepcion is None:
-                continue
+        self._quitar_renglones_sin_dia(liquidacion, set(por_fecha))
+        for fecha, recepcion in por_fecha.items():
+            detalle = self._renglon_del_dia(liquidacion, fecha)
             detalle.litros = recepcion.cantidad_litros
             detalle.precio_litro = recepcion.precio_litro
-            detalle.valor = valor_por_dia[detalle.fecha]
+            detalle.valor = (
+                Decimal(recepcion.valor_bruto)
+                + Decimal(recepcion.bonificaciones)
+                - Decimal(recepcion.descuentos)
+            )
             detalle.updated_by = self.ctx.user_id
+        # El comprobante se lee de arriba abajo por fecha; los renglones nuevos se
+        # agregaron al final de la colección, así que se vuelve a ordenar.
+        liquidacion.detalles.sort(key=lambda d: d.fecha)
 
         total_litros = sum((Decimal(r.cantidad_litros) for r in recepciones), CERO)
         valor_bruto = sum((Decimal(r.valor_bruto) for r in recepciones), CERO)
@@ -387,6 +417,63 @@ class LiquidacionService(BaseService[Liquidacion]):
         # Los anticipos no se tocan: ya quedaron aplicados a esta liquidación al
         # generarla y corregir un precio no cambia lo que se le adelantó.
         liquidacion.saldo = valor_total - Decimal(liquidacion.anticipos)
+
+    def _recepciones_transporte_de(self, liquidacion: Liquidacion) -> list[RecepcionLeche]:
+        """Las recepciones cuyo FLETE tiene apartado esta liquidación.
+
+        Ojo con la marca: la de leche va en `liquidacion_id` y la de flete en
+        `liquidacion_transporte_id`. Un mismo día lleva las dos y son
+        liquidaciones distintas, de dos personas distintas.
+        """
+        stmt = (
+            RecepcionRepository(self.db, self.ctx.empresa_id)
+            .base_query()
+            .where(RecepcionLeche.liquidacion_transporte_id == liquidacion.id)
+            .order_by(RecepcionLeche.fecha)
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def _recalcular_transporte_desde_recepciones(self, liquidacion: Liquidacion) -> None:
+        """Rearma la liquidación de flete desde las recepciones que recogió.
+
+        Existe por la misma razón que la de proveedor: si se corrigen los litros
+        de un día, el flete de ese día también cambia (se cobra por litro
+        recogido) y el comprobante del transportador quedaría diciendo una cifra
+        que ya no corresponde a sus recepciones.
+
+        Aquí el renglón es POR DÍA y agrupa toda la ruta —el transportador cobra
+        la suma de litros que recogió ese día, no proveedor por proveedor—, tal
+        como se arma al generarla en `_generar_transportadores`.
+        """
+        recepciones = self._recepciones_transporte_de(liquidacion)
+        por_dia: dict[date, list[RecepcionLeche]] = defaultdict(list)
+        for r in recepciones:
+            por_dia[r.fecha].append(r)
+
+        self._quitar_renglones_sin_dia(liquidacion, set(por_dia))
+        for fecha, del_dia in por_dia.items():
+            detalle = self._renglon_del_dia(liquidacion, fecha)
+            detalle.litros = sum((Decimal(r.cantidad_litros) for r in del_dia), CERO)
+            # La tarifa del día se toma del transportador de esas recepciones; si
+            # quedó sin transportador no hay tarifa que mostrar (y su valor es 0).
+            detalle.precio_litro = (
+                Decimal(del_dia[0].transportador.valor_transporte)
+                if del_dia[0].transportador
+                else CERO
+            )
+            detalle.valor = sum((Decimal(r.valor_transporte) for r in del_dia), CERO)
+            detalle.updated_by = self.ctx.user_id
+        liquidacion.detalles.sort(key=lambda d: d.fecha)
+
+        total_litros = sum((Decimal(r.cantidad_litros) for r in recepciones), CERO)
+        valor_transporte = sum((Decimal(r.valor_transporte) for r in recepciones), CERO)
+        liquidacion.total_litros = total_litros
+        liquidacion.valor_transporte = valor_transporte
+        liquidacion.precio_promedio = (
+            (valor_transporte / total_litros).quantize(CENTAVOS) if total_litros else CERO
+        )
+        liquidacion.valor_total = valor_transporte
+        liquidacion.saldo = valor_transporte - Decimal(liquidacion.anticipos)
 
     def actualizar_precio_detalle(
         self, entity_id: uuid.UUID, detalle_id: uuid.UUID, precio_litro: Decimal
@@ -563,16 +650,66 @@ class LiquidacionService(BaseService[Liquidacion]):
                 "recalcular mientras sea un borrador"
             )
         antes = serialize_entity(liquidacion)
-        # En la del transportador los renglones son la tarifa del flete por día y
-        # agrupan varias recepciones de la ruta: rearmarlos desde las recepciones
-        # del proveedor sería otra cosa. Ahí solo se barren los anticipos.
+        # Cada tipo se rearma con su propia marca: la de proveedor por
+        # `liquidacion_id` (un renglón por día del proveedor) y la de
+        # transportador por `liquidacion_transporte_id` (un renglón por día con
+        # toda la ruta sumada). Cruzarlas dejaría la liquidación en ceros.
         if liquidacion.tipo == TIPO_PROVEEDOR:
             self._recalcular_desde_recepciones(liquidacion)
+        else:
+            self._recalcular_transporte_desde_recepciones(liquidacion)
         self._aplicar_anticipos_pendientes(liquidacion)
         liquidacion.updated_by = self.ctx.user_id
         self.db.flush()
         self._audit("editar", liquidacion.id, antes, serialize_entity(liquidacion))
         return liquidacion
+
+    def recuadrar(self, entity_id: uuid.UUID) -> bool:
+        """Vuelve a cuadrar una liquidación cuyas recepciones acaban de cambiar.
+
+        Es la contraparte de haber aflojado el candado de Recepción diaria: ahora
+        un día se puede corregir mientras su liquidación no esté PAGADA, y esta es
+        la que evita que quede un descuadre silencioso.
+
+        - En borrador: se recalcula y ya.
+        - APROBADA: se DEVUELVE A BORRADOR y se recalcula. Aprobar es un visto
+          bueno sobre unas cifras; si las cifras cambian, el visto bueno ya no
+          vale y hay que volver a darlo. El cambio de estado queda en auditoría
+          aparte del recálculo, para que en el libro se lea qué pasó y por qué.
+        - Pagada: no llega aquí (el guardia de Recepción diaria rebota antes),
+          pero si llegara rebota igual: esa plata ya se entregó.
+        - Anulada: no se toca. Al anular se le sueltan las recepciones, así que
+          ninguna debería seguir apuntándole.
+
+        Devuelve True si hubo que devolverla a borrador, para poder avisarle al
+        usuario que la tiene que revisar y aprobar otra vez.
+        """
+        liquidacion = self.repo.get_or_fail(entity_id)
+        if liquidacion.estado == ESTADO_PAGADA:
+            raise BusinessError(
+                "Esta liquidación ya está pagada: sus días no se pueden modificar"
+            )
+        if liquidacion.estado == ESTADO_ANULADA:
+            return False
+
+        devuelta_a_borrador = liquidacion.estado == ESTADO_APROBADA
+        if devuelta_a_borrador:
+            liquidacion.estado = ESTADO_BORRADOR
+            liquidacion.updated_by = self.ctx.user_id
+            self.db.flush()
+            self._audit(
+                "editar",
+                liquidacion.id,
+                {"estado": ESTADO_APROBADA},
+                {
+                    "estado": ESTADO_BORRADOR,
+                    "motivo": "cambiaron las recepciones de la liquidación",
+                },
+            )
+        # Se reúsa el recálculo de siempre (el mismo del botón "Recalcular"), que
+        # exige borrador: por eso el cambio de estado va primero.
+        self.recalcular(entity_id)
+        return devuelta_a_borrador
 
     # ------------------------------------------------------------ transiciones
     def _transicionar(self, entity_id: uuid.UUID, desde: tuple[str, ...], hacia: str) -> Liquidacion:
