@@ -1,14 +1,16 @@
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, UploadFile, status
 
 from app.core.context import RequestContext
-from app.core.deps import DbSession, require_permission
+from app.core.deps import DbSession, require_any_permission, require_permission
 from app.core.exceptions import BusinessError
 from app.core.pagination import Page, PageParams, page_params
 from app.modules.reventa.schemas import (
     AbonoCreate,
+    AdjuntosLista,
+    EnlaceCompartido,
     GananciaPorDia,
     LotesPanel,
     CompraQuesoCreate,
@@ -33,6 +35,7 @@ from app.modules.reventa.schemas import (
     VentaQuesoUpdate,
 )
 from app.modules.reventa.service import (
+    AdjuntoReventaService,
     CompraQuesoService,
     LoteService,
     ConversionBoronaService,
@@ -346,6 +349,107 @@ def anular_venta(
     ctx: RequestContext = Depends(require_permission("reventa", "administrar")),
 ) -> VentaQuesoRead:
     return VentaQuesoService(db, ctx).anular(entity_id)
+
+
+# ----------------------------------- adjuntos (soportes de transferencia)
+# Cuatro rutas y dos permisos distintos, y la diferencia importa:
+#
+# - SUBIR con 'crear' O 'editar' (require_any_permission): adjuntarle el soporte
+#   a una compra es parte de registrarla para quien la acaba de hacer, y una
+#   edición para quien le agrega la foto después.
+# - VER con 'consultar', que es lo mismo que ver la compra.
+# - COMPARTIR con 'exportar': el enlace largo saca información de pago DEL
+#   SISTEMA hacia afuera (se manda por WhatsApp y se puede reenviar). Es la
+#   misma acción que ya exige sacar datos en los demás módulos, y deja fuera a
+#   los roles de solo consulta, que pueden mirar el soporte en pantalla pero no
+#   repartirlo.
+# - BORRAR con 'eliminar', A SECAS. No con 'crear'. Ya pasó en este proyecto que
+#   un borrado quedó pidiendo 'crear' (los abonos) y le dio a media empresa la
+#   posibilidad de borrar lo que otro registró.
+@router.post(
+    "/compras/{entity_id}/adjuntos",
+    response_model=AdjuntosLista,
+    status_code=status.HTTP_201_CREATED,
+    summary="Adjuntar soportes de pago a una compra (varias imágenes o PDF)",
+)
+def subir_adjuntos_compra(
+    entity_id: uuid.UUID,
+    files: list[UploadFile],
+    db: DbSession,
+    ctx: RequestContext = Depends(require_any_permission("reventa", "crear", "editar")),
+) -> AdjuntosLista:
+    """Devuelve la lista completa ya actualizada, con enlaces frescos, para que
+    la pantalla no tenga que pedirla otra vez después de subir."""
+    return AdjuntoReventaService(db, ctx).subir(files, compra_id=entity_id)
+
+
+@router.get(
+    "/compras/{entity_id}/adjuntos",
+    response_model=AdjuntosLista,
+    summary="Soportes de la compra, con enlaces firmados de corta duración",
+)
+def listar_adjuntos_compra(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+) -> AdjuntosLista:
+    return AdjuntoReventaService(db, ctx).listar(compra_id=entity_id)
+
+
+@router.post(
+    "/ventas/{entity_id}/adjuntos",
+    response_model=AdjuntosLista,
+    status_code=status.HTTP_201_CREATED,
+    summary="Adjuntar soportes de pago a una venta (varias imágenes o PDF)",
+)
+def subir_adjuntos_venta(
+    entity_id: uuid.UUID,
+    files: list[UploadFile],
+    db: DbSession,
+    ctx: RequestContext = Depends(require_any_permission("reventa", "crear", "editar")),
+) -> AdjuntosLista:
+    return AdjuntoReventaService(db, ctx).subir(files, venta_id=entity_id)
+
+
+@router.get(
+    "/ventas/{entity_id}/adjuntos",
+    response_model=AdjuntosLista,
+    summary="Soportes de la venta, con enlaces firmados de corta duración",
+)
+def listar_adjuntos_venta(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+) -> AdjuntosLista:
+    return AdjuntoReventaService(db, ctx).listar(venta_id=entity_id)
+
+
+@router.post(
+    "/adjuntos/{adjunto_id}/compartir",
+    response_model=EnlaceCompartido,
+    summary="Enlace de más duración para mandar UNA imagen por WhatsApp",
+)
+def compartir_adjunto(
+    adjunto_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "exportar")),
+) -> EnlaceCompartido:
+    """El enlace trae escrito hasta cuándo sirve, en hora de Colombia, porque
+    quien lo reparte tiene que saber qué está repartiendo. Queda en la auditoría."""
+    return AdjuntoReventaService(db, ctx).compartir(adjunto_id)
+
+
+@router.delete(
+    "/adjuntos/{adjunto_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Borrar un soporte (borra también el archivo del almacenamiento)",
+)
+def eliminar_adjunto(
+    adjunto_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "eliminar")),
+) -> None:
+    AdjuntoReventaService(db, ctx).eliminar_adjunto(adjunto_id)
 
 
 # ---------------------------------------------- saldos de la cuenta anterior

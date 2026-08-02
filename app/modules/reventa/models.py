@@ -8,7 +8,15 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import Date, ForeignKey, Numeric, String
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.common.models import AuditMixin, TenantMixin
@@ -45,10 +53,30 @@ class CompraQueso(TenantMixin, AuditMixin, Base):
         back_populates="compra", lazy="selectin", cascade="all, delete-orphan",
         order_by="AbonoCompraQueso.fecha",
     )
+    # Soportes de pago (fotos de las transferencias). viewonly y con el filtro de
+    # borrados DENTRO del join: los adjuntos se borran en suave, y sin el filtro
+    # aquí la lista seguiría contando los que ya se borraron. Es de solo lectura
+    # para que el ORM no intente cascadas: borrar un adjunto tiene que pasar por
+    # el servicio, que además borra el objeto en R2.
+    adjuntos: Mapped[list["AdjuntoReventa"]] = relationship(
+        primaryjoin=(
+            "and_(CompraQueso.id == AdjuntoReventa.compra_id, "
+            "AdjuntoReventa.deleted_at.is_(None))"
+        ),
+        viewonly=True,
+        lazy="selectin",
+        order_by="AdjuntoReventa.created_at",
+    )
 
     @property
     def saldo(self) -> Decimal:
         return self.valor_total - self.abonado
+
+    @property
+    def adjuntos_count(self) -> int:
+        """Cuántos soportes tiene. Va en la lista para que se vea de un vistazo
+        cuáles compras tienen respaldo del pago y cuáles no."""
+        return len(self.adjuntos)
 
 
 class AbonoCompraQueso(AuditMixin, Base):
@@ -97,10 +125,24 @@ class VentaQueso(TenantMixin, AuditMixin, Base):
         back_populates="venta", lazy="selectin", cascade="all, delete-orphan",
         order_by="AbonoVentaQueso.fecha",
     )
+    # Soportes de pago de la venta. Mismo trato que en la compra: ver allá.
+    adjuntos: Mapped[list["AdjuntoReventa"]] = relationship(
+        primaryjoin=(
+            "and_(VentaQueso.id == AdjuntoReventa.venta_id, "
+            "AdjuntoReventa.deleted_at.is_(None))"
+        ),
+        viewonly=True,
+        lazy="selectin",
+        order_by="AdjuntoReventa.created_at",
+    )
 
     @property
     def saldo(self) -> Decimal:
         return self.valor_total - self.abonado
+
+    @property
+    def adjuntos_count(self) -> int:
+        return len(self.adjuntos)
 
 
 # Destino de un ajuste del queso disponible de reventa
@@ -245,3 +287,66 @@ class Temporada(TenantMixin, AuditMixin, Base):
     @property
     def abierta(self) -> bool:
         return self.fecha_fin is None
+
+
+class AdjuntoReventa(TenantMixin, AuditMixin, Base):
+    """Un soporte de pago (foto de la transferencia) de una compra O de una venta.
+
+    POR QUÉ NO SE GUARDA NINGUNA URL. Solo se guarda `object_key`, la llave del
+    objeto dentro del bucket privado de Cloudflare R2. La URL para verlo se firma
+    en el momento en que alguien la pide y caduca sola (ver app/core/storage.py).
+    Una URL guardada en una columna es un permiso permanente: quien la viera —en
+    un backup, en un log, en un export— vería el soporte de pago para siempre,
+    con el nombre, la cuenta y el monto de una transferencia real.
+
+    POR QUÉ LA LLAVE LLEVA EL empresa_id ADENTRO. El formato es
+    `{empresa_id}/reventa/compras/{compra_id}/{uuid}.jpg`. Además del filtro por
+    empresa en cada consulta, la llave misma queda amarrada a la empresa dueña:
+    si algún día una consulta se escapara sin filtro, la llave que se firmaría
+    seguiría siendo la de un archivo de OTRA empresa y se notaría de inmediato
+    en la auditoría; y como la llave lleva un uuid aleatorio, tampoco se puede
+    adivinar la de nadie.
+
+    UN ADJUNTO CUELGA DE UNA COMPRA O DE UNA VENTA, NUNCA DE LAS DOS NI DE
+    NINGUNA. Lo garantiza un CHECK en la tabla y no solo el servicio: una fila
+    con las dos en NULL sería un archivo huérfano pagando almacenamiento sin que
+    nadie pueda verlo ni borrarlo desde la interfaz.
+    """
+
+    __tablename__ = "adjuntos_reventa"
+    __table_args__ = (
+        CheckConstraint(
+            "(compra_id IS NOT NULL AND venta_id IS NULL) "
+            "OR (compra_id IS NULL AND venta_id IS NOT NULL)",
+            name="ck_adjuntos_reventa_un_solo_dueno",
+        ),
+        # Con nombre explícito y no con `unique=True` en la columna: así el
+        # nombre es el MISMO que el de la migración y un `alembic revision
+        # --autogenerate` futuro no propone borrarla y volverla a crear.
+        UniqueConstraint("object_key", name="uq_adjuntos_reventa_object_key"),
+    )
+
+    compra_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("compras_queso.id", ondelete="CASCADE"), index=True, default=None
+    )
+    venta_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ventas_queso.id", ondelete="CASCADE"), index=True, default=None
+    )
+    # Llave del objeto en R2. Única (ver __table_args__): dos filas apuntando al
+    # mismo archivo harían que borrar una dejara a la otra señalando un objeto
+    # que ya no existe.
+    object_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    # Nombre con el que llegó el archivo, para mostrarlo y para nombrar la
+    # descarga. NO se usa para armar la llave: el nombre lo escribe quien sube.
+    nombre_archivo: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    tamano_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Quién lo subió: el id va en `created_by` (AuditMixin), que es la única
+    # fuente de ese dato. Aquí se guarda solo el NOMBRE tal como estaba al subir,
+    # que es un hecho distinto: si mañana el usuario se borra o se le cambia el
+    # nombre, el soporte tiene que seguir diciendo quién lo aportó.
+    subido_por_nombre: Mapped[str | None] = mapped_column(String(150), default=None)
+
+    @property
+    def es_imagen(self) -> bool:
+        return (self.content_type or "").startswith("image/")

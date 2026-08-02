@@ -25,6 +25,7 @@ from app.modules.reventa.models import (  # noqa: F401
     AbonoCompraQueso,
     AbonoSaldoAnterior,
     AbonoVentaQueso,
+    AdjuntoReventa,
     CompraQueso,
     ConversionBorona,
     SaldoAnterior,

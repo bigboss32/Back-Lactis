@@ -8,10 +8,13 @@ from pydantic import BaseModel
 from app.common.service import BaseService, serialize_entity
 from app.core.config import settings
 from app.core.exceptions import BusinessError, ConflictError, ForbiddenError, NotFoundError
+from app.core.logging_config import get_logger
 from app.core.pagination import PageParams
 from app.modules.empresas.models import Empresa
 from app.modules.empresas.repository import EmpresaRepository
 from app.utils.files import save_upload
+
+logger = get_logger("empresas")
 
 
 class EmpresaService(BaseService[Empresa]):
@@ -115,6 +118,7 @@ class EmpresaService(BaseService[Empresa]):
             AbonoCompraQueso,
             AbonoSaldoAnterior,
             AbonoVentaQueso,
+            AdjuntoReventa,
             CompraQueso,
             ConversionBorona,
             SaldoAnterior,
@@ -132,6 +136,43 @@ class EmpresaService(BaseService[Empresa]):
             raise BusinessError("La confirmación no coincide con el nombre de la empresa")
 
         borrados: dict[str, int] = {}
+
+        # 0) Los ARCHIVOS de los soportes de reventa, antes de borrar sus filas.
+        #
+        # Borrar solo las filas dejaría las fotos de las transferencias en el
+        # bucket de Cloudflare para siempre: sin fila que las nombre, nadie las
+        # puede ver ni borrar desde la aplicación, y se seguiría pagando ese
+        # almacenamiento. Peor todavía: son comprobantes de pago de una empresa
+        # que se supone que quedó en ceros.
+        #
+        # Es de MEJOR ESFUERZO. Si el bucket no responde, el reinicio sigue: es
+        # una operación de superadmin, irreversible y ya confirmada por nombre,
+        # y detenerla a la mitad dejaría la empresa medio borrada. Lo que no se
+        # pudo borrar queda en el log para limpiarlo a mano.
+        claves = list(
+            self.db.scalars(
+                select(AdjuntoReventa.object_key).where(
+                    AdjuntoReventa.empresa_id == entity_id
+                )
+            ).all()
+        )
+        if claves:
+            from app.core.storage import R2Client, r2_configurado
+
+            if r2_configurado():
+                cliente = R2Client()
+                for clave in claves:
+                    try:
+                        cliente.borrar(clave)
+                    except Exception:
+                        logger.warning("Quedó un objeto en R2 tras reiniciar la empresa: %s", clave)
+            else:
+                logger.warning(
+                    "Se reinició la empresa %s con %d soportes en R2 y sin llaves "
+                    "configuradas: esos archivos hay que borrarlos a mano",
+                    entity_id,
+                    len(claves),
+                )
 
         # 1) Detalles sin empresa_id: se borran por su documento padre de esta empresa.
         detalles = [
@@ -158,11 +199,16 @@ class EmpresaService(BaseService[Empresa]):
         # que si sobreviviera al reinicio la cartera seguiría mostrando deuda de
         # una empresa que se supone que quedó en ceros. Y una temporada sin
         # movimientos es un rango con nombre que ya no significa nada.
+        # AdjuntoReventa va aquí y no en los "detalles": tiene empresa_id propio,
+        # y `reversed(sorted_tables)` lo borra ANTES que compras_queso y
+        # ventas_queso, que es de quienes depende. Va explícito y no confiado al
+        # ON DELETE CASCADE porque en SQLite las llaves foráneas están apagadas
+        # por defecto y ahí las filas sobrevivirían al reinicio.
         transaccionales = {
             Pago, MovimientoInventario, MovimientoCaja, MovimientoBancario,
-            ConversionBorona, PagoEmpleado, Anticipo, Notificacion, RecepcionLeche,
-            Venta, Liquidacion, Produccion, CompraQueso, VentaQueso, Gasto, CajaDiaria,
-            SaldoAnterior, Temporada,
+            AdjuntoReventa, ConversionBorona, PagoEmpleado, Anticipo, Notificacion,
+            RecepcionLeche, Venta, Liquidacion, Produccion, CompraQueso, VentaQueso,
+            Gasto, CajaDiaria, SaldoAnterior, Temporada,
         }
         tablas = {m.__table__ for m in transaccionales}
         for table in reversed(Base.metadata.sorted_tables):

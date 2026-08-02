@@ -11,4 +11,11 @@ bcrypt==4.3.0
 python-multipart==0.0.20
 reportlab==4.4.1
 httpx==0.28.1
+# Cliente S3 para Cloudflare R2 (adjuntos de reventa: soportes de transferencia).
+# R2 no tiene SDK propio: expone una API compatible con S3, y boto3 es el cliente
+# de referencia y el que firma las URLs temporales (SigV4) sin tener que escribir
+# la firma a mano. Se importa PEREZOSAMENTE dentro de app/core/storage.py: si no
+# está instalado o no hay llaves, la aplicación arranca igual y lo único que
+# falla es la parte de adjuntos, con un mensaje legible.
+boto3==1.35.99
 pytest==8.3.5

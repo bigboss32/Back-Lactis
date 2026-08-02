@@ -1,6 +1,7 @@
 """Reventa de queso: compras a productores con merma y abonos, ventas a
 clientes y resumen de ganancia. Contabilidad separada del libro de la quesera.
 """
+import os
 import re
 import unicodedata
 import uuid
@@ -12,8 +13,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.common.service import BaseService, serialize_entity
+from app.core.config import settings
 from app.core.exceptions import BusinessError, NotFoundError
+from app.core.logging_config import get_logger
 from app.core.pagination import PageParams
+from app.core.storage import (
+    MENSAJE_NO_CONFIGURADO,
+    R2Client,
+    caducidad_utc,
+    r2_configurado,
+    texto_caducidad,
+)
 from app.modules.empresas.repository import EmpresaRepository
 from app.modules.reventa.models import (
     DESTINO_MERMA,
@@ -28,6 +38,7 @@ from app.modules.reventa.models import (
     AbonoCompraQueso,
     AbonoSaldoAnterior,
     AbonoVentaQueso,
+    AdjuntoReventa,
     CompraQueso,
     ConversionBorona,
     SaldoAnterior,
@@ -42,6 +53,7 @@ from app.modules.reventa.lotes import (
     repartir_lotes,
 )
 from app.modules.reventa.repository import (
+    AdjuntoReventaRepository,
     CompraQuesoRepository,
     ConversionBoronaRepository,
     SaldoAnteriorRepository,
@@ -49,6 +61,9 @@ from app.modules.reventa.repository import (
     VentaQuesoRepository,
 )
 from app.modules.reventa.schemas import (
+    AdjuntoRead,
+    AdjuntosLista,
+    EnlaceCompartido,
     EstadoCuentaCliente,
     GananciaDia,
     GananciaPorDia,
@@ -326,6 +341,18 @@ class CompraQuesoService(BaseService[CompraQueso]):
                 "No se puede eliminar una compra con abonos; elimine primero los abonos o anúlela"
             )
 
+    def eliminar(self, entity_id: uuid.UUID) -> None:
+        """Borra la compra Y se lleva sus soportes de pago.
+
+        Se valida PRIMERO y se limpian los soportes después: si se limpiaran
+        antes, una compra con abonos —que no se puede borrar— perdería sus fotos
+        por un borrado que al final no ocurre. Sin esta limpieza, los archivos
+        quedaban en el bucket sin ningún documento que los nombre.
+        """
+        self.validar_eliminar(self.repo.get_or_fail(entity_id))
+        AdjuntoReventaService(self.db, self.ctx).limpiar_de_documento(compra_id=entity_id)
+        super().eliminar(entity_id)
+
     def registrar_abono(self, compra_id: uuid.UUID, payload: Any) -> CompraQueso:
         compra = self.repo.get_or_fail(compra_id)
         compra = _bloquear(self.db, compra)
@@ -541,6 +568,13 @@ class VentaQuesoService(BaseService[VentaQueso]):
             raise BusinessError(
                 "No se puede eliminar una venta con abonos; elimine primero los abonos o anúlela"
             )
+
+    def eliminar(self, entity_id: uuid.UUID) -> None:
+        """Borra la venta Y se lleva sus soportes de pago. Mismo orden y misma
+        razón que en la compra: ver CompraQuesoService.eliminar."""
+        self.validar_eliminar(self.repo.get_or_fail(entity_id))
+        AdjuntoReventaService(self.db, self.ctx).limpiar_de_documento(venta_id=entity_id)
+        super().eliminar(entity_id)
 
     def registrar_abono(self, venta_id: uuid.UUID, payload: Any) -> VentaQueso:
         venta = self.repo.get_or_fail(venta_id)
@@ -834,6 +868,420 @@ class ConversionBoronaService(BaseService[ConversionBorona]):
         if data.get("destino") == DESTINO_MERMA:
             data["precio_kilo"] = CERO
         return super().crear(data)
+
+
+# ----------------------------------- adjuntos (soportes de transferencia)
+logger_adjuntos = get_logger("reventa.adjuntos")
+
+# Qué se acepta y con qué extensión se guarda en el bucket.
+#
+# SE ACEPTA PDF, y es una decisión, no un descuido: los bancos colombianos
+# (Bancolombia, Nequi, Davivienda) entregan el comprobante de una transferencia
+# como PDF descargable, y ese PDF ES el soporte bueno — más que una foto de la
+# pantalla. Rechazarlo obligaría al dueño a tomarle una foto al comprobante que
+# ya tenía, que es peor soporte y trabajo de más.
+#
+# HEIC/HEIF entran porque es lo que produce un iPhone por defecto. El navegador
+# a veces no sabe dibujar la miniatura, pero rechazar la foto de un iPhone con
+# un "tipo no permitido" sería inexplicable para quien la está mandando.
+#
+# No entran videos ni ofimática: esto es el respaldo de que se pagó, no un
+# archivador. Cada tipo que se abre es un tipo más que hay que servir con un
+# enlace firmado, y un .html o un .svg firmados serían código ejecutándose en el
+# navegador de quien reciba el enlace.
+TIPOS_ADJUNTO_PERMITIDOS: dict[str, str] = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+    "application/pdf": ".pdf",
+}
+
+TIPOS_EN_CRISTIANO = "fotos JPG, PNG, WEBP o HEIC, y comprobantes en PDF"
+
+# Marcas HEIF/HEIC: los primeros bytes son el tamaño de la caja, luego 'ftyp' y
+# luego la marca. Se listan las que usan las cámaras de los teléfonos.
+MARCAS_HEIC = {b"heic", b"heix", b"hevc", b"heim", b"heis", b"hevm", b"hevs"}
+MARCAS_HEIF = {b"mif1", b"msf1"}
+
+
+def _detectar_tipo(cabeza: bytes) -> str | None:
+    """Qué es el archivo DE VERDAD, mirándole los primeros bytes.
+
+    No se confía en el Content-Type que manda el navegador ni en la extensión
+    del nombre: los dos los pone quien sube y los dos se cambian solos. Y aquí
+    importa de verdad, porque de estos objetos se reparten enlaces firmados que
+    se abren en el navegador de otra persona: un .html disfrazado de .jpg sería
+    una página que corre en el dominio del almacenamiento con un enlace que el
+    dueño repartió de buena fe por WhatsApp.
+
+    Devuelve el tipo reconocido, o None si no es ninguno de los permitidos.
+    """
+    if cabeza.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if cabeza.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if cabeza[:4] == b"RIFF" and cabeza[8:12] == b"WEBP":
+        return "image/webp"
+    if cabeza[4:8] == b"ftyp":
+        marca = cabeza[8:12]
+        if marca in MARCAS_HEIC:
+            return "image/heic"
+        if marca in MARCAS_HEIF:
+            return "image/heif"
+    if cabeza.startswith(b"%PDF-"):
+        return "application/pdf"
+    return None
+
+
+def _tamano_legible(bytes_: int) -> str:
+    """"4,2 MB" — con coma decimal, que es como se escribe en Colombia."""
+    if bytes_ < 1024:
+        return f"{bytes_} bytes"
+    if bytes_ < 1024 * 1024:
+        return f"{bytes_ / 1024:.0f} KB"
+    return f"{bytes_ / (1024 * 1024):.1f}".replace(".", ",") + " MB"
+
+
+class AdjuntoReventaService(BaseService[AdjuntoReventa]):
+    """Soportes de pago de compras y ventas de reventa, guardados en R2.
+
+    TRES CAMINOS DISTINTOS PARA MIRAR UN ARCHIVO, a propósito:
+
+    - VER (`listar`): enlaces de minutos, para la pantalla. Se firman de nuevo
+      cada vez que se abre el detalle.
+    - COMPARTIR (`compartir`): un enlace de días para UNA imagen, para mandarlo
+      por WhatsApp. Sale con la fecha de caducidad escrita en cristiano y queda
+      registrado en la auditoría: es información de pago saliendo del sistema.
+    - BORRAR (`eliminar_adjunto`): quita la fila Y el objeto en R2.
+
+    Los tres empiezan por comprobar que la compra o la venta sea DE LA EMPRESA
+    de quien pregunta. Esa comprobación no está en un `if` suelto: se hace
+    buscando el documento con su propio repositorio, que ya filtra por
+    `empresa_id` y `deleted_at IS NULL`. Si no es suyo, no aparece, y sale un
+    404 antes de que se firme absolutamente nada.
+    """
+
+    repository_cls = AdjuntoReventaRepository
+    modulo = "reventa"
+
+    # ------------------------------------------------------------- utilidades
+    @property
+    def _max_bytes(self) -> int:
+        return settings.ADJUNTOS_MAX_MB * 1024 * 1024
+
+    def _documento(
+        self, *, compra_id: uuid.UUID | None = None, venta_id: uuid.UUID | None = None
+    ) -> CompraQueso | VentaQueso:
+        """La compra o la venta, SIEMPRE por el repositorio con filtro de empresa.
+
+        Es el candado multiempresa de todo el módulo de adjuntos: el documento de
+        otra empresa no existe para esta consulta y `get_or_fail` levanta 404.
+        """
+        if compra_id is not None:
+            return CompraQuesoRepository(self.db, self.ctx.empresa_id).get_or_fail(compra_id)
+        return VentaQuesoRepository(self.db, self.ctx.empresa_id).get_or_fail(venta_id)
+
+    def _adjunto(self, adjunto_id: uuid.UUID) -> AdjuntoReventa:
+        """El adjunto, con el mismo candado: repositorio con filtro de empresa."""
+        return self.repo.get_or_fail(adjunto_id)
+
+    def _clave(self, *, carpeta: str, documento_id: uuid.UUID, extension: str) -> str:
+        """`{empresa_id}/reventa/{compras|ventas}/{documento_id}/{uuid}{ext}`.
+
+        El empresa_id va DENTRO de la llave a propósito: aunque alguien adivinara
+        el resto, la llave de un archivo de otra empresa empieza por un uuid que
+        no es el suyo. Y el nombre del archivo NO entra en la llave: lo escribe
+        quien sube, y un nombre con `../` o con caracteres raros terminaría
+        creando objetos donde no van.
+        """
+        return (
+            f"{self.ctx.empresa_id}/reventa/{carpeta}/{documento_id}/"
+            f"{uuid.uuid4().hex}{extension}"
+        )
+
+    def _leer_y_validar(self, archivo: Any) -> tuple[bytes, str, str, str]:
+        """(contenido, tipo real, extension, nombre) — o BusinessError legible.
+
+        Se mide ANTES de leer: un archivo de 400 MB no se carga en memoria solo
+        para después decir que no cabe. En el campo la señal es mala y una subida
+        equivocada se nota tarde; lo que no puede pasar es que tumbe el servidor.
+        """
+        nombre = (getattr(archivo, "filename", "") or "").strip() or "soporte"
+        nombre = nombre[:255]
+
+        origen = archivo.file
+        try:
+            origen.seek(0, os.SEEK_END)
+            tamano = origen.tell()
+            origen.seek(0)
+        except (AttributeError, OSError):  # pragma: no cover - flujo no medible
+            tamano = -1
+
+        if tamano == 0:
+            raise BusinessError(f"El archivo «{nombre}» está vacío")
+        if tamano > self._max_bytes:
+            raise BusinessError(
+                f"«{nombre}» pesa {_tamano_legible(tamano)} y el máximo son "
+                f"{settings.ADJUNTOS_MAX_MB} MB. Tome la foto en menor calidad "
+                f"o mande el comprobante en PDF"
+            )
+
+        contenido = origen.read()
+        # Segunda medición, por si la de arriba no se pudo hacer.
+        if len(contenido) > self._max_bytes:
+            raise BusinessError(
+                f"«{nombre}» pesa {_tamano_legible(len(contenido))} y el máximo son "
+                f"{settings.ADJUNTOS_MAX_MB} MB"
+            )
+        if not contenido:
+            raise BusinessError(f"El archivo «{nombre}» está vacío")
+
+        tipo = _detectar_tipo(contenido[:64])
+        if tipo is None or tipo not in TIPOS_ADJUNTO_PERMITIDOS:
+            raise BusinessError(
+                f"«{nombre}» no es una imagen ni un PDF. Solo se aceptan "
+                f"{TIPOS_EN_CRISTIANO}"
+            )
+        return contenido, tipo, TIPOS_ADJUNTO_PERMITIDOS[tipo], nombre
+
+    def _nombre_de_quien_sube(self) -> str | None:
+        usuario = getattr(self.ctx, "user", None)
+        if usuario is None:
+            return None
+        completo = f"{getattr(usuario, 'nombre', '') or ''} {getattr(usuario, 'apellido', '') or ''}"
+        return completo.strip()[:150] or None
+
+    def _a_read(self, adjunto: AdjuntoReventa, cliente: R2Client | None) -> AdjuntoRead:
+        """Fila lista para la pantalla, con enlace corto si hay almacenamiento."""
+        url = None
+        expira = None
+        if cliente is not None:
+            segundos = max(60, settings.R2_URL_VER_MINUTOS * 60)
+            url = cliente.enlace_firmado(
+                clave=adjunto.object_key,
+                segundos=segundos,
+                nombre_descarga=adjunto.nombre_archivo,
+            )
+            expira = caducidad_utc(segundos)
+        return AdjuntoRead(
+            id=adjunto.id,
+            compra_id=adjunto.compra_id,
+            venta_id=adjunto.venta_id,
+            nombre_archivo=adjunto.nombre_archivo,
+            content_type=adjunto.content_type,
+            tamano_bytes=adjunto.tamano_bytes,
+            es_imagen=adjunto.es_imagen,
+            subido_por_nombre=adjunto.subido_por_nombre,
+            created_at=adjunto.created_at,
+            url=url,
+            url_expira=expira,
+        )
+
+    # ------------------------------------------------------------------- ver
+    def listar(
+        self, *, compra_id: uuid.UUID | None = None, venta_id: uuid.UUID | None = None
+    ) -> AdjuntosLista:
+        """Los soportes del documento, cada uno con su enlace de CORTA duración.
+
+        Sin R2 configurado responde 200 con `disponible: false` en vez de un
+        error: no es culpa de quien pregunta y el resto de la pantalla tiene que
+        poder seguir usándose. Las filas igual salen (nombre, peso, quién lo
+        subió), solo que sin enlace para abrirlas.
+        """
+        self._documento(compra_id=compra_id, venta_id=venta_id)
+        filas = self.repo.de_documento(compra_id=compra_id, venta_id=venta_id)
+        cupo = max(0, settings.ADJUNTOS_MAX_POR_DOCUMENTO - len(filas))
+        if not r2_configurado():
+            return AdjuntosLista(
+                disponible=False,
+                mensaje=MENSAJE_NO_CONFIGURADO,
+                cupo_restante=0,
+                adjuntos=[self._a_read(f, None) for f in filas],
+            )
+        cliente = R2Client()
+        return AdjuntosLista(
+            disponible=True,
+            cupo_restante=cupo,
+            adjuntos=[self._a_read(f, cliente) for f in filas],
+        )
+
+    # ----------------------------------------------------------------- subir
+    def subir(
+        self,
+        archivos: list[Any],
+        *,
+        compra_id: uuid.UUID | None = None,
+        venta_id: uuid.UUID | None = None,
+    ) -> AdjuntosLista:
+        """Sube N soportes a una compra o a una venta.
+
+        SE VALIDAN TODOS ANTES DE SUBIR NINGUNO. Si la tercera foto no sirve, no
+        tiene sentido que las dos primeras ya estén en el bucket: el dueño
+        corrige y vuelve a mandar las tres, y quedarían duplicadas.
+
+        Y si R2 falla a mitad de camino, se borran los objetos que alcanzaron a
+        subir. La excepción hace rollback de la sesión, así que las filas
+        desaparecen; sin este barrido los archivos quedarían en el bucket sin
+        ninguna fila que los nombre — invisibles, imborrables y cobrando.
+        """
+        documento = self._documento(compra_id=compra_id, venta_id=venta_id)
+        if not archivos:
+            raise BusinessError("No se recibió ningún archivo")
+        if not r2_configurado():
+            raise BusinessError(MENSAJE_NO_CONFIGURADO, code="r2_no_configurado")
+
+        # Una compra o una venta anulada es un documento muerto: no se le siguen
+        # colgando soportes de pago, igual que no se le registran abonos.
+        if getattr(documento, "estado", "") == ESTADO_ANULADA:
+            raise BusinessError(
+                "El documento está anulado: no se le pueden agregar soportes"
+            )
+
+        ya_tiene = self.repo.contar_de(compra_id=compra_id, venta_id=venta_id)
+        tope = settings.ADJUNTOS_MAX_POR_DOCUMENTO
+        if ya_tiene + len(archivos) > tope:
+            raise BusinessError(
+                f"Caben máximo {tope} soportes por documento. Ya hay {ya_tiene} "
+                f"y está mandando {len(archivos)}"
+            )
+
+        validados = [self._leer_y_validar(a) for a in archivos]
+
+        carpeta = "compras" if compra_id is not None else "ventas"
+        documento_id = compra_id if compra_id is not None else venta_id
+        cliente = R2Client()
+        subidas: list[str] = []
+        quien = self._nombre_de_quien_sube()
+        try:
+            for contenido, tipo, extension, nombre in validados:
+                clave = self._clave(
+                    carpeta=carpeta, documento_id=documento_id, extension=extension
+                )
+                cliente.subir(clave=clave, contenido=contenido, content_type=tipo)
+                subidas.append(clave)
+                adjunto = self.repo.create(
+                    self._prepare_create_data(
+                        {
+                            "compra_id": compra_id,
+                            "venta_id": venta_id,
+                            "object_key": clave,
+                            "nombre_archivo": nombre,
+                            "content_type": tipo,
+                            "tamano_bytes": len(contenido),
+                            "subido_por_nombre": quien,
+                        }
+                    )
+                )
+                self._audit("crear", adjunto.id, None, serialize_entity(adjunto))
+        except Exception:
+            for clave in subidas:
+                try:
+                    cliente.borrar(clave)
+                except Exception:  # pragma: no cover - barrido de mejor esfuerzo
+                    logger_adjuntos.warning(
+                        "Quedó un objeto huérfano en R2 tras una subida fallida: %s", clave
+                    )
+            raise
+
+        return self.listar(compra_id=compra_id, venta_id=venta_id)
+
+    # ------------------------------------------------------------- compartir
+    def compartir(self, adjunto_id: uuid.UUID) -> EnlaceCompartido:
+        """Enlace de MÁS duración para UNA imagen, para mandarla por fuera.
+
+        Queda en la auditoría con su caducidad: es un soporte de pago —con
+        nombres, cuentas y montos— saliendo del sistema hacia un enlace que
+        cualquiera que lo reciba puede reenviar. Que quede escrito quién lo
+        repartió y hasta cuándo sirve.
+        """
+        adjunto = self._adjunto(adjunto_id)
+        if not r2_configurado():
+            raise BusinessError(MENSAJE_NO_CONFIGURADO, code="r2_no_configurado")
+
+        dias = max(1, min(settings.R2_URL_COMPARTIR_DIAS, 7))
+        segundos = dias * 24 * 60 * 60
+        url = R2Client().enlace_firmado(
+            clave=adjunto.object_key,
+            segundos=segundos,
+            nombre_descarga=adjunto.nombre_archivo,
+        )
+        expira = caducidad_utc(segundos)
+        # Se audita el HECHO de compartir, nunca la URL: la URL lleva la firma
+        # dentro, así que guardarla en la auditoría sería guardar el acceso.
+        self._audit(
+            "compartir",
+            adjunto.id,
+            None,
+            {
+                "nombre_archivo": adjunto.nombre_archivo,
+                "compra_id": str(adjunto.compra_id) if adjunto.compra_id else None,
+                "venta_id": str(adjunto.venta_id) if adjunto.venta_id else None,
+                "expira": expira.isoformat(),
+                "dias": dias,
+            },
+        )
+        return EnlaceCompartido(
+            url=url,
+            nombre_archivo=adjunto.nombre_archivo,
+            expira=expira,
+            expira_texto=texto_caducidad(expira),
+            dias=dias,
+        )
+
+    # ---------------------------------------------------------------- borrar
+    def limpiar_de_documento(
+        self, *, compra_id: uuid.UUID | None = None, venta_id: uuid.UUID | None = None
+    ) -> int:
+        """Se lleva los soportes cuando se borra la compra o la venta entera.
+
+        Sin esto, borrar una compra dejaba sus fotos en el bucket para siempre:
+        el documento ya no existe, así que nadie las puede ver ni borrar desde la
+        aplicación, y el dueño sigue pagando ese almacenamiento sin saberlo.
+
+        EN R2 ES DE MEJOR ESFUERZO, al revés que en `eliminar_adjunto`. Ahí el
+        fallo tiene que detener la operación porque borrar el soporte ES la
+        operación; aquí la operación es borrar la compra, y dejarla a medias
+        —o negarla— porque el bucket no respondió sería peor: el dueño quedaría
+        sin poder corregir un registro equivocado por un problema de red. Lo que
+        no se pudo borrar queda en el log.
+
+        Solo lo llaman los servicios de compra y venta, DESPUÉS de haber validado
+        que el documento sí se puede borrar: si no, unos soportes se perderían
+        por un borrado que al final no ocurre.
+        """
+        filas = self.repo.de_documento(compra_id=compra_id, venta_id=venta_id)
+        if not filas:
+            return 0
+        cliente = R2Client() if r2_configurado() else None
+        for fila in filas:
+            if cliente is not None:
+                try:
+                    cliente.borrar(fila.object_key)
+                except Exception:
+                    logger_adjuntos.warning(
+                        "Quedó un objeto en R2 al borrar el documento: %s", fila.object_key
+                    )
+            self.repo.soft_delete(fila, deleted_by=self.ctx.user_id)
+        return len(filas)
+
+    def eliminar_adjunto(self, adjunto_id: uuid.UUID) -> None:
+        """Borra el soporte: PRIMERO el objeto en R2 y después la fila.
+
+        En ese orden a propósito. Si R2 falla, se propaga el error y la fila
+        sobrevive: el dueño ve que no se borró y vuelve a intentar. Al revés
+        —fila primero— un fallo de R2 dejaría el archivo en el bucket sin nada
+        que lo nombre: nadie podría verlo, nadie podría borrarlo, y se seguiría
+        pagando su almacenamiento para siempre.
+        """
+        adjunto = self._adjunto(adjunto_id)
+        if not r2_configurado():
+            raise BusinessError(MENSAJE_NO_CONFIGURADO, code="r2_no_configurado")
+        R2Client().borrar(adjunto.object_key)
+        antes = serialize_entity(adjunto)
+        self.repo.soft_delete(adjunto, deleted_by=self.ctx.user_id)
+        self._audit("eliminar", adjunto.id, antes, serialize_entity(adjunto))
 
 
 class ReventaResumenService:

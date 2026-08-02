@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Any, Literal
 
@@ -82,6 +82,10 @@ class CompraQuesoRead(TenantRead):
     saldo: Decimal
     observaciones: str | None
     abonos: list[AbonoRead] = []
+    # Cuántos soportes de pago tiene. Solo el número: los adjuntos con sus
+    # enlaces se piden aparte, porque firmar una URL por cada foto de cada fila
+    # de la lista sería firmar decenas de enlaces que casi nadie va a abrir.
+    adjuntos_count: int = 0
 
 
 # ------------------------------------------------------------------ ventas
@@ -122,6 +126,8 @@ class VentaQuesoRead(TenantRead):
     saldo: Decimal
     observaciones: str | None
     abonos: list[AbonoRead] = []
+    # Mismo criterio que en la compra: solo el número (ver CompraQuesoRead).
+    adjuntos_count: int = 0
 
 
 # ------------------------------------------- saldos de la cuenta anterior
@@ -164,6 +170,62 @@ class SaldoAnteriorRead(TenantRead):
     saldo: Decimal
     observaciones: str | None
     abonos: list[AbonoRead] = []
+
+
+# ------------------------------------ adjuntos (soportes de transferencia)
+class AdjuntoRead(BaseSchema):
+    """Un soporte de pago, con un enlace TEMPORAL para verlo.
+
+    `url` NO está guardada en ninguna parte: se firma cada vez que se pide esta
+    lista y se muere sola a los pocos minutos. Por eso viene siempre acompañada
+    de `url_expira`: si la pantalla se queda abierta media hora, los enlaces que
+    tiene en memoria ya no sirven y hay que volver a pedir la lista.
+
+    Es `None` cuando el almacenamiento no está configurado: en ese caso la fila
+    igual se muestra (nombre, tamaño, quién lo subió) pero sin poder abrirla.
+    """
+
+    id: uuid.UUID
+    compra_id: uuid.UUID | None
+    venta_id: uuid.UUID | None
+    nombre_archivo: str
+    content_type: str
+    tamano_bytes: int
+    es_imagen: bool
+    subido_por_nombre: str | None
+    created_at: datetime
+    url: str | None = None
+    url_expira: datetime | None = None
+
+
+class AdjuntosLista(BaseSchema):
+    """Los soportes de una compra o de una venta.
+
+    `disponible` en false significa que el almacenamiento no está configurado en
+    este servidor. Se responde 200 con el aviso y no un error, porque no es una
+    falla de quien pregunta y el resto de la pantalla tiene que seguir usable.
+    """
+
+    disponible: bool
+    mensaje: str | None = None
+    # Cuántos soportes más caben (el tope por documento menos los que ya hay)
+    cupo_restante: int = 0
+    adjuntos: list[AdjuntoRead] = []
+
+
+class EnlaceCompartido(BaseSchema):
+    """Enlace de MÁS duración para mandar UNA imagen por fuera (WhatsApp).
+
+    `expira_texto` viene armado desde el backend, en hora de Colombia y en
+    cristiano ("hasta el martes 5 de agosto a las 3:00 p. m."), porque quien
+    reparte el enlace tiene que saber hasta cuándo sirve lo que está repartiendo.
+    """
+
+    url: str
+    nombre_archivo: str
+    expira: datetime
+    expira_texto: str
+    dias: int
 
 
 # ------------------------------------------------------------ conversiones

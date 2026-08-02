@@ -1,3 +1,4 @@
+import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -7,6 +8,7 @@ from app.common.repository import BaseRepository
 from app.modules.reventa.models import (
     DESTINO_BORONA,
     DESTINO_MERMA,
+    AdjuntoReventa,
     CompraQueso,
     ConversionBorona,
     SaldoAnterior,
@@ -671,6 +673,46 @@ class ConversionBoronaRepository(BaseRepository[ConversionBorona]):
     def total_a_borona(self) -> Decimal:
         """Solo lo que se pasó a borona (suma al inventario de borona), histórico."""
         return self._total(DESTINO_BORONA)
+
+
+class AdjuntoReventaRepository(BaseRepository[AdjuntoReventa]):
+    """Soportes de pago de compras y ventas.
+
+    Todo pasa por `base_query()` del repositorio genérico, que ya mete
+    `empresa_id = <la del contexto>` y `deleted_at IS NULL`. Eso es lo que impide
+    que alguien firme un enlace de un archivo de otra empresa: el adjunto
+    simplemente no aparece y sale un 404, no un 403 que confirmaría que existe.
+    """
+
+    model = AdjuntoReventa
+    default_order_by = "created_at"
+
+    def de_documento(
+        self, *, compra_id: uuid.UUID | None = None, venta_id: uuid.UUID | None = None
+    ) -> list[AdjuntoReventa]:
+        """Los soportes de UNA compra o de UNA venta, del más viejo al más nuevo.
+
+        Ese orden es el que espera quien subió las fotos: primero la que mandó
+        primero. Ir al revés haría que "la última que subí" quedara arriba en la
+        lista y abajo en la pantalla del que la recibe.
+        """
+        stmt = self.base_query()
+        if compra_id is not None:
+            stmt = stmt.where(AdjuntoReventa.compra_id == compra_id)
+        else:
+            stmt = stmt.where(AdjuntoReventa.venta_id == venta_id)
+        return list(self.db.scalars(stmt.order_by(AdjuntoReventa.created_at)).all())
+
+    def contar_de(
+        self, *, compra_id: uuid.UUID | None = None, venta_id: uuid.UUID | None = None
+    ) -> int:
+        """Cuántos soportes vigentes tiene el documento (para el tope por documento)."""
+        stmt = self.base_query()
+        if compra_id is not None:
+            stmt = stmt.where(AdjuntoReventa.compra_id == compra_id)
+        else:
+            stmt = stmt.where(AdjuntoReventa.venta_id == venta_id)
+        return int(self.db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
 
 
 class TemporadaRepository(BaseRepository[Temporada]):

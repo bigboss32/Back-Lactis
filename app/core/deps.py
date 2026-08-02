@@ -174,3 +174,34 @@ def require_permission(modulo: str, accion: str) -> Callable[..., RequestContext
         return ctx
 
     return dependency
+
+
+def require_any_permission(modulo: str, *acciones: str) -> Callable[..., RequestContext]:
+    """Deja pasar con CUALQUIERA de las acciones indicadas.
+
+    Existe para operaciones que son la misma cosa vista desde dos lados. El caso
+    que la trajo: adjuntar el soporte de pago a una compra de reventa. Para quien
+    acaba de registrar la compra eso es parte de 'crear'; para quien le agrega la
+    foto al día siguiente es 'editar'. Con `require_permission` habría que
+    escoger una, y el rol 'Compras' —que tiene las dos— pasaría igual, pero
+    cualquier rol futuro que solo tuviera 'crear' no podría adjuntar el soporte
+    de la compra que él mismo acaba de registrar.
+
+    OJO: esto AFLOJA el permiso, así que no se usa para nada destructivo.
+    Eliminar un adjunto sigue exigiendo 'eliminar' a secas, con
+    `require_permission`: en este proyecto ya se coló un borrado pidiendo 'crear'
+    (los abonos) y no se repite.
+    """
+    if not acciones:  # pragma: no cover - error de programación, no de datos
+        raise ValueError("require_any_permission necesita al menos una acción")
+
+    def dependency(request: Request, db: DbSession, ctx: Context) -> RequestContext:
+        if not any(ctx.tiene_permiso(modulo, accion) for accion in acciones):
+            listado = "' o '".join(acciones)
+            raise ForbiddenError(
+                f"No tiene permiso para '{listado}' en el módulo '{modulo}'"
+            )
+        _verificar_suscripcion_vigente(request, db, ctx, modulo)
+        return ctx
+
+    return dependency
