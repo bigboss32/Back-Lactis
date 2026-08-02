@@ -165,4 +165,15 @@ class AnticipoRead(TenantRead):
     observaciones: str | None
     liquidacion_id: uuid.UUID | None
     pago_empleado_id: uuid.UUID | None
+    # "Ya está descontado en una liquidación o en una nómina". Es una SEÑA, no un
+    # candado: desde que el anticipo se puede corregir mientras no se haya pagado,
+    # aplicado y trabado dejaron de ser lo mismo.
     aplicado: bool = False
+    # Estado de la liquidación que lo tiene descontado ('borrador', 'aprobada',
+    # 'parcial', 'pagada') o null si todavía no está en ninguna. Sirve para
+    # avisarle al usuario que al corregirlo va a mover una liquidación ya
+    # generada, y que si estaba aprobada vuelve a borrador.
+    liquidacion_estado: str | None = None
+    # El candado de verdad: ya salió plata contra este anticipo (la liquidación
+    # tiene pagos, sea 'parcial' o 'pagada') o quedó descontado en una nómina.
+    bloqueado: bool = False

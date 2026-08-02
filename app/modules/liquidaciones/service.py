@@ -731,23 +731,31 @@ class LiquidacionService(BaseService[Liquidacion]):
         self._audit("editar", liquidacion.id, antes, serialize_entity(liquidacion))
         return liquidacion
 
-    def recuadrar(self, entity_id: uuid.UUID) -> bool:
-        """Vuelve a cuadrar una liquidación cuyas recepciones acaban de cambiar.
+    def recuadrar(
+        self,
+        entity_id: uuid.UUID,
+        motivo: str = "cambiaron las recepciones de la liquidación",
+    ) -> bool:
+        """Vuelve a cuadrar una liquidación cuyas cifras de origen acaban de cambiar.
 
         Es la contraparte de haber aflojado el candado de Recepción diaria: ahora
         un día se puede corregir mientras su liquidación no esté PAGADA, y esta es
-        la que evita que quede un descuadre silencioso.
+        la que evita que quede un descuadre silencioso. Después se le aflojó el
+        mismo candado a los ANTICIPOS, que entran por aquí igual: el `motivo` es
+        lo único que cambia, y viaja a la bitácora para que mañana se pueda leer
+        POR QUÉ una aprobada amaneció en borrador —si dijera siempre "cambiaron
+        las recepciones", el libro estaría mintiendo la mitad de las veces—.
 
         - En borrador: se recalcula y ya.
         - APROBADA: se DEVUELVE A BORRADOR y se recalcula. Aprobar es un visto
           bueno sobre unas cifras; si las cifras cambian, el visto bueno ya no
           vale y hay que volver a darlo. El cambio de estado queda en auditoría
           aparte del recálculo, para que en el libro se lea qué pasó y por qué.
-        - Pagada, o CON CUALQUIER PAGO REGISTRADO (parcial): no llega aquí (el
-          guardia de Recepción diaria rebota antes), pero si llegara rebota
-          igual: esa plata ya salió de la caja contra estas cifras.
-        - Anulada: no se toca. Al anular se le sueltan las recepciones, así que
-          ninguna debería seguir apuntándole.
+        - Pagada, o CON CUALQUIER PAGO REGISTRADO (parcial): no llega aquí (los
+          guardias de Recepción diaria y de Anticipos rebotan antes), pero si
+          llegara rebota igual: esa plata ya salió de la caja contra estas cifras.
+        - Anulada: no se toca. Al anular se le sueltan las recepciones Y los
+          anticipos, así que ninguno debería seguir apuntándole.
 
         Devuelve True si hubo que devolverla a borrador, para poder avisarle al
         usuario que la tiene que revisar y aprobar otra vez.
@@ -775,10 +783,7 @@ class LiquidacionService(BaseService[Liquidacion]):
                 "editar",
                 liquidacion.id,
                 {"estado": ESTADO_APROBADA},
-                {
-                    "estado": ESTADO_BORRADOR,
-                    "motivo": "cambiaron las recepciones de la liquidación",
-                },
+                {"estado": ESTADO_BORRADOR, "motivo": motivo},
             )
         # Se reúsa el recálculo de siempre (el mismo del botón "Recalcular"), que
         # exige borrador: por eso el cambio de estado va primero.
@@ -1189,12 +1194,194 @@ class AnticipoService(BaseService[Anticipo]):
         for otro in self._CAMPO_POR_TIPO.values():
             if otro != campo:
                 data[otro] = None
-        return super().crear(data)
+        anticipo = super().crear(data)
+        # Nace suelto (sin liquidación), pero la respuesta trae los mismos campos
+        # que el listado: si no se marcaran, la pantalla los vería en nulo y no
+        # sabría si el recién creado se puede corregir.
+        self._marcar_liquidacion([anticipo])
+        return anticipo
 
+    # ------------------------------------------- el candado: "ya se pagó", no
+    #                                              "ya se liquidó"
+    def _liquidacion_de(self, anticipo: Anticipo) -> Liquidacion | None:
+        """La liquidación en la que este anticipo quedó descontado, si hay alguna.
+
+        Va por el repositorio para no saltarse el filtro por empresa ni el de
+        borrados: de esto depende si se deja o no tocar plata de un tenant.
+        """
+        if anticipo.liquidacion_id is None:
+            return None
+        stmt = (
+            LiquidacionRepository(self.db, self.ctx.empresa_id)
+            .base_query()
+            .where(Liquidacion.id == anticipo.liquidacion_id)
+        )
+        return self.db.scalars(stmt).first()
+
+    def _exigir_no_pagado(self, anticipo: Anticipo, verbo: str) -> Liquidacion | None:
+        """El candado de verdad: se traba en cuanto SALIÓ PLATA contra el anticipo.
+
+        Antes se trababa apenas el anticipo tuviera liquidación, sin mirar el
+        estado, así que quedaba congelado desde que se GENERABA la quincena
+        —aunque todavía no se le hubiera pagado un peso a nadie—. Es el mismo
+        problema que ya se resolvió en Recepción diaria y la regla es la misma,
+        copiada de `RecepcionService._exigir_no_pagada` a propósito: dos criterios
+        distintos para la misma pregunta terminan contradiciéndose.
+
+        "Ya salió plata" es TENER ALGÚN PAGO, no estar en 'pagada': si al
+        proveedor se le abonó la mitad y después le cambian el anticipo, ese abono
+        queda contra un neto que ya no existe.
+
+        Devuelve la liquidación tocada, para recuadrarla después de escribir.
+        """
+        # NÓMINA: camino aparte y sin tocar. Un pago de empleado no tiene estados
+        # (ni borrador, ni aprobada) ni pagos parciales: existe = ya se le pagó al
+        # empleado con el anticipo ya descontado. No hay nada que "estar sin
+        # pagar", así que ahí el candado se queda como estaba.
+        if anticipo.pago_empleado_id is not None:
+            raise BusinessError(
+                f"No se puede {verbo} este anticipo: ya se le descontó al empleado "
+                "en un pago de nómina"
+            )
+
+        if anticipo.liquidacion_id is None:
+            return None
+
+        liquidacion = self._liquidacion_de(anticipo)
+        if liquidacion is None:
+            # El anticipo apunta a una liquidación que esta empresa no ve. No
+            # debería pasar; ante la duda se traba, que es el lado seguro cuando
+            # de por medio hay plata.
+            raise BusinessError(
+                f"No se puede {verbo} este anticipo: está aplicado a una "
+                "liquidación que no se puede consultar"
+            )
+
+        # Con candado antes de decidir: se va a mirar `pagado` y enseguida a
+        # reescribir el total de la liquidación. Sin el FOR UPDATE, un pago que
+        # entre en ese instante se lee como "todavía no hay pagos" y el recálculo
+        # le pasa por encima. Ver `_bloquear`.
+        liquidacion = _bloquear(self.db, liquidacion)
+
+        # Dos mensajes porque son dos situaciones distintas para el usuario: de la
+        # pagada no hay nada que hacer por dentro; del abono sí, se puede borrar el
+        # pago, corregir el anticipo y volver a abonar.
+        if liquidacion.estado == ESTADO_PAGADA:
+            raise BusinessError(
+                f"No se puede {verbo} este anticipo: la liquidación en la que se "
+                "descontó ya se pagó. Si la cifra está mala, registre el ajuste en "
+                "la quincena siguiente"
+            )
+        if liquidacion.tiene_pagos:
+            raise BusinessError(
+                f"No se puede {verbo} este anticipo: la liquidación en la que se "
+                "descontó ya tiene un pago registrado. Elimine primero ese pago si "
+                "de verdad hay que corregirlo, o registre el ajuste en la quincena "
+                "siguiente"
+            )
+        return liquidacion
+
+    def _recuadrar(self, liquidacion: Liquidacion | None, motivo: str) -> None:
+        """Vuelve a cuadrar la liquidación a la que se le movió un anticipo.
+
+        Sin esto queda el descuadre silencioso: la liquidación seguiría diciendo
+        "Anticipos aplicados $500.000" cuando el anticipo se corrigió a $300.000 o
+        se borró, y su neto a pagar —la cifra grande del comprobante— saldría mal
+        por la diferencia.
+        """
+        if liquidacion is None:
+            return
+        LiquidacionService(self.db, self.ctx).recuadrar(liquidacion.id, motivo)
+
+    # ------------------------------------------------------- estado para la UI
+    def _marcar_liquidacion(self, anticipos: list[Anticipo]) -> None:
+        """Le cuelga a cada anticipo el estado de su liquidación y si está trabado.
+
+        No son columnas: se resuelven de un solo golpe para toda la lista (una
+        consulta, no una por fila) y se exponen en `AnticipoRead` para que la
+        pantalla sepa cuándo poner el candado. Con el candado viejo bastaba
+        `aplicado`; ahora "aplicado" y "trabado" son cosas distintas, y si la
+        pantalla siguiera mirando `aplicado` seguiría escondiendo los botones de
+        anticipos que sí se pueden corregir.
+        """
+        ids = {a.liquidacion_id for a in anticipos if a.liquidacion_id is not None}
+        estados: dict[uuid.UUID, tuple[str, bool]] = {}
+        if ids:
+            stmt = (
+                LiquidacionRepository(self.db, self.ctx.empresa_id)
+                .base_query()
+                .where(Liquidacion.id.in_(ids))
+            )
+            estados = {
+                liq.id: (liq.estado, liq.tiene_pagos or liq.estado == ESTADO_PAGADA)
+                for liq in self.db.scalars(stmt).all()
+            }
+        for anticipo in anticipos:
+            # El default cubre el anticipo suelto (None, False) y el que apunta a
+            # una liquidación que no se ve, que se muestra trabado igual que lo
+            # rebota el guardia.
+            estado, con_pago = estados.get(
+                anticipo.liquidacion_id, (None, anticipo.liquidacion_id is not None)
+            )
+            anticipo.liquidacion_estado = estado
+            anticipo.bloqueado = con_pago or anticipo.pago_empleado_id is not None
+
+    def obtener(self, entity_id: uuid.UUID) -> Anticipo:
+        anticipo = super().obtener(entity_id)
+        self._marcar_liquidacion([anticipo])
+        return anticipo
+
+    def listar(self, params: PageParams, **kwargs: Any) -> tuple[list[Anticipo], int]:
+        items, total = super().listar(params, **kwargs)
+        self._marcar_liquidacion(items)
+        return items, total
+
+    # ------------------------------------------------------------- correcciones
     def validar_actualizar(self, obj: Anticipo, data: dict[str, Any]) -> None:
-        if obj.aplicado:
-            raise BusinessError("No se puede modificar un anticipo ya aplicado")
+        self._exigir_no_pagado(obj, "modificar")
 
     def validar_eliminar(self, obj: Anticipo) -> None:
-        if obj.aplicado:
-            raise BusinessError("No se puede eliminar un anticipo ya aplicado")
+        self._exigir_no_pagado(obj, "eliminar")
+
+    def actualizar(self, entity_id: uuid.UUID, payload: Any) -> Anticipo:
+        """Corrige un anticipo y deja cuadrada la liquidación que lo tenía.
+
+        La liquidación se apunta ANTES de escribir, porque después de guardar hay
+        que volver a cuadrarla con la cifra nueva.
+        """
+        actual = self.repo.get_or_fail(entity_id)
+        liquidacion = self._exigir_no_pagado(actual, "modificar")
+        data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
+
+        if liquidacion is not None:
+            # Si al anticipo le corrigen la fecha y se pasa del fin del período,
+            # ese adelanto ya no pertenece a esta quincena: se suelta para que lo
+            # recoja la que le toca. Es el mismo criterio que con las recepciones
+            # —si se quedara, el comprobante de junio descontaría un anticipo de
+            # julio— y encaja con `pendientes_de`, que solo recoge los que tienen
+            # fecha hasta el fin del período.
+            nueva_fecha = data.get("fecha") or actual.fecha
+            if nueva_fecha > liquidacion.periodo_fin:
+                data["liquidacion_id"] = None
+
+        anticipo = super().actualizar(entity_id, data)
+        # Se baja el cambio antes de recuadrar: la sesión no hace autoflush y el
+        # recálculo vuelve a leer los anticipos desde la base.
+        self.db.flush()
+        self._recuadrar(liquidacion, "se corrigió un anticipo aplicado a la liquidación")
+        self._marcar_liquidacion([anticipo])
+        return anticipo
+
+    def eliminar(self, entity_id: uuid.UUID) -> None:
+        """Borra el anticipo y deja cuadrada la liquidación que lo tenía.
+
+        El borrado es lógico y `_anticipos_de` filtra por `deleted_at IS NULL`, así
+        que al recuadrar la liquidación el anticipo borrado simplemente deja de
+        sumar y el neto a pagar sube en ese valor, que es lo correcto: si el
+        adelanto nunca existió, no hay nada que descontarle al productor.
+        """
+        anticipo = self.repo.get_or_fail(entity_id)
+        liquidacion = self._exigir_no_pagado(anticipo, "eliminar")
+        super().eliminar(entity_id)
+        self.db.flush()
+        self._recuadrar(liquidacion, "se eliminó un anticipo aplicado a la liquidación")
