@@ -163,6 +163,21 @@ class LotesProduccionPanel(BaseSchema):
     Los totales son la suma EXACTA de los lotes listados. Los tres avisos del
     final no se esconden nunca: significan que falta cargar algo y que la cuenta
     está incompleta.
+
+    Hay DOS desgloses y los dos tienen que cuadrar al peso, porque el usuario los
+    suma a mano en la pantalla:
+
+    1. De dónde sale la utilidad (todo del rango pedido):
+           total_ingresos − total_costo_vendido − total_costo_de_baja
+           − total_gastos = total_utilidad
+    2. Dónde está la plata de la leche de esos lotes (foto de HOY):
+           total_costo_vendido + total_costo_de_baja + total_costo_en_bodega
+           = total_costo
+
+    `total_costo_vendido` es la bisagra: es lo que se le resta a la utilidad y a
+    la vez el pedazo del costo del lote que ya salió de la bodega. Sin esa cifra
+    las tarjetas de la pantalla no se pueden encadenar y quedan como cinco
+    números sueltos, que es justo lo que el usuario reclamó.
     """
 
     lotes: list[LoteProduccionRead] = []
@@ -172,6 +187,12 @@ class LotesProduccionPanel(BaseSchema):
     total_costo: Decimal
     total_ingresos: Decimal
     total_gastos: Decimal = Decimal("0")
+    # Lo que costó el queso que YA salió del lote: es lo que se le resta a la
+    # utilidad y, a la vez, el pedazo del costo del lote que ya no está en bodega.
+    total_costo_vendido: Decimal = Decimal("0")
+    total_costo_de_baja: Decimal = Decimal("0")
+    total_kilos_vendidos: Decimal = Decimal("0")
+    total_kilos_de_baja: Decimal = Decimal("0")
     total_kilos_en_bodega: Decimal
     total_costo_en_bodega: Decimal
     mejor: date | None = None

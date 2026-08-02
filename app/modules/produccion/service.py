@@ -450,6 +450,15 @@ class LoteProduccionService:
             total_costo=sum((f.costo_total for f in filas), CERO),
             total_ingresos=sum((f.ingresos for f in filas), CERO),
             total_gastos=sum((f.gastos for f in filas), CERO),
+            # Estos cuatro son los que dejan encadenar las tarjetas de la pantalla:
+            # lo vendido menos su costo, su baja y sus fletes da la utilidad; y ese
+            # mismo costo vendido, más la baja, más lo que sigue en bodega, da el
+            # costo del lote. Los dos desgloses cuadran al peso porque son sumas de
+            # los mismos renglones ya redondeados.
+            total_costo_vendido=sum((f.costo_vendido for f in filas), CERO),
+            total_costo_de_baja=sum((f.costo_de_baja for f in filas), CERO),
+            total_kilos_vendidos=sum((f.kilos_vendidos for f in filas), CERO),
+            total_kilos_de_baja=sum((f.kilos_de_baja for f in filas), CERO),
             total_kilos_en_bodega=sum((f.kilos_en_bodega for f in filas), CERO),
             total_costo_en_bodega=sum((f.costo_en_bodega for f in filas), CERO),
             mejor=mejor,

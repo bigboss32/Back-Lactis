@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from app.common.crud_router import build_crud_router
 from app.core.context import RequestContext
 from app.core.deps import DbSession, require_permission
+from app.core.exceptions import BusinessError
 from app.core.pagination import Page, PageParams, page_params
 from app.modules.produccion.schemas import (
     LotesProduccionPanel,
@@ -56,7 +57,15 @@ def panel_lotes_produccion(
 
     `desde`/`hasta` recortan qué lotes se MUESTRAN, no el cálculo: la leche del 30
     de junio es el queso de julio y el queso de julio se vende en septiembre.
+
+    El rango se mide por la fecha en que se HIZO el lote, no por la de las ventas:
+    la pregunta es "cuánto dejaron los lotes de estos días", así que un lote de
+    julio sigue siendo de julio aunque se termine de vender en septiembre.
     """
+    if desde and hasta and hasta < desde:
+        # Sin esto, un rango al revés devolvería la pantalla vacía y parecería que
+        # se perdieron los datos, que es lo peor que puede pasarle a esta pantalla.
+        raise BusinessError("La fecha final no puede ser anterior a la inicial")
     return LoteProduccionService(db, ctx).panel(desde, hasta)
 
 
