@@ -484,6 +484,96 @@ class LiquidacionService(BaseService[Liquidacion]):
         )
         return liquidacion
 
+    # ------------------------------------------------- anticipos del borrador
+    def _anticipos_de(self, liquidacion: Liquidacion) -> list[Anticipo]:
+        """Los anticipos que hoy están marcados contra esta liquidación.
+
+        Va por el repositorio para no saltarse el filtro por empresa ni el de
+        borrados: es plata de un tenant y con esto se reescribe el saldo.
+        """
+        stmt = (
+            AnticipoRepository(self.db, self.ctx.empresa_id)
+            .base_query()
+            .where(Anticipo.liquidacion_id == liquidacion.id)
+            .order_by(Anticipo.fecha)
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def _aplicar_anticipos_pendientes(self, liquidacion: Liquidacion) -> Decimal:
+        """Le marca al borrador los anticipos del tercero que todavía no se le han
+        descontado a nadie, y deja el total y el saldo al día.
+
+        Nace de un caso real: la liquidación de un proveedor se generó el mismo
+        día en que después se le registró un anticipo de $500.000. Como los
+        anticipos solo se aplicaban en el instante de generar, el borrador quedó
+        con "Anticipos aplicados $0" y no había forma de recogerlo: volver a darle
+        a "Generar" no hace nada, porque las recepciones ya están apartadas.
+
+        Tres cuidados, en este orden de importancia:
+        · SOLO en borrador. Aprobada o pagada esa cifra ya se le dio a alguien.
+        · Un anticipo no se puede descontar dos veces: `pendientes_de` solo trae
+          los que tienen `liquidacion_id` en nulo, así que el que ya se aplicó en
+          otra quincena no vuelve a aparecer.
+        · El total NO se le suma encima al guardado: se vuelve a sumar desde los
+          anticipos que hoy apuntan a esta liquidación. Así, llamar dos veces
+          (el botón oprimido dos veces, un reintento del navegador) da lo mismo.
+        """
+        if liquidacion.estado != ESTADO_BORRADOR:
+            return Decimal(liquidacion.anticipos)
+
+        anticipos_repo = AnticipoRepository(self.db, self.ctx.empresa_id)
+        if liquidacion.tipo == TIPO_PROVEEDOR:
+            pendientes = (
+                anticipos_repo.pendientes_de(liquidacion.proveedor_id, liquidacion.periodo_fin)
+                if liquidacion.proveedor_id
+                else []
+            )
+        else:
+            pendientes = (
+                anticipos_repo.pendientes_transportador(
+                    liquidacion.transportador_id, liquidacion.periodo_fin
+                )
+                if liquidacion.transportador_id
+                else []
+            )
+        for anticipo in pendientes:
+            anticipo.liquidacion_id = liquidacion.id
+            anticipo.updated_by = self.ctx.user_id
+        # Se baja el cambio antes de volver a leer: sin autoflush, la consulta de
+        # abajo no vería los que se acaban de marcar y el total saldría corto.
+        self.db.flush()
+
+        total = sum((Decimal(a.valor) for a in self._anticipos_de(liquidacion)), CERO)
+        liquidacion.anticipos = total
+        liquidacion.saldo = Decimal(liquidacion.valor_total) - total
+        return total
+
+    def recalcular(self, entity_id: uuid.UUID) -> Liquidacion:
+        """Vuelve a armar el borrador con lo que hay hoy en el sistema.
+
+        Es la salida para el caso de siempre: la liquidación se generó y después
+        se registró un anticipo (o se corrigió una recepción). Un borrador todavía
+        no es plata entregada, así que se puede volver a cuadrar; aprobada o
+        pagada rebota, porque ahí ya se le pagó a alguien.
+        """
+        liquidacion = self.repo.get_or_fail(entity_id)
+        if liquidacion.estado != ESTADO_BORRADOR:
+            raise BusinessError(
+                f"Esta liquidación está en '{liquidacion.estado}': solo se puede "
+                "recalcular mientras sea un borrador"
+            )
+        antes = serialize_entity(liquidacion)
+        # En la del transportador los renglones son la tarifa del flete por día y
+        # agrupan varias recepciones de la ruta: rearmarlos desde las recepciones
+        # del proveedor sería otra cosa. Ahí solo se barren los anticipos.
+        if liquidacion.tipo == TIPO_PROVEEDOR:
+            self._recalcular_desde_recepciones(liquidacion)
+        self._aplicar_anticipos_pendientes(liquidacion)
+        liquidacion.updated_by = self.ctx.user_id
+        self.db.flush()
+        self._audit("editar", liquidacion.id, antes, serialize_entity(liquidacion))
+        return liquidacion
+
     # ------------------------------------------------------------ transiciones
     def _transicionar(self, entity_id: uuid.UUID, desde: tuple[str, ...], hacia: str) -> Liquidacion:
         liquidacion = self.repo.get_or_fail(entity_id)
@@ -499,6 +589,17 @@ class LiquidacionService(BaseService[Liquidacion]):
         return liquidacion
 
     def aprobar(self, entity_id: uuid.UUID) -> Liquidacion:
+        """Aprobar es el último momento en que se puede corregir: enseguida se paga.
+
+        Por eso antes de cambiar el estado se barren los anticipos pendientes del
+        tercero. Si no, un anticipo registrado después de generar la liquidación
+        se quedaría por fuera y se le pagaría al proveedor plata que ya se le
+        había adelantado. Solo aplica sobre el borrador; el anticipo que ya se
+        descontó en otra liquidación no vuelve a entrar.
+        """
+        liquidacion = self.repo.get_or_fail(entity_id)
+        if liquidacion.estado == ESTADO_BORRADOR:
+            self._aplicar_anticipos_pendientes(liquidacion)
         return self._transicionar(entity_id, (ESTADO_BORRADOR,), ESTADO_APROBADA)
 
     def pagar(self, entity_id: uuid.UUID) -> Liquidacion:
@@ -599,24 +700,22 @@ class LiquidacionService(BaseService[Liquidacion]):
                 ("SALDO A PAGAR", pesos(liquidacion.saldo), True),
             ]
         else:
+            # El renglón de anticipos también va en la del transportador: sin él,
+            # el comprobante mostraba VALOR TOTAL y SALDO A PAGAR distintos sin
+            # explicar la diferencia, y el dueño cuadra estas cifras a mano.
             resumen_rows = [
                 ("Total litros", litros(liquidacion.total_litros), False),
                 ("Valor transporte", pesos(liquidacion.valor_transporte), False),
+                ("Anticipos aplicados", f"- {pesos(liquidacion.anticipos)}", False),
                 ("VALOR TOTAL", pesos(liquidacion.valor_total), True),
                 ("SALDO A PAGAR", pesos(liquidacion.saldo), True),
             ]
 
-        anticipos_rows: list[list[Any]] = []
-        if es_proveedor:
-            anticipos = self.db.scalars(
-                AnticipoRepository(self.db, self.ctx.empresa_id)
-                .base_query()
-                .where(Anticipo.liquidacion_id == liquidacion.id)
-            ).all()
-            anticipos_rows = [
-                [a.fecha.strftime("%d/%m/%Y"), pesos(a.valor), a.observaciones or "—"]
-                for a in anticipos
-            ]
+        anticipos = self._anticipos_de(liquidacion)
+        anticipos_rows: list[list[Any]] = [
+            [a.fecha.strftime("%d/%m/%Y"), pesos(a.valor), a.observaciones or "—"]
+            for a in anticipos
+        ]
 
         periodo = (
             f"{liquidacion.periodo_inicio.strftime('%d/%m/%Y')} al "

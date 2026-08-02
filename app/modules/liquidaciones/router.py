@@ -130,6 +130,21 @@ def actualizar_precio_detalle(
     )
 
 
+@router.post(
+    "/{entity_id}/recalcular",
+    response_model=LiquidacionRead,
+    summary="Recalcular un borrador: recoge los anticipos pendientes del tercero",
+)
+def recalcular(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    # Mismo permiso que corregir el precio de un día: recalcular el borrador es
+    # editarlo, no administrarlo.
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "editar")),
+) -> LiquidacionRead:
+    return _to_read(LiquidacionService(db, ctx).recalcular(entity_id))
+
+
 @router.post("/{entity_id}/aprobar", response_model=LiquidacionRead, summary="Aprobar liquidación")
 def aprobar(
     entity_id: uuid.UUID,
