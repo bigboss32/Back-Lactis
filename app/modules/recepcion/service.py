@@ -141,12 +141,27 @@ class RecepcionService(BaseService[RecepcionLeche]):
         *,
         search: str | None = None,
         ruta_id: uuid.UUID | None = None,
+        transportador_id: uuid.UUID | None = None,
     ) -> GrillaQuincena:
         """Grilla proveedores × días como la hoja 'LITROS Y TRANSPORTE' del Excel.
 
         Incluye todos los proveedores activos (aunque no tengan recepciones)
         para que la grilla sirva también como superficie de registro diario.
-        Se puede filtrar por nombre de proveedor (search) y por ruta (ruta_id).
+        Se puede filtrar por nombre de proveedor (search), por ruta (ruta_id) y
+        por transportador (transportador_id).
+
+        Los tres filtros SE COMBINAN (se aplican todos a la vez, no se pisan),
+        pero no trabajan al mismo nivel, y la diferencia importa:
+
+        - search y ruta_id son filtros DE FILA: escogen proveedores (el de la
+          ruta es la ruta del PROVEEDOR, no la de cada recepción) y de los
+          elegidos se muestran todos sus días.
+        - transportador_id es un filtro DE CELDA: el transportador se guarda en
+          CADA recepción (columna transportador_id de recepciones_leche), así
+          que un mismo proveedor puede haber sido recogido por Stella el lunes y
+          por Efraín el martes. Filtrar por Stella deja solo los días de Stella,
+          y los totales de la fila, del día y del pie se recalculan sobre esas
+          celdas: lo que suma la pantalla es exactamente lo que se ve en ella.
         """
         if hasta < desde:
             raise BusinessError("El fin del período no puede ser anterior al inicio")
@@ -159,20 +174,32 @@ class RecepcionService(BaseService[RecepcionLeche]):
             fechas.append(d)
             d += timedelta(days=1)
 
-        recepciones = list(
-            self.db.scalars(
-                self.repo.base_query().where(
-                    RecepcionLeche.fecha >= desde,
-                    RecepcionLeche.fecha <= hasta,
-                    RecepcionLeche.estado == "activo",
-                )
-            ).all()
+        # El filtro de transportador se aplica EN LA CONSULTA (base_query ya trae
+        # empresa_id y deleted_at IS NULL): la quincena de una quesera con muchos
+        # proveedores son cientos de filas y recortarlas después —o peor, en el
+        # navegador— sería un filtro de mentiras.
+        consulta = self.repo.base_query().where(
+            RecepcionLeche.fecha >= desde,
+            RecepcionLeche.fecha <= hasta,
+            RecepcionLeche.estado == "activo",
         )
+        if transportador_id is not None:
+            consulta = consulta.where(RecepcionLeche.transportador_id == transportador_id)
+        recepciones = list(self.db.scalars(consulta).all())
 
-        proveedores = {
-            p.id: p for p in ProveedorRepository(self.db, self.ctx.empresa_id).all(estado="activo")
-        }
-        activos_ids = set(proveedores.keys())
+        activos = ProveedorRepository(self.db, self.ctx.empresa_id).all(estado="activo")
+        activos_ids = {p.id for p in activos}
+        # Sin filtro de transportador la grilla es TAMBIÉN la libreta de registro
+        # diario, por eso arranca con todos los proveedores activos aunque no
+        # tengan nada anotado: las celdas vacías son donde se anota.
+        #
+        # Con filtro de transportador, no. La pregunta ahí es "¿qué recogió
+        # Stella esta quincena?", y contestarla con treinta filas en blanco de
+        # proveedores a los que Stella nunca les recogió no contesta nada:
+        # esconde las pocas filas que sí importan. Quedan solo los proveedores
+        # con leche recogida por él (y por eso tampoco se anota leche nueva con
+        # el filtro puesto: para eso se quita y la grilla vuelve a estar completa).
+        proveedores: dict = {} if transportador_id is not None else {p.id: p for p in activos}
         # Proveedores retirados/eliminados pero con recepciones en el rango también
         # se muestran (marcados como inactivos) para poder liquidarlos.
         for r in recepciones:
