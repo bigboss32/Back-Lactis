@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.common.nombres import canonizar_nombre, clave_de_tercero, unir_nombres
 from app.common.service import BaseService, serialize_entity
 from app.core.config import settings
 from app.core.exceptions import BusinessError, NotFoundError
@@ -159,33 +160,15 @@ def _nombre_archivo_productor(productor: str) -> str:
     return f"estado_cuenta_productor_{limpio or 'productor'}.pdf"
 
 
-def _canonizar_nombre(nombre: str, ya_usados: list[str]) -> str:
-    """Si el nombre ya está registrado escrito de otra forma (mayúsculas o
-    espacios de sobra), devuelve la escritura que ya está guardada. Así
-    "sebastián ruiz" no se vuelve un segundo productor y no se parten sus kilos,
-    su saldo ni su puesto en el ranking.
-
-    La comparación se hace en Python a propósito: el lower() de SQLite solo baja
-    letras ASCII (deja la Á como Á), mientras el de Postgres sí baja acentos. En
-    Python el resultado es el mismo en las dos bases.
-    """
-    limpio = " ".join(nombre.split())
-    clave = limpio.lower()
-    for usado in ya_usados:
-        if " ".join(usado.split()).lower() == clave:
-            return usado
-    return limpio
-
-
-def _clave_tercero(nombre: str) -> str:
-    """Misma clave con la que _canonizar_nombre decide que dos escrituras son el
-    mismo tercero: sin mayúsculas y sin espacios de sobra.
-
-    Se calcula EN PYTHON a propósito, igual que la canonización: el lower() de
-    SQLite no baja los acentos y el de Postgres sí, así que agrupar en SQL daría
-    resultados distintos según la base.
-    """
-    return " ".join((nombre or "").split()).lower()
+# La canonización de nombres de terceros vive ahora en app/common/nombres.py: el
+# flete por tramos necesitó exactamente la misma regla para el nombre del
+# CONDUCTOR, y dos copias habrían significado que el mismo señor se unifica en
+# una pantalla y se parte en dos en la otra. Se conservan estos nombres locales
+# con guion bajo para no tocar las llamadas de este archivo, que ya están
+# probadas y desplegadas.
+_canonizar_nombre = canonizar_nombre
+_clave_tercero = clave_de_tercero
+_unir_nombres = unir_nombres
 
 
 def _agrupar_pendientes(
@@ -207,22 +190,6 @@ def _agrupar_pendientes(
         primero, acumulado = agrupados.get(clave, (nombre, CERO))
         agrupados[clave] = (primero, acumulado + saldo)
     return agrupados
-
-
-def _unir_nombres(*listas: list[str]) -> list[str]:
-    """Une listas de nombres de terceros sin repetir el mismo escrito de otra
-    forma. Gana la escritura de la PRIMERA lista, que es la del sistema: es la
-    que agrupa el ranking y el estado de cuenta.
-
-    El resultado va ordenado por la misma clave con la que se comparan, para que
-    el autocompletado salga alfabético y no en dos bloques pegados.
-    """
-    unicos: dict[str, str] = {}
-    for lista in listas:
-        for nombre in lista:
-            if nombre:
-                unicos.setdefault(_clave_tercero(nombre), nombre)
-    return [unicos[clave] for clave in sorted(unicos)]
 
 
 def _estado_pago(valor_total: Decimal, abonado: Decimal) -> str:

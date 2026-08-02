@@ -1,8 +1,16 @@
+from datetime import date
+
 from sqlalchemy import func, select
 
 from app.common.repository import BaseRepository
 from app.modules.clientes.models import Cliente
-from app.modules.ventas.models import Pago, Venta, VentaDetalle
+from app.modules.ventas.models import (
+    Pago,
+    PagoConductor,
+    Venta,
+    VentaDetalle,
+    VentaTramoFlete,
+)
 
 
 class VentaRepository(BaseRepository[Venta]):
@@ -90,6 +98,123 @@ class VentaRepository(BaseRepository[Venta]):
             ).all()
         )
 
+    # ------------------------------------------- flete por tramos / conductores
+    def _kilos_por_venta(self):
+        """Subconsulta: kilos despachados de cada venta (suma de sus renglones).
+
+        Hace falta para mostrar el "100 kg × 400 = 40.000" de cada tramo. Va como
+        subconsulta agrupada y no como un JOIN directo contra los renglones: con
+        el JOIN, una venta de tres productos repetiría su tramo tres veces y lo
+        que se le debe al conductor saldría multiplicado por tres.
+        """
+        return (
+            select(
+                VentaDetalle.venta_id.label("venta_id"),
+                func.sum(VentaDetalle.cantidad).label("kilos"),
+            )
+            .where(VentaDetalle.deleted_at.is_(None))
+            .group_by(VentaDetalle.venta_id)
+            .subquery()
+        )
+
+    def tramos_de_conductores(
+        self, *, desde: date | None = None, hasta: date | None = None
+    ) -> list[tuple]:
+        """Los tramos con conductor, de las ventas VIVAS de esta empresa.
+
+        Devuelve (conductor_clave, conductor, venta_id, numero, fecha, cliente,
+        origen, destino, valor_por_kilo, valor_total, kilos del despacho).
+
+        Se excluyen las ANULADAS: al anular se reintegra el inventario, o sea que
+        ese despacho no salió, y no se le puede seguir debiendo el viaje a nadie.
+        Es el mismo criterio que usa `eventos_para_lotes`, para que el flete que
+        ve el conductor y el que resta la utilidad sean el mismo flete.
+
+        Los tramos sin conductor (los fletes viejos que se migraron) no entran:
+        no hay a quién pagarle.
+        """
+        kilos = self._kilos_por_venta()
+        stmt = (
+            select(
+                VentaTramoFlete.conductor_clave,
+                VentaTramoFlete.conductor,
+                Venta.id,
+                Venta.numero,
+                Venta.fecha,
+                Cliente.nombre,
+                VentaTramoFlete.origen,
+                VentaTramoFlete.destino,
+                VentaTramoFlete.valor_por_kilo,
+                VentaTramoFlete.valor_total,
+                func.coalesce(kilos.c.kilos, 0),
+            )
+            .join(Venta, Venta.id == VentaTramoFlete.venta_id)
+            .join(Cliente, Cliente.id == Venta.cliente_id)
+            .outerjoin(kilos, kilos.c.venta_id == Venta.id)
+            .where(
+                Venta.empresa_id == self.empresa_id,
+                Venta.deleted_at.is_(None),
+                Venta.estado != "anulada",
+                VentaTramoFlete.deleted_at.is_(None),
+                VentaTramoFlete.conductor_clave.is_not(None),
+            )
+            .order_by(Venta.fecha, Venta.numero, VentaTramoFlete.orden)
+        )
+        if desde:
+            stmt = stmt.where(Venta.fecha >= desde)
+        if hasta:
+            stmt = stmt.where(Venta.fecha <= hasta)
+        return list(self.db.execute(stmt).all())
+
+    def nombres_conductores(self) -> list[str]:
+        """Nombres de conductor ya usados en tramos de esta empresa.
+
+        Van TODOS, incluidos los de ventas anuladas: sirve para autocompletar y
+        para canonizar, y si el nombre desapareciera al anular una venta, el
+        próximo despacho lo volvería a escribir de otra forma y se partiría en
+        dos personas.
+        """
+        stmt = (
+            select(VentaTramoFlete.conductor)
+            .join(Venta, Venta.id == VentaTramoFlete.venta_id)
+            .where(
+                Venta.empresa_id == self.empresa_id,
+                Venta.deleted_at.is_(None),
+                VentaTramoFlete.deleted_at.is_(None),
+                VentaTramoFlete.conductor.is_not(None),
+            )
+            .distinct()
+        )
+        return [nombre for (nombre,) in self.db.execute(stmt).all() if nombre]
+
+
 class PagoRepository(BaseRepository[Pago]):
     model = Pago
     default_order_by = "fecha"
+
+
+class PagoConductorRepository(BaseRepository[PagoConductor]):
+    model = PagoConductor
+    default_order_by = "fecha"
+    search_fields = ("conductor",)
+
+    def pagos_de_conductores(
+        self, *, desde: date | None = None, hasta: date | None = None
+    ) -> list[PagoConductor]:
+        """Los pagos hechos a conductores de esta empresa, opcionalmente del
+        período. `base_query` ya filtra por empresa_id y deleted_at."""
+        stmt = self.base_query()
+        if desde:
+            stmt = stmt.where(PagoConductor.fecha >= desde)
+        if hasta:
+            stmt = stmt.where(PagoConductor.fecha <= hasta)
+        return list(self.db.scalars(stmt.order_by(PagoConductor.fecha)).all())
+
+    def nombres_conductores(self) -> list[str]:
+        """Nombres a los que ya se les ha pagado. Entran en la canonización para
+        que un pago no cree una segunda escritura del mismo señor."""
+        stmt = select(PagoConductor.conductor).where(
+            PagoConductor.empresa_id == self.empresa_id,
+            PagoConductor.deleted_at.is_(None),
+        ).distinct()
+        return [nombre for (nombre,) in self.db.execute(stmt).all() if nombre]

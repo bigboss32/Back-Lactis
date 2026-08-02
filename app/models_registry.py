@@ -57,4 +57,10 @@ from app.modules.usuarios.models import (  # noqa: F401
     Usuario,
     UsuarioRol,
 )
-from app.modules.ventas.models import Pago, Venta, VentaDetalle  # noqa: F401
+from app.modules.ventas.models import (  # noqa: F401
+    Pago,
+    PagoConductor,
+    Venta,
+    VentaDetalle,
+    VentaTramoFlete,
+)

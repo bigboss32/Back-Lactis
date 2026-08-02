@@ -8,13 +8,17 @@ from app.core.deps import DbSession, require_permission
 from app.core.pagination import Page, PageParams, page_params
 from app.modules.ventas.schemas import (
     CarteraCliente,
+    ConductoresPanel,
+    PagoConductorCreate,
+    PagoConductorRead,
     PagoCreate,
     PagoRead,
+    SugerenciasConductores,
     VentaCreate,
     VentaRead,
     VentaUpdate,
 )
-from app.modules.ventas.service import PagoService, VentaService
+from app.modules.ventas.service import ConductorService, PagoService, VentaService
 
 router = APIRouter(tags=["Ventas"])
 
@@ -49,6 +53,86 @@ def cartera(
     ctx: RequestContext = Depends(require_permission("ventas", "consultar")),
 ) -> list[CarteraCliente]:
     return VentaService(db, ctx).cartera()
+
+
+# ------------------------------------------ lo que se le debe a los conductores
+#
+# Va COLGADO DE /ventas y no en un módulo aparte (era la duda del dueño): el dato
+# nace en el tramo del flete de la venta, usa el mismo permiso `ventas` y se mira
+# junto a las ventas. Un módulo propio sería un segundo sitio donde buscar lo
+# mismo, con su propio permiso que habría que acordarse de dar.
+#
+# OJO CON EL ORDEN: estas rutas van ANTES de /{entity_id}, o "conductores" se
+# leería como un uuid de venta y respondería 422.
+@router.get(
+    "/conductores",
+    response_model=ConductoresPanel,
+    summary="Cuánto se le debe a cada conductor de despachos",
+)
+def conductores(
+    db: DbSession,
+    desde: date | None = Query(None),
+    hasta: date | None = Query(None),
+    ctx: RequestContext = Depends(require_permission("ventas", "consultar")),
+) -> ConductoresPanel:
+    return ConductorService(db, ctx).panel(desde, hasta)
+
+
+@router.get(
+    "/conductores/sugerencias",
+    response_model=SugerenciasConductores,
+    summary="Nombres de conductor ya usados (autocompletar)",
+)
+def sugerencias_conductores(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("ventas", "consultar")),
+) -> SugerenciasConductores:
+    return SugerenciasConductores(conductores=ConductorService(db, ctx).sugerencias())
+
+
+@router.get(
+    "/conductores/pagos",
+    response_model=Page[PagoConductorRead],
+    summary="Historial de pagos a conductores",
+)
+def listar_pagos_conductor(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("ventas", "consultar")),
+    params: PageParams = Depends(page_params),
+    conductor: str | None = Query(None, max_length=150),
+) -> Page[PagoConductorRead]:
+    items, total = ConductorService(db, ctx).listar_pagos(params, conductor=conductor)
+    return Page.build(items, total, params)
+
+
+@router.post(
+    "/conductores/pagos",
+    response_model=PagoConductorRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Registrar un pago a un conductor",
+)
+def registrar_pago_conductor(
+    payload: PagoConductorCreate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("ventas", "crear")),
+) -> PagoConductorRead:
+    return ConductorService(db, ctx).registrar_pago(payload)
+
+
+@router.delete(
+    "/conductores/pagos/{pago_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Eliminar un pago mal registrado a un conductor",
+)
+def eliminar_pago_conductor(
+    pago_id: uuid.UUID,
+    db: DbSession,
+    # `eliminar` y NO `crear`: borrar un pago SUBE lo que se le debe al conductor.
+    # Ya nos pasó al revés en otro módulo y quien solo podía registrar terminaba
+    # pudiendo deshacer.
+    ctx: RequestContext = Depends(require_permission("ventas", "eliminar")),
+) -> None:
+    ConductorService(db, ctx).eliminar(pago_id)
 
 
 @router.get("/{entity_id}", response_model=VentaRead, summary="Obtener venta")
