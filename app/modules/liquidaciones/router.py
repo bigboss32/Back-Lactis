@@ -15,6 +15,7 @@ from app.modules.liquidaciones.schemas import (
     LiquidacionDetallePrecioUpdate,
     LiquidacionRead,
     LiquidacionUpdate,
+    PagoLiquidacionCreate,
     PreLiquidacionRead,
     PrevisualizarLiquidacion,
 )
@@ -154,13 +155,47 @@ def aprobar(
     return _to_read(LiquidacionService(db, ctx).aprobar(entity_id))
 
 
-@router.post("/{entity_id}/pagar", response_model=LiquidacionRead, summary="Marcar liquidación como pagada")
+@router.post("/{entity_id}/pagar", response_model=LiquidacionRead, summary="Pagar el saldo completo de la liquidación")
 def pagar(
     entity_id: uuid.UUID,
     db: DbSession,
     ctx: RequestContext = Depends(require_permission("liquidaciones", "administrar")),
 ) -> LiquidacionRead:
     return _to_read(LiquidacionService(db, ctx).pagar(entity_id))
+
+
+@router.post(
+    "/{entity_id}/pagos",
+    response_model=LiquidacionRead,
+    summary="Registrar un pago parcial (abono) a una liquidación aprobada",
+)
+def registrar_pago(
+    entity_id: uuid.UUID,
+    payload: PagoLiquidacionCreate,
+    db: DbSession,
+    # El MISMO permiso que exigía el botón "Pagar" de siempre: entregar plata es
+    # 'administrar'. Con 'crear' —el permiso de generar la quincena, que tiene el
+    # rol Compras— cualquiera que arma liquidaciones podría además pagarlas.
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "administrar")),
+) -> LiquidacionRead:
+    return _to_read(LiquidacionService(db, ctx).registrar_pago(entity_id, payload))
+
+
+@router.delete(
+    "/{entity_id}/pagos/{pago_id}",
+    response_model=LiquidacionRead,
+    summary="Eliminar un pago mal registrado de la liquidación",
+)
+def eliminar_pago(
+    entity_id: uuid.UUID,
+    pago_id: uuid.UUID,
+    db: DbSession,
+    # 'eliminar', NO 'crear'. En reventa esto estaba con 'crear' y dejaba borrar
+    # pagos a quien solo podía anotarlos: borrar un pago le devuelve la deuda al
+    # sistema y es la puerta para tapar una entrega de plata.
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "eliminar")),
+) -> LiquidacionRead:
+    return _to_read(LiquidacionService(db, ctx).eliminar_pago(entity_id, pago_id))
 
 
 @router.post("/{entity_id}/anular", response_model=LiquidacionRead, summary="Anular liquidación")

@@ -321,9 +321,16 @@ def test_una_liquidacion_aprobada_o_pagada_no_se_recalcula(client, base_datos):
 
     intacta = client.get(f"{API}/{liq['id']}", headers=h).json()
     print(f"  la liquidación sigue en · anticipos: {intacta['anticipos']} · "
+          f"neto a pagar: {intacta['neto_a_pagar']} · pagado: {intacta['pagado']} · "
           f"saldo: {intacta['saldo']}")
-    assert D(intacta["anticipos"]) == D("0")
-    assert D(intacta["saldo"]) == D("1159200")
+    assert D(intacta["anticipos"]) == D("0"), "el anticipo tardío NO se le podía aplicar"
+    # Con los pagos parciales, `saldo` es lo que TODAVÍA se debe: al pagarla
+    # completa queda en cero y lo que vale $1.159.200 es el neto a pagar, que ya
+    # está entregado. Antes esta prueba miraba `saldo` porque era la única cifra
+    # que había y no se movía con el pago.
+    assert D(intacta["neto_a_pagar"]) == D("1159200")
+    assert D(intacta["pagado"]) == D("1159200")
+    assert D(intacta["saldo"]) == D("0")
 
 
 def test_recalcular_no_cruza_empresas(client, base_datos):

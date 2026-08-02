@@ -50,8 +50,9 @@ class RecepcionRead(TenantRead):
     observaciones: str | None
     liquidacion_id: uuid.UUID | None
     # Estado de la liquidación que manda sobre este día ('borrador', 'aprobada',
-    # 'pagada') o null si todavía no está en ninguna. Solo 'pagada' bloquea; con
-    # los otros dos se puede editar y la liquidación se recuadra sola.
+    # 'parcial', 'pagada') o null si todavía no está en ninguna. Bloquean las que
+    # ya tienen pagos ('parcial' y 'pagada'); en borrador y aprobada se puede
+    # editar y la liquidación se recuadra sola.
     liquidacion_estado: str | None = None
 
 
@@ -85,10 +86,11 @@ class CeldaGrilla(BaseSchema):
     # flete), sin importar el estado. Es una SEÑA para avisar que al tocarlo se
     # va a mover una liquidación ya emitida, no un candado.
     liquidada: bool
-    # El candado de verdad: alguna de esas liquidaciones ya está PAGADA.
+    # El candado de verdad: alguna de esas liquidaciones ya tiene pagos, sea
+    # 'pagada' o 'parcial'. Basta un abono: esa plata ya salió contra este día.
     pagada: bool = False
-    # 'borrador' | 'aprobada' | 'pagada' | None, para explicar en pantalla qué
-    # pasa si se edita el día.
+    # 'borrador' | 'aprobada' | 'parcial' | 'pagada' | None, para explicar en
+    # pantalla qué pasa si se edita el día.
     liquidacion_estado: str | None = None
     # True si la recepción tiene transportador asignado (se marca con un ícono).
     con_transporte: bool = False

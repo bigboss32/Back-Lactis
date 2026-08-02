@@ -70,6 +70,27 @@ class LiquidacionDetalleRead(BaseSchema):
     valor: Decimal
 
 
+class PagoLiquidacionRead(BaseSchema):
+    id: uuid.UUID
+    fecha: date
+    valor: Decimal
+    observaciones: str | None
+
+
+class PagoLiquidacionCreate(BaseSchema):
+    """Un pago parcial contra una liquidación aprobada.
+
+    Mismos campos que el abono de reventa (fecha, valor, observaciones) para que
+    registrar un pago se sienta igual en todo el sistema. El tope real —que no
+    se pueda abonar más que el saldo— lo pone el servicio, que es el único que
+    sabe cuánto queda debiendo en ese instante.
+    """
+
+    fecha: date
+    valor: Decimal = Field(gt=0)
+    observaciones: str | None = None
+
+
 class LiquidacionRead(TenantRead):
     tipo: str
     proveedor_id: uuid.UUID | None
@@ -86,9 +107,16 @@ class LiquidacionRead(TenantRead):
     valor_transporte: Decimal
     anticipos: Decimal
     valor_total: Decimal
+    # La cifra grande contra la que se abona: valor_total - anticipos. Viaja
+    # calculada desde el modelo para que la pantalla no tenga que repetir la
+    # resta y arriesgarse a mostrar una cifra distinta a la del comprobante.
+    neto_a_pagar: Decimal
+    pagado: Decimal
+    # Lo que TODAVÍA se debe. Se cumple exacto: neto_a_pagar = pagado + saldo.
     saldo: Decimal
     observaciones: str | None
     detalles: list[LiquidacionDetalleRead] = []
+    pagos: list[PagoLiquidacionRead] = []
 
 
 class LiquidacionUpdate(BaseSchema):

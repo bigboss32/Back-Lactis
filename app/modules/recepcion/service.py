@@ -12,6 +12,7 @@ from app.modules.liquidaciones.models import (
     ESTADO_APROBADA,
     ESTADO_BORRADOR,
     ESTADO_PAGADA,
+    ESTADO_PARCIAL,
     TIPO_PROVEEDOR,
     Liquidacion,
 )
@@ -36,7 +37,14 @@ CERO = Decimal("0")
 # leche al proveedor y el flete al transportador): la que manda para el candado
 # es la más trabada de las dos, porque basta con que UNA ya se haya pagado para
 # que ese día no se pueda tocar.
-_ORDEN_DE_CANDADO = (ESTADO_PAGADA, ESTADO_APROBADA, ESTADO_BORRADOR)
+#
+# 'parcial' va arriba, junto a 'pagada': una liquidación a medio pagar TRABA el
+# día igual que una pagada del todo. Si ya salió plata de la caja contra esas
+# cifras, cambiar los litros deja el abono descuadrado.
+_ORDEN_DE_CANDADO = (ESTADO_PAGADA, ESTADO_PARCIAL, ESTADO_APROBADA, ESTADO_BORRADOR)
+
+# Los dos estados con los que un día queda trabado en la grilla y en el guardia.
+_ESTADOS_CON_PAGO = (ESTADO_PAGADA, ESTADO_PARCIAL)
 
 
 def _estado_que_manda(estados: list[str]) -> str | None:
@@ -72,7 +80,7 @@ class RecepcionService(BaseService[RecepcionLeche]):
         return list(self.db.scalars(stmt).all())
 
     def _exigir_no_pagada(self, recepcion: RecepcionLeche, verbo: str) -> list[Liquidacion]:
-        """El candado de verdad: solo se traba cuando ya se PAGÓ.
+        """El candado de verdad: se traba en cuanto SALIÓ PLATA por ese día.
 
         Antes se trababa apenas la recepción tuviera liquidación, sin mirar el
         estado, y el dueño se quedaba sin poder corregir un día desde que la
@@ -80,16 +88,30 @@ class RecepcionService(BaseService[RecepcionLeche]):
         y en aprobada se deja corregir (la liquidación se recuadra sola, ver
         `_recuadrar`) y solo se dice que no cuando la plata ya salió.
 
+        Con los pagos parciales, "ya salió plata" es TENER ALGÚN PAGO, no estar
+        en 'pagada': si al proveedor se le abonó la mitad y después le cambian
+        los litros, ese abono queda contra un total que ya no existe.
+
         Devuelve las liquidaciones tocadas, para recuadrarlas después de escribir.
         """
         liquidaciones = self._liquidaciones_de(recepcion)
-        pagadas = [liq for liq in liquidaciones if liq.estado == ESTADO_PAGADA]
-        if pagadas:
-            de_quien = "la leche" if pagadas[0].tipo == TIPO_PROVEEDOR else "el flete"
+        con_pago = [liq for liq in liquidaciones if liq.tiene_pagos or liq.estado == ESTADO_PAGADA]
+        if con_pago:
+            liq = con_pago[0]
+            de_quien = "la leche" if liq.tipo == TIPO_PROVEEDOR else "el flete"
+            # Dos mensajes porque son dos situaciones distintas para el usuario:
+            # de la pagada no hay nada que hacer por dentro; del abono sí, se
+            # puede borrar el pago, corregir el día y volver a abonar.
+            if liq.estado == ESTADO_PAGADA:
+                raise BusinessError(
+                    f"No se puede {verbo} este día: {de_quien} ya se pagó en una "
+                    "liquidación. Si la cifra está mala, corríjala por fuera del sistema "
+                    "o registre el ajuste en la quincena siguiente"
+                )
             raise BusinessError(
-                f"No se puede {verbo} este día: {de_quien} ya se pagó en una "
-                "liquidación. Si la cifra está mala, corríjala por fuera del sistema "
-                "o registre el ajuste en la quincena siguiente"
+                f"No se puede {verbo} este día: {de_quien} ya tiene un pago "
+                "registrado en una liquidación. Elimine primero ese pago si de verdad "
+                "hay que corregir la cifra, o registre el ajuste en la quincena siguiente"
             )
         return liquidaciones
 
@@ -434,9 +456,10 @@ class RecepcionService(BaseService[RecepcionLeche]):
                 litros=r.cantidad_litros,
                 # "liquidada" es apenas "ya está dentro de una liquidación
                 # generada" (la de la leche o la del flete): es una seña, no un
-                # candado. El candado es "pagada".
+                # candado. El candado es "ya tiene pagos": pagada del todo o
+                # parcial, porque en las dos ya salió plata contra ese día.
                 liquidada=r.liquidacion_estado is not None,
-                pagada=r.liquidacion_estado == ESTADO_PAGADA,
+                pagada=r.liquidacion_estado in _ESTADOS_CON_PAGO,
                 liquidacion_estado=r.liquidacion_estado,
                 con_transporte=r.transportador_id is not None,
             )

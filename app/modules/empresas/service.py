@@ -106,6 +106,7 @@ class EmpresaService(BaseService[Empresa]):
             Anticipo,
             Liquidacion,
             LiquidacionDetalle,
+            PagoLiquidacion,
         )
         from app.modules.notificaciones.models import Notificacion
         from app.modules.produccion.models import Produccion
@@ -136,6 +137,10 @@ class EmpresaService(BaseService[Empresa]):
         detalles = [
             (VentaDetalle, VentaDetalle.venta_id, Venta),
             (LiquidacionDetalle, LiquidacionDetalle.liquidacion_id, Liquidacion),
+            # Los pagos cuelgan de la liquidación y no llevan empresa_id propio,
+            # igual que los abonos de reventa: se borran por su padre o se
+            # quedarían apuntando a una liquidación que ya no existe.
+            (PagoLiquidacion, PagoLiquidacion.liquidacion_id, Liquidacion),
             (AbonoCompraQueso, AbonoCompraQueso.compra_id, CompraQueso),
             (AbonoVentaQueso, AbonoVentaQueso.venta_id, VentaQueso),
             (AbonoSaldoAnterior, AbonoSaldoAnterior.saldo_id, SaldoAnterior),

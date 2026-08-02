@@ -254,11 +254,13 @@ class ContabilidadService:
             )
         ) or CERO
 
+        # 'parcial' entra en el por pagar: se le abonó una parte y el resto sigue
+        # siendo deuda de la quesera. `saldo` ya trae solo lo que falta.
         por_pagar = self.db.scalar(
             select(func.coalesce(func.sum(Liquidacion.saldo), 0)).where(
                 Liquidacion.empresa_id == empresa,
                 Liquidacion.deleted_at.is_(None),
-                Liquidacion.estado.in_(["borrador", "aprobada"]),
+                Liquidacion.estado.in_(["borrador", "aprobada", "parcial"]),
             )
         ) or CERO
 

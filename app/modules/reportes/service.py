@@ -162,8 +162,13 @@ class ReporteService:
             cartera_pendiente=self._sum(
                 Venta.total - Venta.pagado, Venta, Venta.estado.in_(["pendiente", "parcial"])
             ),
+            # 'parcial' cuenta: a esa liquidación se le abonó algo pero todavía
+            # se le debe el resto, y `saldo` ya es solo lo que falta. Dejarla por
+            # fuera haría desaparecer del tablero una deuda que sigue viva.
             liquidaciones_por_pagar=self._sum(
-                Liquidacion.saldo, Liquidacion, Liquidacion.estado.in_(["borrador", "aprobada"])
+                Liquidacion.saldo,
+                Liquidacion,
+                Liquidacion.estado.in_(["borrador", "aprobada", "parcial"]),
             ),
             alertas_no_leidas=alertas,
             litros_por_dia=litros_por_dia,

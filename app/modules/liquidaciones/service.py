@@ -8,6 +8,9 @@ from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session, lazyload
+
 from app.common.service import BaseService, serialize_entity
 from app.core.exceptions import BusinessError, NotFoundError
 from app.core.pagination import PageParams
@@ -17,14 +20,17 @@ from app.modules.liquidaciones.models import (
     ESTADO_APROBADA,
     ESTADO_BORRADOR,
     ESTADO_PAGADA,
+    ESTADO_PARCIAL,
     TIPO_PROVEEDOR,
     TIPO_TRANSPORTADOR,
     Anticipo,
     Liquidacion,
     LiquidacionDetalle,
+    PagoLiquidacion,
 )
 from app.modules.liquidaciones.repository import AnticipoRepository, LiquidacionRepository
 from app.modules.liquidaciones.schemas import (
+    PagoLiquidacionCreate,
     PreLiquidacionAnticipo,
     PreLiquidacionDetalle,
     PreLiquidacionRead,
@@ -47,6 +53,67 @@ def _centavos(valor: Decimal) -> Decimal:
     el total sea exactamente la suma de los renglones que el dueño ve.
     """
     return Decimal(valor).quantize(CENTAVOS, rounding=ROUND_HALF_UP)
+
+
+def _estado_pago(neto_a_pagar: Decimal, pagado: Decimal) -> str:
+    """Estado de una liquidación en firme, deducido SIEMPRE de sus cifras.
+
+    Misma idea (y mismo nombre) que en reventa: el estado no se escribe a mano en
+    cada camino, se vuelve a calcular desde la plata. Así no puede quedar una
+    liquidación marcada "pagada" que todavía deba, ni una "parcial" sin deber
+    nada, que es como aparecen los descuadres que el dueño encuentra a mano.
+
+    Sin pagos vuelve a APROBADA: es el estado del que salió (en borrador no se
+    puede pagar), y es lo que tiene que quedar cuando se borra el último pago.
+    """
+    if pagado <= CERO:
+        return ESTADO_APROBADA
+    return ESTADO_PAGADA if pagado >= neto_a_pagar else ESTADO_PARCIAL
+
+
+def _refrescar_saldo(liquidacion: Liquidacion) -> None:
+    """Deja el saldo al día: lo que falta por pagar.
+
+    Un solo sitio calcula esta resta para que la igualdad que el dueño verifica a
+    mano —neto a pagar = pagado + saldo— no dependa de acordarse de repetirla
+    bien en los cinco caminos que recalculan una liquidación.
+    """
+    liquidacion.saldo = liquidacion.neto_a_pagar - Decimal(liquidacion.pagado or 0)
+
+
+def _bloquear(db: Session, liquidacion: Liquidacion) -> Liquidacion:
+    """Relee la liquidación con FOR UPDATE antes de tocarle la plata.
+
+    Sin esto, dos pagos a la vez sobre la misma liquidación se pisan: los dos
+    leen el `pagado` viejo, los dos validan contra el mismo saldo y el segundo
+    escribe encima del primero. Se pierde un pago —el proveedor reclama y en el
+    sistema no está— y la cuenta deja de cuadrar.
+
+    Tres detalles que ya costaron caro en reventa y que aquí también aplican:
+
+    - `populate_existing`: sin él, el FOR UPDATE bloquea la fila en la base pero
+      SQLAlchemy devuelve el objeto que ya tenía en memoria, CON LOS VALORES
+      VIEJOS. Y es peor de lo que suena: quien llega segundo espera el candado
+      justo mientras el primero escribe, así que al soltarse tiene en la mano
+      exactamente los datos de antes.
+    - `pagos` es lazy="selectin", no "joined": con un LEFT JOIN de por medio
+      Postgres rechaza el FOR UPDATE con 0A000.
+    - Y por eso mismo hay que apagar aquí el eager load de `proveedor` y
+      `transportador`, que SÍ son lazy="joined" sobre FK anulables: sin
+      `lazyload` esta consulta saldría con dos LEFT JOIN y Postgres la rechazaría
+      con ese mismo 0A000. Quedan como carga diferida, así que el nombre del
+      tercero se sigue leyendo igual cuando la respuesta lo pide.
+
+    SQLite descarta el FOR UPDATE en silencio, así que la suite no delata nada de
+    esto. La corrección se sostiene por lectura del código, no por la prueba.
+    """
+    return db.execute(
+        select(Liquidacion)
+        .where(Liquidacion.id == liquidacion.id)
+        .options(lazyload(Liquidacion.proveedor), lazyload(Liquidacion.transportador))
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    ).scalar_one()
 
 
 class LiquidacionService(BaseService[Liquidacion]):
@@ -416,7 +483,7 @@ class LiquidacionService(BaseService[Liquidacion]):
         liquidacion.valor_total = valor_total
         # Los anticipos no se tocan: ya quedaron aplicados a esta liquidación al
         # generarla y corregir un precio no cambia lo que se le adelantó.
-        liquidacion.saldo = valor_total - Decimal(liquidacion.anticipos)
+        _refrescar_saldo(liquidacion)
 
     def _recepciones_transporte_de(self, liquidacion: Liquidacion) -> list[RecepcionLeche]:
         """Las recepciones cuyo FLETE tiene apartado esta liquidación.
@@ -473,7 +540,7 @@ class LiquidacionService(BaseService[Liquidacion]):
             (valor_transporte / total_litros).quantize(CENTAVOS) if total_litros else CERO
         )
         liquidacion.valor_total = valor_transporte
-        liquidacion.saldo = valor_transporte - Decimal(liquidacion.anticipos)
+        _refrescar_saldo(liquidacion)
 
     def actualizar_precio_detalle(
         self, entity_id: uuid.UUID, detalle_id: uuid.UUID, precio_litro: Decimal
@@ -632,7 +699,7 @@ class LiquidacionService(BaseService[Liquidacion]):
 
         total = sum((Decimal(a.valor) for a in self._anticipos_de(liquidacion)), CERO)
         liquidacion.anticipos = total
-        liquidacion.saldo = Decimal(liquidacion.valor_total) - total
+        _refrescar_saldo(liquidacion)
         return total
 
     def recalcular(self, entity_id: uuid.UUID) -> Liquidacion:
@@ -676,8 +743,9 @@ class LiquidacionService(BaseService[Liquidacion]):
           bueno sobre unas cifras; si las cifras cambian, el visto bueno ya no
           vale y hay que volver a darlo. El cambio de estado queda en auditoría
           aparte del recálculo, para que en el libro se lea qué pasó y por qué.
-        - Pagada: no llega aquí (el guardia de Recepción diaria rebota antes),
-          pero si llegara rebota igual: esa plata ya se entregó.
+        - Pagada, o CON CUALQUIER PAGO REGISTRADO (parcial): no llega aquí (el
+          guardia de Recepción diaria rebota antes), pero si llegara rebota
+          igual: esa plata ya salió de la caja contra estas cifras.
         - Anulada: no se toca. Al anular se le sueltan las recepciones, así que
           ninguna debería seguir apuntándole.
 
@@ -688,6 +756,12 @@ class LiquidacionService(BaseService[Liquidacion]):
         if liquidacion.estado == ESTADO_PAGADA:
             raise BusinessError(
                 "Esta liquidación ya está pagada: sus días no se pueden modificar"
+            )
+        # Con un abono hecho ya no vale devolverla a borrador y recalcularla: el
+        # pago se registró contra un total que dejaría de existir.
+        if liquidacion.tiene_pagos:
+            raise BusinessError(
+                "Esta liquidación ya tiene pagos registrados: sus días no se pueden modificar"
             )
         if liquidacion.estado == ESTADO_ANULADA:
             return False
@@ -739,13 +813,142 @@ class LiquidacionService(BaseService[Liquidacion]):
             self._aplicar_anticipos_pendientes(liquidacion)
         return self._transicionar(entity_id, (ESTADO_BORRADOR,), ESTADO_APROBADA)
 
+    # ------------------------------------------------------- pagos parciales
+    def _exigir_pagable(self, liquidacion: Liquidacion) -> None:
+        """Solo se le abona a una liquidación EN FIRME y que todavía deba algo.
+
+        En borrador no, y esto no es formalismo: un borrador se recalcula solo
+        cuando cambian las recepciones o entra un anticipo, así que el total
+        contra el que se abonó puede cambiar debajo del pago y dejarlo
+        descuadrado. Aprobar es justamente el momento en que las cifras quedan
+        en firme.
+        """
+        if liquidacion.estado not in (ESTADO_APROBADA, ESTADO_PARCIAL):
+            raise BusinessError(
+                f"Esta liquidación está en '{liquidacion.estado}': solo se le puede "
+                "pagar a una liquidación aprobada"
+            )
+        if Decimal(liquidacion.saldo) <= CERO:
+            raise BusinessError("Esta liquidación no tiene saldo pendiente por pagar")
+
+    def registrar_pago(self, entity_id: uuid.UUID, payload: Any) -> Liquidacion:
+        """Registra un pago parcial (abono) contra una liquidación aprobada.
+
+        Lo pidió el dueño: a un proveedor se le puede pagar una parte y quedarle
+        debiendo el resto. Mientras deba algo la liquidación queda en PARCIAL, y
+        pasa a PAGADA sola cuando el saldo llega a cero.
+        """
+        liquidacion = self.repo.get_or_fail(entity_id)
+        # Con candado: dos pagos simultáneos sobre la misma liquidación se
+        # pisarían y uno de los dos se perdería (ver `_bloquear`).
+        liquidacion = _bloquear(self.db, liquidacion)
+        self._exigir_pagable(liquidacion)
+
+        valor = Decimal(payload.valor)
+        pendiente = Decimal(liquidacion.saldo)
+        if valor > pendiente:
+            # pesos() y no "{:,.0f}": el formato con coma es gringo y "$1,200,000"
+            # en Colombia se lee como un peso con veinte centavos.
+            raise BusinessError(
+                f"El pago ({pesos(valor)}) supera el saldo pendiente ({pesos(pendiente)})"
+            )
+
+        self.db.add(
+            PagoLiquidacion(
+                liquidacion_id=liquidacion.id,
+                fecha=payload.fecha,
+                valor=valor,
+                observaciones=payload.observaciones,
+                created_by=self.ctx.user_id,
+            )
+        )
+        liquidacion.pagado = Decimal(liquidacion.pagado) + valor
+        _refrescar_saldo(liquidacion)
+        liquidacion.estado = _estado_pago(liquidacion.neto_a_pagar, liquidacion.pagado)
+        liquidacion.updated_by = self.ctx.user_id
+        self.db.flush()
+        # Se refresca la lista de pagos antes de devolverla. La relación es
+        # lazy="selectin": ya venía cargada de la lectura anterior, así que sin
+        # esto la respuesta sale con el `pagado` nuevo pero SIN el pago en la
+        # lista. La pantalla pinta las dos cosas juntas y se contradicen a la
+        # vista.
+        self.db.refresh(liquidacion, ["pagos"])
+        self._audit(
+            "editar", liquidacion.id, None,
+            {"pago": float(valor), "estado": liquidacion.estado, "saldo": float(liquidacion.saldo)},
+        )
+        return liquidacion
+
+    def eliminar_pago(self, entity_id: uuid.UUID, pago_id: uuid.UUID) -> Liquidacion:
+        """Elimina un pago mal registrado: devuelve el saldo y recalcula el estado."""
+        liquidacion = self.repo.get_or_fail(entity_id)
+        liquidacion = _bloquear(self.db, liquidacion)
+        pago = next((p for p in liquidacion.pagos if p.id == pago_id), None)
+        if pago is None:
+            raise NotFoundError("Pago no encontrado")
+        valor = Decimal(pago.valor)
+        liquidacion.pagado = max(Decimal(liquidacion.pagado) - valor, CERO)
+        _refrescar_saldo(liquidacion)
+        liquidacion.estado = _estado_pago(liquidacion.neto_a_pagar, liquidacion.pagado)
+        liquidacion.updated_by = self.ctx.user_id
+        self.db.delete(pago)
+        self.db.flush()
+        # Mismo motivo que al registrar: sin refrescar, la respuesta traería el
+        # pago borrado todavía dentro de la lista.
+        self.db.refresh(liquidacion, ["pagos"])
+        self._audit(
+            "editar", liquidacion.id, None,
+            {
+                "pago_eliminado": float(valor),
+                "estado": liquidacion.estado,
+                "saldo": float(liquidacion.saldo),
+            },
+        )
+        return liquidacion
+
     def pagar(self, entity_id: uuid.UUID) -> Liquidacion:
-        return self._transicionar(entity_id, (ESTADO_APROBADA,), ESTADO_PAGADA)
+        """El botón "Pagar" de siempre: saldar la liquidación de una vez.
+
+        Antes solo cambiaba el estado a 'pagada' (no movía caja ni bancos, y eso
+        se conserva). Ahora hace lo mismo pero DEJANDO CONSTANCIA: registra un
+        pago por todo el saldo pendiente y el estado sale de `_estado_pago`, así
+        que una liquidación pagada de un solo golpe y otra pagada en tres abonos
+        quedan contadas igual y las dos aparecen en el historial.
+
+        El caso raro se respeta: si los anticipos se comieron todo y no queda
+        saldo, no hay pago que registrar y solo se marca pagada, como antes.
+        """
+        liquidacion = self.repo.get_or_fail(entity_id)
+        if liquidacion.estado not in (ESTADO_APROBADA, ESTADO_PARCIAL):
+            raise BusinessError(
+                f"No se puede pasar de '{liquidacion.estado}' a '{ESTADO_PAGADA}'"
+            )
+        pendiente = Decimal(liquidacion.saldo)
+        if pendiente <= CERO:
+            return self._transicionar(
+                entity_id, (ESTADO_APROBADA, ESTADO_PARCIAL), ESTADO_PAGADA
+            )
+        return self.registrar_pago(
+            entity_id,
+            PagoLiquidacionCreate(
+                fecha=date.today(),
+                valor=pendiente,
+                observaciones="Pago total de la liquidación",
+            ),
+        )
 
     def anular(self, entity_id: uuid.UUID) -> Liquidacion:
         liquidacion = self.repo.get_or_fail(entity_id)
         if liquidacion.estado == ESTADO_PAGADA:
             raise BusinessError("No se puede anular una liquidación ya pagada")
+        # Anular suelta las recepciones y los anticipos para volver a liquidar el
+        # período. Con un abono hecho eso dejaría un pago colgando de un
+        # documento que ya no representa nada: primero se borra el pago.
+        if liquidacion.tiene_pagos:
+            raise BusinessError(
+                "No se puede anular una liquidación con pagos registrados: "
+                "elimine primero los pagos"
+            )
         # Liberar recepciones y anticipos para poder re-liquidar
         campo = (
             RecepcionLeche.liquidacion_id
@@ -825,6 +1028,17 @@ class LiquidacionService(BaseService[Liquidacion]):
             for d in liquidacion.detalles
         ]
 
+        # El renglón "Pagado" solo aparece cuando de verdad se abonó algo. Sin él
+        # el comprobante de una liquidación a medio pagar mostraría un SALDO A
+        # PAGAR más chico que VALOR TOTAL menos anticipos, sin explicar por qué:
+        # el dueño cuadra estas cifras a mano y esa diferencia muda es justo lo
+        # que le hace perder la confianza en el papel.
+        pagado_rows = (
+            [("Pagado", f"- {pesos(liquidacion.pagado)}", False)]
+            if Decimal(liquidacion.pagado or 0) > CERO
+            else []
+        )
+
         if es_proveedor:
             resumen_rows = [
                 ("Total litros", litros(liquidacion.total_litros), False),
@@ -833,6 +1047,7 @@ class LiquidacionService(BaseService[Liquidacion]):
                 ("Bonificaciones", f"+ {pesos(liquidacion.bonificaciones)}", False),
                 ("Descuentos", f"- {pesos(liquidacion.descuentos)}", False),
                 ("Anticipos aplicados", f"- {pesos(liquidacion.anticipos)}", False),
+                *pagado_rows,
                 ("VALOR TOTAL", pesos(liquidacion.valor_total), True),
                 ("SALDO A PAGAR", pesos(liquidacion.saldo), True),
             ]
@@ -844,6 +1059,7 @@ class LiquidacionService(BaseService[Liquidacion]):
                 ("Total litros", litros(liquidacion.total_litros), False),
                 ("Valor transporte", pesos(liquidacion.valor_transporte), False),
                 ("Anticipos aplicados", f"- {pesos(liquidacion.anticipos)}", False),
+                *pagado_rows,
                 ("VALOR TOTAL", pesos(liquidacion.valor_total), True),
                 ("SALDO A PAGAR", pesos(liquidacion.saldo), True),
             ]
