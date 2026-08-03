@@ -18,7 +18,12 @@ from app.modules.liquidaciones.models import (  # noqa: F401
     PagoLiquidacion,
 )
 from app.modules.notificaciones.models import Notificacion  # noqa: F401
-from app.modules.produccion.models import Produccion, TipoQueso  # noqa: F401
+from app.modules.produccion.models import (  # noqa: F401
+    CicloDespacho,
+    CicloDespachoLote,
+    Produccion,
+    TipoQueso,
+)
 from app.modules.proveedores.models import Proveedor  # noqa: F401
 from app.modules.recepcion.models import RecepcionLeche  # noqa: F401
 from app.modules.reventa.models import (  # noqa: F401

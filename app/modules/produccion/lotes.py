@@ -74,6 +74,10 @@ class ProduccionEvento:
     litros_usados: Decimal
     kilos: Decimal
     merma: Decimal
+    # El id de la producción en la base. Sirve para que la merma de un cierre de
+    # ciclo pueda decir A QUÉ TANDA se le carga, en vez de irse a la más vieja de
+    # la cola. Es opcional para no romper a quien arme eventos a mano.
+    produccion_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,10 @@ class ExistenciaEvento:
     referencia: str | None
 
 
+MOTIVO_AJUSTE = "ajuste"
+MOTIVO_MERMA_CICLO = "merma_ciclo"
+
+
 @dataclass(frozen=True)
 class BajaEvento:
     """Queso que sale de la bodega sin venderse: un ajuste de inventario hacia
@@ -110,12 +118,30 @@ class BajaEvento:
 
     Se le carga al lote más viejo, como todo lo demás, y su costo se pierde: es
     plata que salió del lote sin ingreso.
+
+    HAY DOS CLASES DE BAJA Y SE REPARTEN DISTINTO:
+
+    - `motivo='ajuste'` (`produccion_id` en None): el ajuste suelto que alguien
+      anotó a mano. Nadie sabe de qué tanda era el queso que se dañó, así que va
+      FIFO, del lote más viejo al más nuevo, como todo lo demás.
+    - `motivo='merma_ciclo'` (`produccion_id` con dueño): la merma de un CIERRE
+      DE CICLO, que ya viene repartida entre las tandas del ciclo a prorrata de
+      sus kilos. Aquí sí se sabe de quién es cada kilo, y por eso se le carga a
+      SU tanda y no a la más vieja. Si fuera FIFO, la merma de todo el ciclo
+      caería siempre sobre la última tanda —la única que todavía tiene kilos en
+      la cola cuando se cierra—, y esa tanda se vería pésima mientras las demás
+      se verían perfectas, siendo que todas se secaron por igual.
+
+    Si la tanda dueña ya no tiene kilos en la cola (se despachó completa), los
+    que falten se toman FIFO del resto: no se inventa inventario para que cuadre.
     """
 
     fecha: date
     orden: int
     tipo_queso_id: uuid.UUID
     kilos: Decimal
+    produccion_id: uuid.UUID | None = None
+    motivo: str = MOTIVO_AJUSTE
 
 
 @dataclass(frozen=True)
@@ -163,11 +189,18 @@ class BajaDelLote:
     Se guarda con fecha y no solo acumulado porque el estado de resultados
     necesita saber cuánto se dañó DENTRO de un mes: sin la fecha habría que
     repartir el total del lote a ojo entre los meses.
+
+    `motivo` distingue el ajuste anotado a mano (queso que se dañó) de la merma
+    de un cierre de ciclo (queso que se secó). Las dos bajan la bodega y las dos
+    le restan a la utilidad —son plata que salió sin ingreso—, pero una es un
+    problema y la otra es lo normal del oficio, y el dueño necesita verlas
+    separadas para no salir a buscar un culpable que no existe.
     """
 
     fecha: date
     kilos: Decimal
     costo: Decimal
+    motivo: str = MOTIVO_AJUSTE
 
 
 @dataclass
@@ -248,6 +281,8 @@ class LoteProduccion:
     origen: str = ORIGEN_PRODUCCION
     # Solo en los de origen 'existencia': cómo se identificó esa carga
     referencia: str | None = None
+    # El id de la producción en la base, para poder cargarle la merma de su ciclo
+    produccion_id: uuid.UUID | None = None
     detalle_leche: list[LecheDelLote] = field(default_factory=list)
     detalle_ventas: list[VentaDelLote] = field(default_factory=list)
     detalle_bajas: list[BajaDelLote] = field(default_factory=list)
@@ -255,6 +290,11 @@ class LoteProduccion:
     kilos_vendidos: Decimal = CERO
     kilos_de_baja: Decimal = CERO
     kilos_en_bodega: Decimal = CERO
+    # DE LOS `kilos_de_baja`, esta parte es merma de un cierre de ciclo: queso que
+    # se secó entre que se pesó al hacerlo y se pesó al venderlo. El resto de la
+    # baja son ajustes anotados a mano (se dañó, se perdió). Es un SUBCONJUNTO, no
+    # un cuarto destino: no entra en la suma `vendidos + baja + bodega`.
+    kilos_merma_ciclo: Decimal = CERO
     # Plata
     costo_leche: Decimal = CERO
     costo_transporte: Decimal = CERO
@@ -265,6 +305,8 @@ class LoteProduccion:
     gastos: Decimal = CERO
     costo_vendido: Decimal = CERO  # costo de los kilos que se vendieron
     costo_de_baja: Decimal = CERO  # costo de los kilos que se dieron de baja
+    # Subconjunto de `costo_de_baja`: lo que valía el queso que se secó
+    costo_merma_ciclo: Decimal = CERO
     costo_en_bodega: Decimal = CERO
     # Litros que no encontraron leche registrada de dónde salir
     litros_sin_recepcion: Decimal = CERO
@@ -387,6 +429,53 @@ def _q(valor: Decimal) -> Decimal:
     return valor.quantize(CENTAVOS)
 
 
+# ------------------------------------------------- reparto de la merma del ciclo
+def repartir_merma_ciclo(
+    kilos_por_lote: list[Decimal], merma: Decimal, paso: Decimal = CENTAVOS
+) -> list[Decimal]:
+    """Reparte la merma de un ciclo entre sus tandas, a prorrata de sus kilos.
+
+    POR QUÉ A PRORRATA Y NO FIFO. Al cerrar el ciclo, las tandas viejas ya salieron
+    completas y la única que todavía tiene kilos en la cola es la última. Un
+    reparto FIFO le cargaría TODA la merma del ciclo a esa última tanda: se vería
+    pésima y las demás perfectas, cuando en realidad todas se secaron igual. Lo que
+    pasó de verdad es que cada tanda rindió menos kilos vendibles de los que pesó,
+    y eso es proporcional a lo que cada una produjo.
+
+    EL ÚLTIMO LOTE SE LLEVA EL RESIDUO del redondeo, igual que `_repartir_plata` en
+    reventa/lotes.py. Sin eso, repartir 5 kg entre tres tandas de 50, 50 y 30 daría
+    1,92 + 1,92 + 1,15 = 4,99 y faltaría un gramo: el dueño suma esta columna a
+    mano contra la cifra grande y no puede faltarle nada.
+
+    Los lotes con cero kilos no reciben nada (no produjeron, no se secaron), y si
+    NINGUNO tiene kilos no se reparte nada: no se le inventa merma a nadie.
+
+    `paso` es la precisión del reparto. Por defecto centavos de kilo (0.01), que es
+    lo que aguantan las columnas de kilos del sistema; se puede pedir más fina para
+    comprobar el reparto con kilos de tres decimales.
+    """
+    total_kilos = sum((k for k in kilos_por_lote if k > CERO), CERO)
+    if total_kilos <= CERO or merma <= CERO:
+        return [CERO for _ in kilos_por_lote]
+
+    # El residuo va al ÚLTIMO lote que tenga kilos, no al último de la lista: si la
+    # lista terminara en un lote de cero kilos, el residuo caería sobre alguien que
+    # no produjo nada y ese renglón no se podría explicar.
+    ultimo_con_kilos = max(i for i, k in enumerate(kilos_por_lote) if k > CERO)
+    partes: list[Decimal] = []
+    acumulado = CERO
+    for indice, kilos in enumerate(kilos_por_lote):
+        if kilos <= CERO:
+            partes.append(CERO)
+        elif indice == ultimo_con_kilos:
+            partes.append(merma - acumulado)
+        else:
+            parte = (merma * kilos / total_kilos).quantize(paso)
+            acumulado += parte
+            partes.append(parte)
+    return partes
+
+
 def repartir_produccion(
     recepciones: list[RecepcionEvento],
     producciones: list[ProduccionEvento],
@@ -453,6 +542,7 @@ def repartir_produccion(
                 litros_usados=produccion.litros_usados,
                 kilos_producidos=produccion.kilos,
                 merma=produccion.merma,
+                produccion_id=produccion.produccion_id,
             )
             reparto.lotes.append(lote)
 
@@ -509,8 +599,18 @@ def repartir_produccion(
         elif clase == "baja":
             baja: BajaEvento = evento  # type: ignore[assignment]
             cola = cola_queso.get(baja.tipo_queso_id, [])
+            # Si la baja trae dueño (es merma de un cierre de ciclo), se atiende
+            # PRIMERO a su tanda y solo lo que falte se toma FIFO del resto. Un
+            # ajuste suelto no trae dueño y va FIFO desde el principio.
+            if baja.produccion_id is not None:
+                orden_cola = sorted(
+                    cola,
+                    key=lambda q: 0 if q.lote.produccion_id == baja.produccion_id else 1,
+                )
+            else:
+                orden_cola = cola
             restante = baja.kilos
-            for queso in cola:
+            for queso in orden_cola:
                 if restante <= CERO:
                     break
                 if queso.kilos <= CERO:
@@ -521,8 +621,14 @@ def repartir_produccion(
                 costo_baja = _q(toma * queso.costo_kilo)
                 queso.lote.kilos_de_baja += toma
                 queso.lote.costo_de_baja += costo_baja
+                if baja.motivo == MOTIVO_MERMA_CICLO:
+                    queso.lote.kilos_merma_ciclo += toma
+                    queso.lote.costo_merma_ciclo += costo_baja
                 queso.lote.detalle_bajas.append(
-                    BajaDelLote(fecha=baja.fecha, kilos=toma, costo=costo_baja)
+                    BajaDelLote(
+                        fecha=baja.fecha, kilos=toma, costo=costo_baja,
+                        motivo=baja.motivo,
+                    )
                 )
             if restante > CERO:
                 # Se dio de baja queso que no está en ningún lote: mismo aviso que

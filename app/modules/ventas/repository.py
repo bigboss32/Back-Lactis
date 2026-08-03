@@ -45,6 +45,47 @@ class VentaRepository(BaseRepository[Venta]):
         return list(self.db.execute(stmt).all())
 
 
+    def kilos_de_queso_del_rango(self, desde: date, hasta: date) -> list[tuple]:
+        """Kilos de queso que SALIERON DE VERDAD entre dos fechas, por tipo.
+
+        Es la mitad derecha de la cuenta del cierre de ciclo: se produjo X y de
+        verdad salió Y. Va por TIPO DE QUESO y no en un solo total porque no se
+        puede compensar el doble crema que faltó con el campesino que sobró: son
+        dos productos, dos rendimientos y dos colas de inventario distintas.
+
+        Mismo criterio de vigencia que `eventos_para_lotes`, y por la misma razón
+        de siempre: si una venta cuenta para la utilidad del lote, tiene que
+        contar para la merma del ciclo, y al revés. Con criterios distintos las
+        dos pantallas dirían cosas distintas de los mismos kilos.
+
+        Devuelve (tipo_queso_id, tipo_queso, kilos).
+        """
+        from app.modules.inventario.models import Producto
+        from app.modules.produccion.models import TipoQueso
+
+        return list(
+            self.db.execute(
+                select(
+                    Producto.tipo_queso_id,
+                    TipoQueso.nombre,
+                    func.sum(VentaDetalle.cantidad),
+                )
+                .join(Venta, Venta.id == VentaDetalle.venta_id)
+                .join(Producto, Producto.id == VentaDetalle.producto_id)
+                .join(TipoQueso, TipoQueso.id == Producto.tipo_queso_id)
+                .where(
+                    Venta.empresa_id == self.empresa_id,
+                    Venta.deleted_at.is_(None),
+                    Venta.estado != "anulada",
+                    VentaDetalle.deleted_at.is_(None),
+                    Producto.tipo_queso_id.is_not(None),
+                    Venta.fecha >= desde,
+                    Venta.fecha <= hasta,
+                )
+                .group_by(Producto.tipo_queso_id, TipoQueso.nombre)
+            ).all()
+        )
+
     def eventos_para_lotes(self) -> list[tuple]:
         """Renglones de venta de QUESO TERMINADO, en orden cronológico.
 

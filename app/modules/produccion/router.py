@@ -1,7 +1,7 @@
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 
 from app.common.crud_router import build_crud_router
 from app.core.context import RequestContext
@@ -9,6 +9,10 @@ from app.core.deps import DbSession, require_permission
 from app.core.exceptions import BusinessError
 from app.core.pagination import Page, PageParams, page_params
 from app.modules.produccion.schemas import (
+    CicloCerrar,
+    CicloDespachoRead,
+    CicloPropuesta,
+    CiclosPanel,
     LotesProduccionPanel,
     ProduccionCreate,
     ProduccionRead,
@@ -18,6 +22,7 @@ from app.modules.produccion.schemas import (
     TipoQuesoUpdate,
 )
 from app.modules.produccion.service import (
+    CicloDespachoService,
     LoteProduccionService,
     ProduccionService,
     TipoQuesoService,
@@ -67,6 +72,116 @@ def panel_lotes_produccion(
         # se perdieron los datos, que es lo peor que puede pasarle a esta pantalla.
         raise BusinessError("La fecha final no puede ser anterior a la inicial")
     return LoteProduccionService(db, ctx).panel(desde, hasta)
+
+
+# --------------------------------------------------- ciclos de despacho
+# El queso se pesa al hacerlo y al venderlo, y entre las dos se seca. Esa
+# diferencia se queda en la bodega como queso que no existe hasta que se cierra
+# el ciclo, que es el único momento en que la resta "producido − salido" se
+# puede hacer sin adivinar. Ver `CicloDespachoService` para el porqué completo.
+@router.get(
+    "/ciclos",
+    response_model=CiclosPanel,
+    summary="Ciclos de despacho cerrados, y el que toca cerrar ahora",
+)
+def panel_ciclos(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("produccion", "consultar")),
+) -> CiclosPanel:
+    """La lista de ciclos con la merma que se aceptó en cada uno, y la PROPUESTA
+    del que sigue con su cuenta ya hecha.
+
+    La propuesta es la mitad del asunto: el ciclo se repite cada semana, y si
+    hubiera que acordarse de abrirlo y cerrarlo, en tres semanas nadie lo haría y
+    los kilos fantasma volverían a acumularse.
+    """
+    return CicloDespachoService(db, ctx).panel()
+
+
+@router.get(
+    "/ciclos/propuesta",
+    response_model=CicloPropuesta | None,
+    summary="La cuenta de un ciclo antes de cerrarlo (no escribe nada)",
+)
+def propuesta_ciclo(
+    db: DbSession,
+    desde: date | None = Query(None, description="Primer día del ciclo"),
+    hasta: date | None = Query(None, description="Último día del ciclo"),
+    ctx: RequestContext = Depends(require_permission("produccion", "consultar")),
+) -> CicloPropuesta | None:
+    """Se produjeron X kg, salieron Y, ya se habían bajado Z a mano, la diferencia
+    son W kg que valen $V. Con el desglose por tipo de queso y por tanda.
+
+    Sin `desde`/`hasta` propone el ciclo que sigue: arranca el día después del
+    último cierre y dura siete días, sin pasar de hoy. Con fechas, calcula el
+    rango que se le pida, que es lo que permite corregir la propuesta antes de
+    aceptarla.
+
+    NO ESCRIBE NADA. Es la pantalla que el dueño lee antes de decidir.
+    """
+    if desde and hasta and hasta < desde:
+        raise BusinessError("La fecha final no puede ser anterior a la inicial")
+    return CicloDespachoService(db, ctx).propuesta(desde, hasta)
+
+
+@router.post(
+    "/ciclos/cerrar",
+    response_model=CicloDespachoRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Cerrar el ciclo: registra la merma y la baja de la bodega",
+)
+def cerrar_ciclo(
+    payload: CicloCerrar,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("produccion", "editar")),
+) -> CicloDespachoRead:
+    """ESTO SÍ ESCRIBE: es plata que se da por perdida.
+
+    Reparte la merma del ciclo entre sus tandas a prorrata de los kilos de cada
+    una, y por cada parte crea un ajuste de inventario hacia abajo. El queso
+    fantasma sale de la bodega, su costo se le resta al lote y la utilidad por
+    lote pasa a ser la real.
+
+    Si la cuenta huele mal —merma negativa o desproporcionada— no pasa sin
+    `aceptar_advertencias`: puede ser una venta sin anotar y no queso secándose.
+
+    El permiso es `produccion:editar`, el mismo que usan cerrar y reabrir las
+    temporadas de reventa, que es la operación equivalente del otro módulo.
+    """
+    servicio = CicloDespachoService(db, ctx)
+    return servicio._leer(servicio.cerrar(payload))
+
+
+@router.post(
+    "/ciclos/{entity_id}/reabrir",
+    response_model=CicloDespachoRead,
+    summary="Reabrir un ciclo cerrado por equivocación (deshace su merma)",
+)
+def reabrir_ciclo(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("produccion", "editar")),
+) -> CicloDespachoRead:
+    """Borra los ajustes de inventario que creó el cierre: el queso vuelve a la
+    bodega, el costo vuelve al lote y la utilidad vuelve a lo que decía antes."""
+    servicio = CicloDespachoService(db, ctx)
+    return servicio._leer(servicio.reabrir(entity_id))
+
+
+@router.delete(
+    "/ciclos/{entity_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Eliminar un ciclo (solo si está abierto)",
+)
+def eliminar_ciclo(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("produccion", "eliminar")),
+) -> None:
+    """Solo se puede borrar un ciclo REABIERTO. Uno cerrado tiene su merma
+    registrada en el inventario: borrarlo dejaría kilos dados de baja sin nada
+    que los explique."""
+    CicloDespachoService(db, ctx).eliminar(entity_id)
 
 
 @router.get(
