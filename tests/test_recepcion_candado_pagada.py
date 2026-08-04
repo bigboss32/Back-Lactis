@@ -49,7 +49,8 @@ def _montar(client, headers, dias, precio="1800", nombre="Libardo", con_flete=Fa
         ).json()
         transportador = client.post(
             "/api/v1/transportadores",
-            json={"nombre": f"Stella {nombre}", "ruta_id": ruta["id"], "valor_transporte": "100"},
+            json={"nombre": f"Stella {nombre}", "valor_transporte": "100",
+                  "rutas": [{"ruta_id": ruta["id"], "valor_transporte": "100"}]},
             headers=headers,
         ).json()
     proveedor = client.post(

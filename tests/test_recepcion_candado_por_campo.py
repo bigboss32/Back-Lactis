@@ -19,8 +19,10 @@ todo. La regla correcta va por campo, según a quién le mueve la plata cada uno
       litros, el precio y la fecha rebotan. Es el caso del dueño.
   (b) FLETE PAGADO, leche sin pagar    → el transportador rebota, y el precio por
       litro (que es plata del proveedor, no del transportador) se corrige.
-  (c) LAS DOS PAGADAS                  → solo quedan la ruta, la sucursal y las
-      observaciones. Ningún campo de plata.
+  (c) LAS DOS PAGADAS                  → solo quedan la sucursal y las
+      observaciones. Ningún campo de plata. (LA RUTA YA NO ESTÁ EN ESA LISTA:
+      desde que cada ruta tiene su propia tarifa por litro, cambiarla recalcula
+      el flete guardado, así que es plata y el flete pagado la traba.)
   (d) FLETE EN BORRADOR                → cambiar el transportador suelta el día de
       esa liquidación y la recalcula sin él, como ya hacía antes.
   (e) Multiempresa: la Quesera B no le corrige el transportador a un día de la
@@ -260,8 +262,11 @@ def test_con_el_flete_pagado_el_transportador_rebota(client, base_datos):
     print(f"  aviso    : {estado['candado_aviso']}")
     assert estado["flete_pagado"] is True
     assert estado["leche_pagada"] is False
+    # `ruta_id` entró a esta lista cuando la tarifa pasó a ser POR RUTA: la ruta
+    # del día escoge cuánto se le paga por litro, así que con el flete ya pagado
+    # cambiarla movería una cifra que ya salió de la caja.
     assert set(estado["campos_bloqueados"]) == {
-        "cantidad_litros", "transportador_id", "fecha", "estado"
+        "cantidad_litros", "transportador_id", "ruta_id", "fecha", "estado"
     }
     # El proveedor no se ofrece NUNCA, ni cuando nada lo traba: no existe en
     # RecepcionUpdate, así que anunciarlo mandaría al usuario a intentar algo
@@ -303,16 +308,23 @@ def test_con_el_flete_pagado_el_transportador_rebota(client, base_datos):
 # ---------------------------------------------------------------------------
 # (c) LAS DOS PAGADAS: no queda ningún campo de plata
 # ---------------------------------------------------------------------------
-def test_con_las_dos_pagadas_solo_quedan_la_ruta_la_sucursal_y_las_observaciones(
+def test_con_las_dos_pagadas_solo_quedan_la_sucursal_y_las_observaciones(
     client, base_datos
 ):
     """Cuando las dos platas ya salieron no queda NINGÚN campo de plata por tocar.
 
-    Lo que sí se deja son la ruta, la sucursal y las observaciones: son datos de
-    clasificación y de anotación, no entran en ninguna liquidación y no le mueven
-    un peso a nadie. Se decidió dejarlos editables a propósito, porque poder
+    Lo que sí se deja son la sucursal y las observaciones: son el dato de
+    clasificación y la anotación libre, no entran en ninguna liquidación y no le
+    mueven un peso a nadie. Se decidió dejarlos editables a propósito, porque poder
     escribir "este día lo recogió Efraín, quedó mal anotado" es justamente lo que
     salva la historia cuando la cifra ya no se puede corregir.
+
+    LA RUTA SALIÓ DE ESTA LISTA, y es el cambio a fijarse: antes era una etiqueta
+    más, pero desde que cada ruta tiene su propia tarifa por litro ("cada ruta
+    puede tener un valor diferente de litro por leche") la ruta del día es la que
+    escoge cuánto se le paga al transportador. Con el flete ya pagado, cambiarla
+    recalcularía el flete guardado y el comprobante que el transportador tiene en
+    la mano dejaría de cuadrar contra sus recepciones.
     """
     h = auth_headers(client, "admin.a")
     recepcion, liqs, _ = _montar_el_dia_del_dueno(client, h, con_flete=True)
@@ -329,18 +341,23 @@ def test_con_las_dos_pagadas_solo_quedan_la_ruta_la_sucursal_y_las_observaciones
     print(f"  aviso    : {estado['candado_aviso']}")
     assert estado["leche_pagada"] is True
     assert estado["flete_pagado"] is True
-    assert sorted(estado["campos_editables"]) == ["observaciones", "ruta_id", "sucursal_id"]
+    assert sorted(estado["campos_editables"]) == ["observaciones", "sucursal_id"]
     # El aviso menciona a los DOS, porque son dos platas de dos personas
     aviso = estado["candado_aviso"].lower()
     assert "la leche de este día ya se le pagó" in aviso
     assert "el flete de este día ya se le pagó" in aviso
-    assert "sí se puede corregir la ruta, la sucursal y las observaciones" in aviso
+    assert "sí se puede corregir la sucursal y las observaciones" in aviso
+    assert "no se puede cambiar" in aviso and "la ruta" in aviso
 
-    # Todo lo que es plata rebota
+    # Todo lo que es plata rebota. La ruta va en la lista desde que escoge la
+    # tarifa: es plata del transportador, igual que el transportador mismo.
     for campo, valor in (
         ("cantidad_litros", "60"),
         ("precio_litro", "2100"),
         ("transportador_id", _transportador(client, h, "Efraín", "120")["id"]),
+        ("ruta_id", client.post(
+            "/api/v1/rutas", json={"nombre": "Ruta Nueva"}, headers=h
+        ).json()["id"]),
         ("fecha", "2026-07-20"),
     ):
         r = client.put(f"{RECEPCIONES}/{recepcion['id']}", json={campo: valor}, headers=h)

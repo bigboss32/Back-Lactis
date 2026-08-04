@@ -1,7 +1,7 @@
 """Utilidades de exportación a PDF (reportlab)."""
 import io
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import Path
 from typing import Any, Sequence
 from xml.sax.saxutils import escape as _escape_xml
@@ -49,14 +49,58 @@ def _cell_value(value: Any) -> Any:
     return value
 
 
+DOS_DECIMALES = Decimal("0.01")
+ENTERO = Decimal("1")
+# Ninguna columna del sistema pasa de doce dígitos enteros; por encima de cuarenta
+# no hay nada sensato que redondear y estirar la precisión sería regalarle memoria a
+# una cifra absurda. Ver _medio_arriba.
+MAX_DIGITOS_ENTEROS = 40
+
+
+def _medio_arriba(valor: Any, exponente: Decimal) -> Decimal:
+    """Redondea con el MEDIO PARA ARRIBA de todo el proyecto, no con el de Python.
+
+    ES LA REGLA DE LA CASA: 0,005 SUBE (-> 0,01). Los schemas de entrada redondean
+    así (`app/common/schemas.py::a_dos_decimales`) y los servicios calculan la plata
+    así, pero los formateadores de este archivo se estaban quedando con el redondeo
+    POR OMISIÓN de Python, que es el del banquero (ROUND_HALF_EVEN: el medio va al
+    dígito par). Y eso hacía que el PAPEL dijera una cifra distinta de la pantalla:
+
+      · `pesos(2.505)` imprimía $2,50 cuando la regla escrita en el propio proyecto
+        dice que tiene que dar $2,51;
+      · `pesos(1800.005)` imprimía $1.800,00 cuando la columna guarda $1.800,01, o
+        sea que el comprobante contradecía a la base de datos por un centavo.
+
+    El PDF es el papel que se le entrega a un tercero —al productor, al conductor,
+    al cliente— y que después se compara contra la pantalla. Si dicen cifras
+    distintas, la discusión la pierde el dueño.
+
+    NO LEVANTA NUNCA, y es a propósito: `quantize` se rinde con InvalidOperation
+    cuando el resultado no cabe en la precisión del contexto, y acá eso sería un 500
+    al descargar el documento. La precisión va holgada y acotada, y una cifra tan
+    grande que no cabe en ninguna columna se imprime tal como venga.
+    """
+    numero = Decimal(valor or 0)
+    if not numero.is_finite() or numero.adjusted() >= MAX_DIGITOS_ENTEROS:
+        return numero
+    with localcontext() as ctx:
+        ctx.prec = MAX_DIGITOS_ENTEROS + 3
+        return numero.quantize(exponente, rounding=ROUND_HALF_UP)
+
+
 def _miles(valor: Any, decimales: int) -> str:
     """Número con separador de miles PUNTO y decimal COMA (estilo colombiano).
 
     El formato de Python (`:,.0f`) separa los miles con coma, que en Colombia es
     justo el separador decimal: $18,525,000 se lee mal. Se voltean los dos
     separadores usando un marcador temporal para no pisar el trabajo hecho.
+
+    El número se redondea antes de formatear (ver `_medio_arriba`): el `:,.Nf` de
+    Python redondea con el del banquero, y era por acá por donde ese redondeo se
+    metía en los cuatro formateadores.
     """
-    texto = f"{Decimal(valor or 0):,.{decimales}f}"
+    numero = _medio_arriba(valor, Decimal(1).scaleb(-decimales))
+    texto = f"{numero:,.{decimales}f}"
     return texto.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
 
 
@@ -82,7 +126,11 @@ def pesos(valor: Any) -> str:
     cliente no pudiera reproducir el total de su propia fila: 100 kg a
     $19.500,50 son $1.950.050, no $1.950.000.
     """
-    numero = Decimal(valor or 0)
+    # Se redondea PRIMERO y se decide después si hay centavos. Al revés —que era
+    # como estaba— la decisión se tomaba sobre la cifra cruda: $0,999 contaba como
+    # "tiene centavos" y salía "$1,00" en vez de "$1". Y el redondeo es el medio para
+    # arriba de la casa, no el del banquero: ver `_medio_arriba`.
+    numero = _medio_arriba(valor, DOS_DECIMALES)
     signo = "-" if numero < 0 else ""
     absoluto = abs(numero)
     # Los centavos son 0 o 2 dígitos, nunca 1: en plata "$19.500,5" se lee como si
@@ -98,7 +146,7 @@ def kilogramos(valor: Any) -> str:
     Antes se imprimía un solo decimal y la columna no sumaba: cinco ventas de
     10,34 kg salían como cinco "10,3 kg" (51,5) contra un total de 51,7 kg.
     """
-    numero = Decimal(valor or 0).quantize(Decimal("0.01"))
+    numero = _medio_arriba(valor, DOS_DECIMALES)
     return f"{_miles(numero, _decimales_utiles(numero, 2))} kg"
 
 
@@ -117,7 +165,7 @@ def barras(valor: Any) -> str:
     Se pluraliza porque el documento lo lee una persona: "1 barras" se ve como un
     error del sistema y le quita confianza a todo lo demás que diga la hoja.
     """
-    numero = Decimal(valor or 0).quantize(Decimal("1"))
+    numero = _medio_arriba(valor, ENTERO)
     unidad = "barra" if abs(numero) == 1 else "barras"
     return f"{_miles(numero, 0)} {unidad}"
 
@@ -185,11 +233,24 @@ def build_liquidacion_pdf(
     periodo: str,
     detalle_headers: Sequence[str],
     detalle_rows: Sequence[Sequence[Any]],
+    detalle_col_widths: Sequence[float] | None = None,
+    detalle_wrap_cols: Sequence[int] = (),
     resumen_rows: Sequence[tuple[str, str, bool]],
     anticipos_rows: Sequence[Sequence[Any]] = (),
     observaciones: str | None = None,
 ) -> bytes:
-    """Comprobante de liquidación con membrete, resumen, anticipos y firmas."""
+    """Comprobante de liquidación con membrete, resumen, anticipos y firmas.
+
+    `detalle_col_widths`: ancho de cada columna del detalle EN CENTÍMETROS. Si no
+    viene, la tabla se mide sola como siempre. Hace falta desde que el comprobante
+    del transportador lleva una columna de texto (la ruta): con el ancho automático
+    un nombre largo empujaba las cifras fuera de la hoja.
+
+    `detalle_wrap_cols`: los índices de las columnas del detalle que son TEXTO
+    LIBRE. Esas se imprimen envueltas (parten en varias líneas en vez de
+    desbordarse) y alineadas a la izquierda. Por omisión ninguna, así que el
+    comprobante del proveedor sale idéntico a como salía.
+    """
     buffer = io.BytesIO()
     styles = getSampleStyleSheet()
     st_company = ParagraphStyle("Company", parent=styles["Title"], fontSize=16, textColor=BRAND, spaceAfter=0, leading=18, alignment=0)
@@ -267,25 +328,43 @@ def build_liquidacion_pdf(
 
     # --- Detalle diario
     elements.append(Paragraph("Detalle diario", st_head))
+    # El texto libre del detalle (hoy: el nombre de la ruta) va en Paragraph para
+    # que se envuelva dentro de su celda. Y va escapado con _texto por lo mismo que
+    # todo lo demás: una ruta llamada "La Y <arriba>" borraría texto del recibo.
+    st_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=8, leading=9.5)
+    envuelven = set(detalle_wrap_cols)
     det_data = [list(detalle_headers)] + [
-        [str(_cell_value(v)) if v is not None else "" for v in row] for row in detalle_rows
+        [
+            Paragraph(_texto(v), st_celda)
+            if i in envuelven
+            else (str(_cell_value(v)) if v is not None else "")
+            for i, v in enumerate(row)
+        ]
+        for row in detalle_rows
     ]
-    det = Table(det_data, repeatRows=1, hAlign="LEFT")
-    det.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), BRAND),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
-                ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
-        )
+    det = Table(
+        det_data,
+        colWidths=[ancho * cm for ancho in detalle_col_widths] if detalle_col_widths else None,
+        repeatRows=1,
+        hAlign="LEFT",
     )
+    det_style = [
+        ("BACKGROUND", (0, 0), (-1, 0), BRAND),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    # Las columnas de texto van a la izquierda, encabezado incluido: la regla de
+    # arriba alinea a la derecha todo lo que no sea la primera columna, y un
+    # "Ruta / Nápoles" pegado a las cifras se lee como si fuera una cifra más.
+    for columna in sorted(envuelven):
+        det_style.append(("ALIGN", (columna, 0), (columna, -1), "LEFT"))
+    det.setStyle(TableStyle(det_style))
     elements += [det, Spacer(1, 12)]
 
     # --- Resumen (con VALOR TOTAL y SALDO destacados)
@@ -1374,5 +1453,5 @@ def litros(valor: Any) -> str:
     pudiera reproducir su propio total. Los miles van con punto y los decimales
     con coma, como se escribe en Colombia.
     """
-    numero = Decimal(valor or 0).quantize(Decimal("0.01"))
+    numero = _medio_arriba(valor, DOS_DECIMALES)
     return f"{_miles(numero, _decimales_utiles(numero, 2))} L"

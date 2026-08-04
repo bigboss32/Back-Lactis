@@ -19,6 +19,23 @@ from app.modules.ventas.models import Venta
 
 CERO = Decimal("0")
 
+# LA LECHE QUE CUENTA EN EL TABLERO: solo los días ACTIVOS.
+#
+# El día 'inactivo' es el que la quesera decidió NO contar (leche devuelta, un
+# registro que se anotó por error, un día que no se paga). Ya sale de los dos
+# comprobantes —el del productor y el del conductor—, de la grilla de la quincena y
+# del costo de la leche en el estado de resultados. Faltaba acá, y el tablero es la
+# PRIMERA pantalla que ve el dueño: con un solo día apagado le decía 100 litros de
+# hoy y $180.000 de leche de la quincena mientras contabilidad y las liquidaciones
+# decían cero sobre la misma leche. Dos pantallas del mismo sistema contándole
+# distinto es justo lo que le hace perder la confianza en las dos.
+#
+# Es una sola expresión reutilizada en las SEIS consultas de recepciones del
+# tablero (litros de hoy, litros de la quincena, valor de la leche, la quincena
+# anterior del comparativo, la serie de 30 días y el top de proveedores): escribirla
+# seis veces es como una se queda sin el filtro.
+SOLO_DIAS_ACTIVOS = RecepcionLeche.estado == "activo"
+
 
 def _inicio_quincena(hoy: date) -> date:
     return hoy.replace(day=1) if hoy.day <= 15 else hoy.replace(day=16)
@@ -63,6 +80,7 @@ class ReporteService:
                 .where(
                     RecepcionLeche.empresa_id == empresa,
                     RecepcionLeche.deleted_at.is_(None),
+                    SOLO_DIAS_ACTIVOS,
                     RecepcionLeche.fecha >= hace_30,
                 )
                 .group_by(RecepcionLeche.fecha)
@@ -108,6 +126,7 @@ class ReporteService:
                 .where(
                     RecepcionLeche.empresa_id == empresa,
                     RecepcionLeche.deleted_at.is_(None),
+                    SOLO_DIAS_ACTIVOS,
                     RecepcionLeche.fecha >= inicio_quincena,
                 )
                 .group_by(Proveedor.nombre)
@@ -127,13 +146,16 @@ class ReporteService:
         return DashboardResponse(
             fecha=hoy,
             litros_hoy=self._sum(
-                RecepcionLeche.cantidad_litros, RecepcionLeche, RecepcionLeche.fecha == hoy
+                RecepcionLeche.cantidad_litros, RecepcionLeche,
+                SOLO_DIAS_ACTIVOS, RecepcionLeche.fecha == hoy,
             ),
             litros_quincena=self._sum(
-                RecepcionLeche.cantidad_litros, RecepcionLeche, RecepcionLeche.fecha >= inicio_quincena
+                RecepcionLeche.cantidad_litros, RecepcionLeche,
+                SOLO_DIAS_ACTIVOS, RecepcionLeche.fecha >= inicio_quincena,
             ),
             valor_leche_quincena=self._sum(
-                RecepcionLeche.valor_neto, RecepcionLeche, RecepcionLeche.fecha >= inicio_quincena
+                RecepcionLeche.valor_neto, RecepcionLeche,
+                SOLO_DIAS_ACTIVOS, RecepcionLeche.fecha >= inicio_quincena,
             ),
             produccion_kg_mes=self._sum(Produccion.peso_kg, Produccion, Produccion.fecha >= inicio_mes),
             ventas_mes=self._sum(
@@ -144,6 +166,7 @@ class ReporteService:
             ),
             litros_quincena_anterior=self._sum(
                 RecepcionLeche.cantidad_litros, RecepcionLeche,
+                SOLO_DIAS_ACTIVOS,
                 RecepcionLeche.fecha >= inicio_quincena_anterior,
                 RecepcionLeche.fecha <= fin_quincena_anterior,
             ),

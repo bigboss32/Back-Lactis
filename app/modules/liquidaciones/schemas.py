@@ -1,11 +1,42 @@
 import uuid
 from datetime import date
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field
 
 from app.common.schemas import BaseSchema, TenantRead
+
+# LA PLATA QUE SE ESCRIBE EN ESTE MÓDULO, con la forma EXACTA de la columna que la
+# va a guardar: `pagos_liquidacion.valor` y `anticipos.valor` son Numeric(14, 2).
+#
+# ES EL MOLDE DE transportadores/schemas.py::tarifa_por_litro, y está acá porque
+# faltaba: con un `Field(gt=0)` pelado el schema aceptaba cifras que la columna no
+# guarda, y eso no da un error, da una cifra distinta y callada.
+#
+#   · UN PAGO PARCIAL de $100.000,005 sobre un neto de $1.080.000,00 respondía
+#     pagado = $100.000,005 y saldo = $979.999,995. En Postgres las dos columnas
+#     suben el medio centavo POR SEPARADO: pagado + saldo da $1.080.000,01 contra
+#     un neto de $1.080.000,00, y se rompe la igualdad que el propio modelo promete
+#     ("se cumple exacto: neto_a_pagar = pagado + saldo"). El comprobante imprime
+#     VALOR TOTAL, Pagado y SALDO A PAGAR y el dueño resta a mano: ahí el centavo
+#     se ve. SQLite lo tapaba pasando por float, y por eso la suite no lo delató;
+#   · UN PAGO DE $0,001 pasaba el `gt=0`, se guardaba en $0,00 y dejaba la
+#     liquidación TRABADA: el estado quedaba en 'parcial' —así que recalcular la
+#     rebota— pero `tiene_pagos` decía False, porque $0,00 no es mayor que cero, y
+#     entonces el candado no la veía pagada. Nadie podía destrabarla. Con el tercer
+#     decimal rechazado, ese pago ya no entra;
+#   · UN ANTICIPO de 1E+20 entraba también, y en Postgres el INSERT reventaba con
+#     un 22003 (numeric field overflow): un 500 en la cara del usuario.
+#
+# ACÁ SE RECHAZA Y NO SE REDONDEA, al contrario que en los litros de la recepción:
+# un pesaje con tres decimales es un dato real que hay que llevar a dos, pero
+# "$100.000,005" de plata entregada es un dato equivocado, y redondearlo en
+# silencio cambiaría la cifra de un pago sin que quien lo registró se enterara.
+def plata(**extra: Any) -> Any:
+    """El `Field` de una columna de plata Numeric(14, 2). Una sola definición para
+    todas: copiarla es como terminan aceptando cosas distintas."""
+    return Field(max_digits=14, decimal_places=2, **extra)
 
 
 class GenerarLiquidaciones(BaseSchema):
@@ -26,6 +57,12 @@ class PrevisualizarLiquidacion(BaseSchema):
 
 class PreLiquidacionDetalle(BaseSchema):
     fecha: date
+    # La ruta del renglón: solo la traen los renglones del flete, donde el renglón
+    # es (día, ruta) y un mismo día puede venir dos veces con tarifas distintas. En
+    # los del proveedor viaja en nulo. El nombre va al lado del id para que la
+    # pantalla no tenga que pedir el catálogo de rutas aparte.
+    ruta_id: uuid.UUID | None = None
+    ruta_nombre: str | None = None
     litros: Decimal
     precio_litro: Decimal
     valor: Decimal
@@ -65,6 +102,11 @@ class LiquidacionDetalleRead(BaseSchema):
     # orden) apuntarían al renglón equivocado.
     id: uuid.UUID
     fecha: date
+    # Ver PreLiquidacionDetalle: en el comprobante del transportador el renglón es
+    # (día, ruta) y estos dos campos son lo que distingue los dos renglones de un
+    # día en que hizo las dos rutas. En el del proveedor van en nulo.
+    ruta_id: uuid.UUID | None = None
+    ruta_nombre: str | None = None
     litros: Decimal
     precio_litro: Decimal
     valor: Decimal
@@ -87,7 +129,7 @@ class PagoLiquidacionCreate(BaseSchema):
     """
 
     fecha: date
-    valor: Decimal = Field(gt=0)
+    valor: Decimal = plata(gt=0)
     observaciones: str | None = None
 
 
@@ -114,6 +156,12 @@ class LiquidacionRead(TenantRead):
     pagado: Decimal
     # Lo que TODAVÍA se debe. Se cumple exacto: neto_a_pagar = pagado + saldo.
     saldo: Decimal
+    # Y LA VUELTA DEL SALDO CUANDO QUEDA POR DEBAJO DE CERO: cuánto le quedó
+    # debiendo el tercero al negocio, en POSITIVO (cero cuando no debe nada). Con
+    # esto la pantalla puede decir "Henri le queda debiendo $4.955,77" en vez de
+    # mostrar un "saldo -$4.955,77" bajo el rótulo "Saldo a pagar", que se lee al
+    # revés. El porqué completo está en `Liquidacion.le_queda_debiendo`.
+    le_queda_debiendo: Decimal
     observaciones: str | None
     detalles: list[LiquidacionDetalleRead] = []
     pagos: list[PagoLiquidacionRead] = []
@@ -143,13 +191,13 @@ class AnticipoCreate(BaseSchema):
     transportador_id: uuid.UUID | None = None
     empleado_id: uuid.UUID | None = None
     fecha: date
-    valor: Decimal = Field(gt=0)
+    valor: Decimal = plata(gt=0)
     observaciones: str | None = None
 
 
 class AnticipoUpdate(BaseSchema):
     fecha: date | None = None
-    valor: Decimal | None = Field(default=None, gt=0)
+    valor: Decimal | None = plata(default=None, gt=0)
     observaciones: str | None = None
 
 

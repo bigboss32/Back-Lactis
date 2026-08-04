@@ -43,11 +43,13 @@ def _escenario(client, headers):
 
     stella = _crear(
         client, headers, "/api/v1/transportadores",
-        {"nombre": "Stella", "ruta_id": norte["id"], "valor_transporte": "100"},
+        {"nombre": "Stella", "valor_transporte": "100",
+         "rutas": [{"ruta_id": norte["id"], "valor_transporte": "100"}]},
     )
     efrain = _crear(
         client, headers, "/api/v1/transportadores",
-        {"nombre": "Efraín", "ruta_id": sur["id"], "valor_transporte": "130"},
+        {"nombre": "Efraín", "valor_transporte": "130",
+         "rutas": [{"ruta_id": sur["id"], "valor_transporte": "130"}]},
     )
 
     alberto = _crear(

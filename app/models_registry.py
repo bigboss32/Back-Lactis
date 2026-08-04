@@ -43,7 +43,10 @@ from app.modules.suscripcion.models import (  # noqa: F401
     FuentePagoSuscripcion,
     PagoSuscripcion,
 )
-from app.modules.transportadores.models import Transportador  # noqa: F401
+from app.modules.transportadores.models import (  # noqa: F401
+    Transportador,
+    TransportadorRuta,
+)
 from app.modules.transporte.models import (  # noqa: F401
     AbonoFlete,
     Vehiculo,

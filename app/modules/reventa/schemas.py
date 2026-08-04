@@ -1,42 +1,21 @@
 import uuid
 from datetime import date, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from pydantic import BeforeValidator, Field, model_validator
 
-from app.common.schemas import BaseSchema, TenantRead
+from app.common.schemas import BaseSchema, TenantRead, a_dos_decimales
 
-DOS_DECIMALES = Decimal("0.01")
 CERO = Decimal("0")
 
 
-def _a_dos_decimales(valor: Any) -> Any:
-    """Redondea los kilos a dos decimales EN LA ENTRADA.
-
-    Las columnas de kilos son Numeric(12,2). Si entran tres decimales, Postgres
-    guarda el número redondeado pero el servicio calcula el total con el valor
-    CRUDO: la fila queda contradiciéndose sola. Con 10,005 kg a $1.000 se guarda
-    "10,01 kg" y "$10.005", y el dueño —que multiplica a mano— ve que no le da.
-
-    SQLite no delata nada de esto: se guarda los tres decimales tan tranquilo, y
-    por eso la suite pasaba con el defecto puesto.
-
-    Redondear aquí hace que lo validado, lo guardado y lo calculado sean el MISMO
-    número, en los dos motores. Se redondea hacia arriba en el medio (0,005 ->
-    0,01), que es lo que espera quien pesa en una báscula.
-    """
-    if valor is None or isinstance(valor, bool):
-        return valor
-    try:
-        return Decimal(str(valor)).quantize(DOS_DECIMALES, rounding=ROUND_HALF_UP)
-    except (ArithmeticError, TypeError, ValueError):
-        # Que lo rechace Pydantic con su mensaje, no un error raro desde aquí.
-        return valor
-
-
-# Kilos: siempre dos decimales, los mismos que caben en la base.
-Kilos = Annotated[Decimal, BeforeValidator(_a_dos_decimales)]
+# Kilos: siempre dos decimales, los mismos que caben en la base (las columnas de
+# kilos son Numeric(12, 2)). El redondeo es el compartido `a_dos_decimales`: era
+# una COPIA de la misma función que hay en recepción, y el defecto del `except`
+# —el redondeo que se rendía y devolvía el valor CRUDO, así que 1E+30 se guardaba
+# sin redondear— estaba en las dos copias. Ver su docstring.
+Kilos = Annotated[Decimal, BeforeValidator(a_dos_decimales)]
 
 
 def _barras_enteras(valor: Any) -> Any:

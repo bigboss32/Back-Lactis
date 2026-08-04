@@ -22,7 +22,7 @@ from app.modules.produccion.models import TipoQueso
 from app.modules.proveedores.models import Proveedor
 from app.modules.rutas.models import Ruta
 from app.modules.sucursales.models import Sucursal
-from app.modules.transportadores.models import Transportador
+from app.modules.transportadores.models import Transportador, TransportadorRuta
 from app.modules.usuarios.models import Permiso, Rol, Usuario
 
 logger = get_logger("seed")
@@ -308,10 +308,15 @@ def seed_empresa_demo(db: Session, roles: dict[str, Rol]) -> None:
     db.flush()
 
     for nombre, ruta_nombre, tarifa in TRANSPORTADORES_DEMO:
+        # La tarifa va en la ruta Y en la general: en la ruta porque es donde el
+        # código la busca ahora, y en la general para que el demo siga dando la
+        # misma cifra si a un día se le quita la ruta.
         db.add(
             Transportador(
-                empresa_id=empresa.id, nombre=nombre,
-                ruta_id=rutas[ruta_nombre].id, valor_transporte=tarifa,
+                empresa_id=empresa.id, nombre=nombre, valor_transporte=tarifa,
+                rutas=[
+                    TransportadorRuta(ruta_id=rutas[ruta_nombre].id, valor_transporte=tarifa)
+                ],
             )
         )
     for nombre, vereda, precio, ruta_nombre in PROVEEDORES_DEMO:

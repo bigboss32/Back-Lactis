@@ -53,7 +53,8 @@ def _escenario(client, h, tarifa, precio_litro="1800"):
     ruta = _crear(client, h, "/api/v1/rutas", {"nombre": "Ruta Norte", "municipio": "Norte"})
     transportador = _crear(
         client, h, TRANSPORTADORES,
-        {"nombre": "Stella", "ruta_id": ruta["id"], "valor_transporte": tarifa},
+        {"nombre": "Stella", "valor_transporte": tarifa,
+         "rutas": [{"ruta_id": ruta["id"], "valor_transporte": tarifa}]},
     )
     proveedor = _crear(
         client, h, "/api/v1/proveedores",
@@ -328,9 +329,14 @@ def test_el_flete_no_se_recalcula_solo_al_cambiar_la_tarifa(client, base_datos):
     tarifa de ese momento. Se deja clavado para que se sepa —si el dueño corrige
     la tarifa esperando que se recalcule la quincena vieja, se va a extrañar—, y
     porque es lo que hace que el desglose siga cuadrando contra lo guardado.
+
+    Desde que la tarifa es POR RUTA, lo que se corrige acá es la tarifa DE LA RUTA
+    (que es donde vive la del proveedor de esta prueba), no la general: la general
+    solo aplica donde no hay tarifa de ruta, así que subirla no habría movido nada
+    y la prueba no habría demostrado nada.
     """
     h = auth_headers(client, "admin.a")
-    _, transportador, proveedor = _escenario(client, h, "238")
+    ruta, transportador, proveedor = _escenario(client, h, "238")
     recepcion = _crear(client, h, RECEPCIONES, {
         "fecha": "2026-06-01",
         "proveedor_id": proveedor["id"],
@@ -339,7 +345,11 @@ def test_el_flete_no_se_recalcula_solo_al_cambiar_la_tarifa(client, base_datos):
     })
     antes = D(recepcion["valor_transporte"])
 
-    client.put(f"{TRANSPORTADORES}/{transportador['id']}", json={"valor_transporte": "242.76"}, headers=h)
+    client.put(
+        f"{TRANSPORTADORES}/{transportador['id']}",
+        json={"rutas": [{"ruta_id": ruta["id"], "valor_transporte": "242.76"}]},
+        headers=h,
+    )
     despues = D(client.get(f"{RECEPCIONES}/{recepcion['id']}", headers=h).json()["valor_transporte"])
 
     print("\n===== 4c. EL FLETE VIEJO NO SE MUEVE =====")
@@ -349,19 +359,45 @@ def test_el_flete_no_se_recalcula_solo_al_cambiar_la_tarifa(client, base_datos):
 
 
 def test_una_recepcion_nueva_si_usa_la_tarifa_nueva(client, base_datos):
-    """Y al contrario: lo que se reciba DESPUÉS sí va a la tarifa corregida."""
-    h = auth_headers(client, "admin.a")
-    _, transportador, proveedor = _escenario(client, h, "238")
-    client.put(f"{TRANSPORTADORES}/{transportador['id']}", json={"valor_transporte": "242.76"}, headers=h)
+    """Y al contrario: lo que se reciba DESPUÉS sí va a la tarifa corregida.
 
+    OJO CON DÓNDE SE CORRIGE, que es lo que cambió: el proveedor de esta prueba es
+    de la Ruta Norte y el transportador tiene tarifa propia en esa ruta, así que la
+    tarifa que manda es la de la ruta. Subir solo la GENERAL no le movería un peso
+    a esta leche —la general es la de "cuando no hay ruta de dónde sacarla"—, y se
+    deja demostrado abajo porque es exactamente la confusión en la que puede caer
+    el dueño al editar el transportador.
+    """
+    h = auth_headers(client, "admin.a")
+    ruta, transportador, proveedor = _escenario(client, h, "238")
+
+    # 1) Subir la GENERAL no mueve la leche de una ruta que tiene tarifa propia
+    client.put(f"{TRANSPORTADORES}/{transportador['id']}", json={"valor_transporte": "300"}, headers=h)
+    con_general_subida = _crear(client, h, RECEPCIONES, {
+        "fecha": "2026-06-04",
+        "proveedor_id": proveedor["id"],
+        "transportador_id": transportador["id"],
+        "cantidad_litros": "227",
+    })
+    print("\n===== 4d. LA RECEPCIÓN NUEVA USA LA TARIFA NUEVA =====")
+    print(f"  subiendo solo la GENERAL a $300, la Ruta Norte sigue a $238:")
+    print(f"    227 L × $238 = ${con_general_subida['valor_transporte']}")
+    assert D(con_general_subida["valor_transporte"]) == D("227") * D("238") == D("54026.00")
+
+    # 2) Corregir la tarifa DE LA RUTA sí: es donde vive la de este proveedor
+    client.put(
+        f"{TRANSPORTADORES}/{transportador['id']}",
+        json={"rutas": [{"ruta_id": ruta["id"], "valor_transporte": "242.76"}]},
+        headers=h,
+    )
     recepcion = _crear(client, h, RECEPCIONES, {
         "fecha": "2026-06-05",
         "proveedor_id": proveedor["id"],
         "transportador_id": transportador["id"],
         "cantidad_litros": "227",
     })
-    print("\n===== 4d. LA RECEPCIÓN NUEVA USA LA TARIFA NUEVA =====")
-    print(f"  227 L × $242,76 = ${recepcion['valor_transporte']}")
+    print(f"  corrigiendo la tarifa DE LA RUTA a $242,76:")
+    print(f"    227 L × $242,76 = ${recepcion['valor_transporte']}")
     assert D(recepcion["valor_transporte"]) == D("55106.52")
 
 

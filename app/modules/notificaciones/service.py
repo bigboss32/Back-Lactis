@@ -103,12 +103,24 @@ class NotificacionService(BaseService[Notificacion]):
         return emitidas
 
     def _alertas_sin_liquidar(self) -> int:
+        """Proveedores con leche vieja sin liquidar.
+
+        SOLO LOS DÍAS ACTIVOS, y sin ese filtro la alerta no se apagaba nunca: un
+        día apagado no entra en ninguna liquidación —sale de los dos comprobantes a
+        propósito—, así que su `liquidacion_id` se queda en nulo para siempre y la
+        alerta seguía diciendo "hay recepciones de hace más de N días sin liquidar"
+        de algo que jamás va a liquidarse. La única salida era volver a prender el
+        día y pagarlo, o sea que la alerta empujaba a cobrar leche que la quesera
+        había decidido no contar. Una alerta que no se puede apagar es una alerta
+        que el dueño aprende a ignorar, y con ella las demás.
+        """
         limite = date.today() - timedelta(days=DIAS_SIN_LIQUIDAR)
         stmt = (
             select(RecepcionLeche.proveedor_id)
             .where(
                 RecepcionLeche.empresa_id == self.ctx.empresa_id,
                 RecepcionLeche.deleted_at.is_(None),
+                RecepcionLeche.estado == "activo",
                 RecepcionLeche.liquidacion_id.is_(None),
                 RecepcionLeche.fecha <= limite,
             )

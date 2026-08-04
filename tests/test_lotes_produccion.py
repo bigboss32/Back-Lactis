@@ -32,7 +32,8 @@ def montar_leche(client, h, precio_litro="1800", transporte="100"):
     ).json()
     transportador = client.post(
         "/api/v1/transportadores",
-        json={"nombre": "Stella", "ruta_id": ruta["id"], "valor_transporte": transporte},
+        json={"nombre": "Stella", "valor_transporte": transporte,
+              "rutas": [{"ruta_id": ruta["id"], "valor_transporte": transporte}]},
         headers=h,
     ).json()
     proveedores = {}

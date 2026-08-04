@@ -266,7 +266,8 @@ def test_en_liquidacion_de_transportador_no_se_edita_el_precio(client, base_dato
     ).json()
     transportador = client.post(
         "/api/v1/transportadores",
-        json={"nombre": "Stella", "ruta_id": ruta["id"], "valor_transporte": "100"},
+        json={"nombre": "Stella", "valor_transporte": "100",
+              "rutas": [{"ruta_id": ruta["id"], "valor_transporte": "100"}]},
         headers=h,
     ).json()
     proveedor = client.post(

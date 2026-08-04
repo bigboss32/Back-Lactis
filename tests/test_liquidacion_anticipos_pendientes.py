@@ -363,7 +363,8 @@ def test_el_borrador_del_transportador_tambien_recoge_su_anticipo(client, base_d
     ).json()
     transportador = client.post(
         "/api/v1/transportadores",
-        json={"nombre": "Stella", "ruta_id": ruta["id"], "valor_transporte": "100"},
+        json={"nombre": "Stella", "valor_transporte": "100",
+              "rutas": [{"ruta_id": ruta["id"], "valor_transporte": "100"}]},
         headers=h,
     ).json()
     proveedor = _proveedor(client, h, "Libardo")
