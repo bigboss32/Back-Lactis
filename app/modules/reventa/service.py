@@ -32,10 +32,14 @@ from app.modules.reventa.models import (
     ESTADO_PAGADA,
     ESTADO_PARCIAL,
     ESTADO_PENDIENTE,
+    TIPO_MOZZARELLA,
     TIPO_SALDO_COBRAR,
     TIPO_SALDO_PAGAR,
     TIPO_VENTA_BORONA,
+    TIPO_VENTA_MOZZARELLA,
     TIPO_VENTA_QUESO,
+    UNIDAD_BARRA,
+    UNIDAD_KILO,
     AbonoCompraQueso,
     AbonoSaldoAnterior,
     AbonoVentaQueso,
@@ -45,6 +49,7 @@ from app.modules.reventa.models import (
     SaldoAnterior,
     Temporada,
     VentaQueso,
+    unidad_de,
 )
 from app.modules.reventa.lotes import (
     AjusteEvento,
@@ -112,6 +117,12 @@ ETIQUETAS_PRODUCTO = {
     # es neutro a propósito: afirmar una venta sería la misma mentira que se
     # arregló con la merma.
     "anterior": "Salió de inventario anterior",
+    # Los dos de la mozzarella dicen BARRAS en la etiqueta misma, no solo en la
+    # unidad: el dueño lee el renglón de un vistazo y tiene que ver ahí que esa
+    # cantidad no son kilos, sin tener que cruzarla con otra columna.
+    "mozzarella": "Mozzarella vendida (barras)",
+    "mozzarella_pendiente": "Mozzarella aún en inventario (barras)",
+    "mozzarella_anterior": "Barras salidas de inventario anterior",
 }
 NOTAS_PRODUCTO = {
     "queso": "vendido como queso entero",
@@ -119,13 +130,25 @@ NOTAS_PRODUCTO = {
     "merma": "se pagó y no se vendió: pérdida",
     "pendiente": "plata invertida, aún sin vender",
     "anterior": "se compró en un período anterior",
+    "mozzarella": "se compra y se vende por barra completa",
+    "mozzarella_pendiente": "barras compradas y todavía sin vender",
+    "mozzarella_anterior": "barras compradas en un período anterior",
 }
+# Los renglones que se miden en BARRAS. Se listan en un solo sitio para que
+# ninguna parte del código tenga que acordarse de la regla por su cuenta.
+PRODUCTOS_EN_BARRAS = frozenset(
+    {"mozzarella", "mozzarella_pendiente", "mozzarella_anterior"}
+)
 # Cuando unos kilos no tienen costo porque la compra cayó fuera del período, no
 # se puede hablar de pérdida en pesos: se dice de dónde vienen.
 NOTA_SIN_COSTO = "se compró en un período anterior: aquí no lleva costo"
 
 # Nombre del producto listo para mostrarle al cliente en su estado de cuenta
-NOMBRE_PRODUCTO = {TIPO_VENTA_QUESO: "Queso", TIPO_VENTA_BORONA: "Borona"}
+NOMBRE_PRODUCTO = {
+    TIPO_VENTA_QUESO: "Queso",
+    TIPO_VENTA_BORONA: "Borona",
+    TIPO_VENTA_MOZZARELLA: "Mozzarella",
+}
 
 
 def _nombre_archivo_cliente(cliente: str) -> str:
@@ -233,12 +256,45 @@ class CompraQuesoService(BaseService[CompraQueso]):
 
     @staticmethod
     def _calcular(data: dict[str, Any], actual: CompraQueso | None = None) -> dict[str, Any]:
+        """Deja la fila con la cantidad y el precio de SU unidad, y la otra unidad
+        en cero (que es lo que exige el CHECK de la tabla).
+
+        El tipo se toma del payload al crear y de la FILA GUARDADA al editar: la
+        edición no acepta `tipo` a propósito (ver CompraQuesoUpdate), así que una
+        compra nace de kilos o de barras y se queda así.
+        """
+        tipo = data.get("tipo") or (actual.tipo if actual else TIPO_VENTA_QUESO)
+        data["tipo"] = tipo
+        if tipo == TIPO_MOZZARELLA:
+            barras = Decimal(data.get("barras") or (actual.barras if actual else CERO))
+            precio_barra = Decimal(
+                data.get("precio_barra") or (actual.precio_barra if actual else CERO)
+            )
+            data["barras"] = barras
+            data["precio_barra"] = precio_barra
+            # Todo lo que se mide en kilos queda en cero, y se escribe AQUÍ y no
+            # solo en el esquema de entrada: por PUT llega un payload parcial y sin
+            # esto una compra de barras podría quedar con kilos de un intento
+            # anterior. El CHECK de la tabla la rechazaría, pero un 500 de la base
+            # no le dice nada al dueño; mejor que nunca llegue a pasar.
+            data["kilos_brutos"] = CERO
+            data["kilos_netos"] = CERO
+            data["merma_kilos"] = CERO
+            data["borona_kilos"] = CERO
+            data["precio_kilo"] = CERO
+            # La plata: barras × lo que costó cada barra. Los pesos son pesos, así
+            # que esta columna se suma con la de las compras en kilos sin problema.
+            data["valor_total"] = (barras * precio_barra).quantize(DOS_DECIMALES)
+            return data
+
         brutos = Decimal(data.get("kilos_brutos") or (actual.kilos_brutos if actual else CERO))
         precio = Decimal(data.get("precio_kilo") or (actual.precio_kilo if actual else CERO))
         # Ya no hay merma en la compra: se paga por todo lo recibido. La merma
         # real se refleja al vender (se pesa menos). Se guarda merma 0.
         data["merma_kilos"] = CERO
         data["kilos_netos"] = brutos
+        data["barras"] = CERO
+        data["precio_barra"] = CERO
         data["valor_total"] = (brutos * precio).quantize(DOS_DECIMALES)
         return data
 
@@ -290,15 +346,33 @@ class CompraQuesoService(BaseService[CompraQueso]):
         # compra de 100 kg a 10 cuando ya se vendieron 80 deja el inventario en
         # -70: a partir de ahí NINGUNA venta pasa el control de existencias y el
         # dueño se queda sin poder trabajar sin entender por qué.
-        nuevos = Decimal(data["kilos_netos"])
-        viejos = Decimal(actual.kilos_netos)
-        if nuevos < viejos:
-            disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
-            if (nuevos - viejos) + disponible < CERO:
-                raise BusinessError(
-                    f"No se pueden quitar tantos kilos: de esta compra ya salieron "
-                    f"vendidos. Solo quedan {disponible} kg sin vender"
-                )
+        #
+        # LA MISMA GUARDA, EN LA UNIDAD DE LA COMPRA. La de barras no es un extra:
+        # ya nos pasó que un guardia estaba solo al crear y se podían inventar
+        # kilos editando, y un guardia que solo mire los kilos sería exactamente el
+        # mismo defecto para la mozzarella, con la diferencia de que aquí ni
+        # existiría desde el principio.
+        if actual.tipo == TIPO_MOZZARELLA:
+            nuevas = Decimal(data["barras"])
+            viejas = Decimal(actual.barras)
+            if nuevas < viejas:
+                disponibles = ReventaResumenService.barras_disponibles(self.db, self.ctx)
+                if (nuevas - viejas) + disponibles < CERO:
+                    raise BusinessError(
+                        f"No se pueden quitar tantas barras: de esta compra ya "
+                        f"salieron vendidas. Solo quedan {disponibles} barras sin "
+                        f"vender"
+                    )
+        else:
+            nuevos = Decimal(data["kilos_netos"])
+            viejos = Decimal(actual.kilos_netos)
+            if nuevos < viejos:
+                disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
+                if (nuevos - viejos) + disponible < CERO:
+                    raise BusinessError(
+                        f"No se pueden quitar tantos kilos: de esta compra ya salieron "
+                        f"vendidos. Solo quedan {disponible} kg sin vender"
+                    )
         data["estado"] = _estado_pago(data["valor_total"], actual.abonado)
         return super().actualizar(entity_id, self._canonizar(data))
 
@@ -392,6 +466,25 @@ class CompraQuesoService(BaseService[CompraQueso]):
         # el control de existencias — el dueño se queda sin poder trabajar sin
         # entender por qué. Lo que hay que hacer en ese caso es corregir la
         # compra (editarla) o anular primero las ventas que se llevaron ese queso.
+        #
+        # Cada tipo se mira contra SU inventario: anular una compra de barras no
+        # puede consultar los kilos disponibles (siempre pasaría el control, y las
+        # barras quedarían en negativo), ni al contrario.
+        if compra.tipo == TIPO_MOZZARELLA:
+            disponibles = ReventaResumenService.barras_disponibles(self.db, self.ctx)
+            if disponibles - Decimal(compra.barras) < CERO:
+                raise BusinessError(
+                    f"No se puede anular: la mozzarella de esta compra ya se "
+                    f"vendió. Solo quedan {disponibles} barras sin vender de las "
+                    f"{compra.barras} que trajo. Anule primero las ventas que se "
+                    f"las llevaron, o corrija la compra en vez de anularla"
+                )
+            antes = compra.estado
+            compra.estado = ESTADO_ANULADA
+            compra.updated_by = self.ctx.user_id
+            self.db.flush()
+            self._audit("editar", compra.id, {"estado": antes}, {"estado": ESTADO_ANULADA})
+            return compra
         disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
         if disponible - Decimal(compra.kilos_netos) < CERO:
             raise BusinessError(
@@ -447,9 +540,9 @@ class VentaQuesoService(BaseService[VentaQueso]):
         return data
 
     def _exigir_existencias(
-        self, tipo: str, kilos: Decimal, actual: VentaQueso | None = None
+        self, tipo: str, cantidad: Decimal, actual: VentaQueso | None = None
     ) -> None:
-        """No se puede vender más queso (o borona) del que hay.
+        """No se puede vender más de lo que hay, EN LA UNIDAD DE CADA PRODUCTO.
 
         Vive aquí, en un método, y no suelto dentro de `crear`, porque ESE fue el
         defecto: la comprobación estaba solo al crear y `actualizar` no la hacía.
@@ -461,28 +554,58 @@ class VentaQuesoService(BaseService[VentaQueso]):
         Al EDITAR hay que devolverle al inventario los kilos que esa misma venta
         ya tenía apartados, o si no editar 100 kg a 100 kg fallaría por comparar
         contra un disponible del que esos kilos ya están descontados.
+
+        `cantidad` está en la unidad del `tipo`: kilos para queso y borona, barras
+        para mozzarella. Los tres inventarios son SEPARADOS y cada uno se compara
+        solo con el suyo: tener 500 kg de queso no autoriza a despachar una barra
+        de mozzarella que no se compró.
         """
-        if tipo == TIPO_VENTA_BORONA:
+        if tipo == TIPO_VENTA_MOZZARELLA:
+            disponible = ReventaResumenService.barras_disponibles(self.db, self.ctx)
+            que = "mozzarella"
+            unidad = "barras"
+        elif tipo == TIPO_VENTA_BORONA:
             disponible = ReventaResumenService.borona_disponible(self.db, self.ctx)
             que = "borona"
+            unidad = "kg"
         else:
             disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
             que = "queso"
+            unidad = "kg"
         if actual is not None and actual.estado != ESTADO_ANULADA and actual.tipo == tipo:
-            disponible += Decimal(actual.kilos)
-        if kilos > disponible:
-            raise BusinessError(f"Solo hay {disponible} kg de {que} disponibles")
+            # La cantidad que esta venta ya tenía apartada, en SU unidad: si se
+            # devolvieran kilos a un inventario de barras (o al contrario) el
+            # guardia quedaría comparando contra una cifra inventada.
+            disponible += Decimal(
+                actual.barras if tipo == TIPO_VENTA_MOZZARELLA else actual.kilos
+            )
+        if cantidad > disponible:
+            raise BusinessError(f"Solo hay {disponible} {unidad} de {que} disponibles")
 
     def crear(self, payload: Any) -> VentaQueso:
         data = self._canonizar(payload.model_dump(exclude_unset=True))
         de_contado = data.pop("pagada_de_contado", False)
-        kilos = Decimal(data["kilos"])
         tipo = data.get("tipo", TIPO_VENTA_QUESO)
-        self._exigir_existencias(tipo, kilos)
-        data["valor_total"] = (kilos * Decimal(data["precio_kilo"])).quantize(DOS_DECIMALES)
-        # Gasto de venta por kilo (ej. transporte): el total es por_kilo * kilos.
-        por_kilo = Decimal(data.get("gasto_por_kilo") or CERO)
-        data["gasto_monto"] = (por_kilo * kilos).quantize(DOS_DECIMALES)
+        if tipo == TIPO_VENTA_MOZZARELLA:
+            barras = Decimal(data["barras"])
+            self._exigir_existencias(tipo, barras)
+            data["valor_total"] = (barras * Decimal(data["precio_barra"])).quantize(
+                DOS_DECIMALES
+            )
+            # El gasto se cobra POR BARRA, y el monto en pesos sale de multiplicar
+            # por las barras. Esa columna (`gasto_monto`) es la única que se suma
+            # con la de las ventas en kilos, porque es la única que está en pesos.
+            por_barra = Decimal(data.get("gasto_por_barra") or CERO)
+            data["gasto_monto"] = (por_barra * barras).quantize(DOS_DECIMALES)
+        else:
+            kilos = Decimal(data["kilos"])
+            self._exigir_existencias(tipo, kilos)
+            data["valor_total"] = (kilos * Decimal(data["precio_kilo"])).quantize(
+                DOS_DECIMALES
+            )
+            # Gasto de venta por kilo (ej. transporte): el total es por_kilo * kilos.
+            por_kilo = Decimal(data.get("gasto_por_kilo") or CERO)
+            data["gasto_monto"] = (por_kilo * kilos).quantize(DOS_DECIMALES)
         data["estado"] = ESTADO_PENDIENTE
         if de_contado:
             data["abonado"] = data["valor_total"]
@@ -503,19 +626,47 @@ class VentaQuesoService(BaseService[VentaQueso]):
         if actual.estado == ESTADO_ANULADA:
             raise BusinessError("No se puede modificar una venta anulada")
         data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
-        kilos = Decimal(data.get("kilos") or actual.kilos)
-        precio = Decimal(data.get("precio_kilo") or actual.precio_kilo)
-        # La MISMA comprobación que al crear. Sin esto el guardia de la creación
-        # es de adorno: se crea la venta con un kilo y se edita a los que sea.
-        self._exigir_existencias(data.get("tipo") or actual.tipo, kilos, actual=actual)
-        data["valor_total"] = (kilos * precio).quantize(DOS_DECIMALES)
-        # Recalcula el gasto total (por_kilo * kilos) si cambió cualquiera de los dos.
-        por_kilo = Decimal(
-            data["gasto_por_kilo"]
-            if data.get("gasto_por_kilo") is not None
-            else actual.gasto_por_kilo
-        )
-        data["gasto_monto"] = (por_kilo * kilos).quantize(DOS_DECIMALES)
+        # El tipo NO se edita (VentaQuesoUpdate no lo recibe): manda el de la fila
+        # guardada, que es el que dice en qué unidad está esta venta.
+        tipo = actual.tipo
+        if tipo == TIPO_VENTA_MOZZARELLA:
+            barras = Decimal(data.get("barras") or actual.barras)
+            precio_barra = Decimal(data.get("precio_barra") or actual.precio_barra)
+            # La MISMA comprobación que al crear, en barras. Sin esto se registra
+            # una venta de una barra y se edita a las que sea: es el defecto que ya
+            # nos pasó con los kilos, y no se repite en la unidad nueva.
+            self._exigir_existencias(tipo, barras, actual=actual)
+            data["valor_total"] = (barras * precio_barra).quantize(DOS_DECIMALES)
+            por_barra = Decimal(
+                data["gasto_por_barra"]
+                if data.get("gasto_por_barra") is not None
+                else actual.gasto_por_barra
+            )
+            data["gasto_monto"] = (por_barra * barras).quantize(DOS_DECIMALES)
+            # Lo de la otra unidad no puede colarse por un payload parcial: la
+            # pantalla manda el objeto completo y `kilos` llegaría en cero o en
+            # nulo, pero si algún día llegara con un número, el CHECK de la tabla
+            # tumbaría la edición con un 500 en vez de un mensaje entendible.
+            data.pop("kilos", None)
+            data.pop("precio_kilo", None)
+            data.pop("gasto_por_kilo", None)
+        else:
+            kilos = Decimal(data.get("kilos") or actual.kilos)
+            precio = Decimal(data.get("precio_kilo") or actual.precio_kilo)
+            # La MISMA comprobación que al crear. Sin esto el guardia de la creación
+            # es de adorno: se crea la venta con un kilo y se edita a los que sea.
+            self._exigir_existencias(tipo, kilos, actual=actual)
+            data["valor_total"] = (kilos * precio).quantize(DOS_DECIMALES)
+            # Recalcula el gasto total (por_kilo * kilos) si cambió cualquiera de los dos.
+            por_kilo = Decimal(
+                data["gasto_por_kilo"]
+                if data.get("gasto_por_kilo") is not None
+                else actual.gasto_por_kilo
+            )
+            data["gasto_monto"] = (por_kilo * kilos).quantize(DOS_DECIMALES)
+            data.pop("barras", None)
+            data.pop("precio_barra", None)
+            data.pop("gasto_por_barra", None)
         # Se puede editar aunque tenga abonos (incluida una pagada): se recalcula el estado.
         # OJO: aquí NO va el guardia de "el total no puede quedar por debajo de lo
         # abonado" que sí tienen las compras y los saldos de la cuenta anterior.
@@ -1281,9 +1432,33 @@ class ReventaResumenService:
         return borona_de_compras + conversiones.total_a_borona() - borona_vendida
 
     @staticmethod
+    def barras_disponibles(db, ctx) -> Decimal:
+        """Barras de mozzarella en bodega: compradas − vendidas, histórico.
+
+        LA CUENTA MÁS CORTA DE LAS TRES, Y NO ES UN OLVIDO: no le resta
+        conversiones porque la mozzarella no participa en ellas. La barra entra
+        como barra y sale como barra: no se desmenuza para pasarla a borona (eso es
+        desmenuzar queso) y no pierde peso en el camino, porque no se está pesando.
+        Si algún día una barra se daña, eso es una BAJA DE UNIDADES, un movimiento
+        propio que hoy no existe, y nunca kilos metidos en la tabla de ajustes.
+
+        Es el hermano de `queso_disponible` y `borona_disponible`, en su unidad, y
+        el que usan los tres guardias de existencias de la mozzarella (crear venta,
+        editar venta y anular compra).
+        """
+        compras = CompraQuesoRepository(db, ctx.empresa_id)
+        ventas = VentaQuesoRepository(db, ctx.empresa_id)
+        return compras.barras_acumuladas() - ventas.barras_acumuladas()
+
+    @staticmethod
     def _costo_de(kilos: Decimal, kilos_comprados: Decimal, total_compras: Decimal) -> Decimal:
-        """Costo de esos kilos al precio promedio de compra del período.
+        """Costo de esas UNIDADES al precio promedio de compra del período.
         Divide sin redondear antes de multiplicar para no acumular error.
+
+        Sirve para las dos unidades —se le pasan kilos con kilos y barras con
+        barras—, y por eso los nombres de los parámetros hablan de kilos: es el uso
+        original. Lo que NO puede hacerse nunca es mezclar: pasarle barras con un
+        total de plata de kilos daría un costo por barra inventado.
         """
         if not kilos_comprados:
             return CERO
@@ -1313,6 +1488,7 @@ class ReventaResumenService:
             producto=producto,
             etiqueta=ETIQUETAS_PRODUCTO[producto],
             nota=nota,
+            unidad=UNIDAD_KILO,
             kilos=kilos,
             kilos_vendidos=vendidos,
             ingreso=ingreso,
@@ -1323,6 +1499,54 @@ class ReventaResumenService:
                 (ingreso / vendidos).quantize(DOS_DECIMALES) if vendidos else CERO
             ),
             costo_kilo=costo_kilo,
+        )
+
+    @classmethod
+    def _fila_barras(
+        cls,
+        producto: str,
+        barras: Decimal,
+        ingreso: Decimal,
+        costo: Decimal,
+        gastos: Decimal,
+        costo_barra: Decimal,
+        barras_vendidas: Decimal | None = None,
+    ) -> GananciaProducto:
+        """Un renglón del desglose MEDIDO EN BARRAS.
+
+        Es un método aparte de `_fila_producto` y no un parámetro `unidad` de él, y
+        esa es la decisión: así los campos de kilos quedan en CERO por construcción
+        y no porque alguien se acuerde de pasarlos en cero. Un renglón de barras que
+        pudiera traer kilos distintos de cero es exactamente lo que haría que la
+        columna `kilos` del desglose deje de ser kilos.
+
+        Los campos de plata (ingreso, costo, gastos, ganancia) son los MISMOS que en
+        los renglones de kilos, sin sufijo de unidad: los pesos son pesos y esa
+        columna sí se suma de arriba abajo.
+        """
+        vendidas = barras if barras_vendidas is None else barras_vendidas
+        return GananciaProducto(
+            producto=producto,
+            etiqueta=ETIQUETAS_PRODUCTO[producto],
+            nota=NOTAS_PRODUCTO[producto],
+            unidad=UNIDAD_BARRA,
+            # Los dos campos de kilos en cero: este renglón no tiene kilos.
+            kilos=CERO,
+            kilos_vendidos=CERO,
+            barras=barras,
+            barras_vendidas=vendidas,
+            ingreso=ingreso,
+            costo=costo,
+            gastos=gastos,
+            ganancia=(ingreso - costo - gastos).quantize(DOS_DECIMALES),
+            # Y los dos precios por kilo también en cero, por lo mismo: los de
+            # barras van en sus propios campos.
+            precio_venta_kilo=CERO,
+            costo_kilo=CERO,
+            precio_venta_barra=(
+                (ingreso / vendidas).quantize(DOS_DECIMALES) if vendidas else CERO
+            ),
+            costo_barra=costo_barra,
         )
 
     @classmethod
@@ -1341,6 +1565,11 @@ class ReventaResumenService:
         gastos_borona: Decimal,
         kilos_merma: Decimal,
         kilos_pendientes: Decimal,
+        barras_compradas: Decimal = CERO,
+        compras_mozzarella: Decimal = CERO,
+        barras_vendidas: Decimal = CERO,
+        ventas_mozzarella: Decimal = CERO,
+        gastos_mozzarella: Decimal = CERO,
     ) -> list[GananciaProducto]:
         """Desglose de la ganancia del período en cuatro filas: queso, borona,
         merma y el residuo (lo que quedó en inventario, o lo que salió de un
@@ -1358,6 +1587,19 @@ class ReventaResumenService:
         residuo se lleva la diferencia, así la suma de los cuatro costos es
         EXACTAMENTE total_compras y la suma de las ganancias es exactamente
         ganancia_estimada (invariante del resumen).
+
+        LA MOZZARELLA AGREGA DOS FILAS PROPIAS AL FINAL, en barras, y NO se mete en
+        el reparto de arriba. `total_compras` que llega aquí es SOLO la plata de las
+        compras en kilos (ver `CompraQuesoRepository.totales_periodo`), así que el
+        costo de las barras no se le puede repartir a ningún kilo ni al contrario:
+        cada unidad reparte su propia plata entre sus propios destinos. Las dos
+        filas nuevas solo aparecen si hubo mozzarella en el período; si no hubo, el
+        desglose sale con las mismas cuatro filas de siempre, idénticas.
+
+        Y el invariante sigue en pie, ahora por partida doble:
+            suma de costos de las filas de kilos  = plata de las compras en kilos
+            suma de costos de las filas de barras = plata de las compras de barras
+            suma de TODAS las ganancias           = ganancia_estimada
         """
         costo_queso = cls._costo_de(kilos_queso, kilos_comprados, total_compras)
         costo_borona = cls._costo_de(kilos_a_borona, kilos_comprados, total_compras)
@@ -1368,7 +1610,7 @@ class ReventaResumenService:
         # crédito (ya se pagó antes) y por eso sale negativo.
         producto_residuo = "pendiente" if kilos_pendientes >= CERO else "anterior"
 
-        return [
+        filas = [
             cls._fila_producto(
                 "queso", kilos_queso, ventas_queso, costo_queso, gastos_queso, costo_kilo
             ),
@@ -1387,6 +1629,53 @@ class ReventaResumenService:
             ),
         ]
 
+        # ------------------------------------------------------ mozzarella
+        # Solo si hubo movimiento de barras en el período. Sin esta guarda, todos
+        # los períodos del cliente —que hoy son de puro queso— estrenarían dos
+        # filas en ceros que solo estorban en una pantalla que ya está apretada.
+        if barras_compradas or barras_vendidas:
+            costo_barra = (
+                (compras_mozzarella / barras_compradas).quantize(DOS_DECIMALES)
+                if barras_compradas
+                else CERO
+            )
+            costo_vendidas = cls._costo_de(
+                barras_vendidas, barras_compradas, compras_mozzarella
+            )
+            # El residuo de las barras se lleva la diferencia, igual que el de los
+            # kilos: así los dos costos suman EXACTO la plata de las compras de
+            # mozzarella y el dueño lo puede verificar con la calculadora.
+            costo_residuo_barras = compras_mozzarella - costo_vendidas
+            barras_pendientes = barras_compradas - barras_vendidas
+            producto_residuo_barras = (
+                "mozzarella_pendiente" if barras_pendientes >= CERO else "mozzarella_anterior"
+            )
+            filas.append(
+                cls._fila_barras(
+                    "mozzarella",
+                    barras_vendidas,
+                    ventas_mozzarella,
+                    costo_vendidas,
+                    gastos_mozzarella,
+                    costo_barra,
+                )
+            )
+            filas.append(
+                cls._fila_barras(
+                    producto_residuo_barras,
+                    abs(barras_pendientes),
+                    CERO,
+                    costo_residuo_barras,
+                    CERO,
+                    costo_barra,
+                    # El residuo no se vendió: sin barras vendidas no hay precio de
+                    # venta que mostrar (si no, saldría $0 "por barra" como si se
+                    # hubiera regalado).
+                    barras_vendidas=CERO,
+                )
+            )
+        return filas
+
     def _filas_por_productor(
         self,
         desde: date,
@@ -1395,6 +1684,9 @@ class ReventaResumenService:
         valor_realizado_kilo: Decimal,
         neto_periodo: Decimal,
         kilos_comprados: Decimal,
+        valor_realizado_barra: Decimal = CERO,
+        neto_barras: Decimal = CERO,
+        barras_compradas: Decimal = CERO,
     ) -> list[GananciaProductor]:
         """Ganancia ESTIMADA por productor (la UI debe decir que es estimación).
 
@@ -1440,6 +1732,17 @@ class ReventaResumenService:
         reparto (`neto_periodo / kilos_comprados`), así que no puede desincronizarse
         del cálculo. Un `bool` aparte sí podría quedar en desacuerdo con los kilos
         el día que alguien toque una de las dos ramas.
+
+        EL REPARTO SE HACE DOS VECES, UNA POR UNIDAD, y esa es la única forma de
+        que cuadre: el neto que dejaron las ventas EN KILOS se reparte entre los
+        KILOS comprados y el de las ventas EN BARRAS entre las BARRAS compradas.
+        Si se repartiera todo el neto entre los kilos, a un productor que solo
+        vendió barras le saldría ganancia cero y su plata se les acreditaría a los
+        de kilos: el ranking diría que el mejor negocio lo hizo alguien que no
+        vendió una sola barra. Las dos partes se SUMAN en `ganancia_estimada`
+        porque son pesos, y la columna sigue sumando la ganancia del período:
+            (neto_kilos − comprado_kilos) + (neto_barras − comprado_barras)
+            = total_ventas − total_gastos − total_compras = ganancia
         """
         # Deuda HISTÓRICA por productor, agrupada en Python con el mismo criterio
         # las dos: la de las compras de este sistema y la que quedó del libro
@@ -1460,24 +1763,58 @@ class ReventaResumenService:
             (kilos * neto_periodo / kilos_comprados).quantize(DOS_DECIMALES)
             if kilos_comprados
             else CERO
-            for _, _, kilos, _, _ in del_periodo
+            for _, _, kilos, _, _, _, _ in del_periodo
+        ]
+        # El mismo reparto, EN BARRAS y con su propio neto. Dos listas separadas y
+        # no una sola cifra por fila: si se sumaran antes de ajustar el residuo, la
+        # diferencia de redondeo de una unidad se le cargaría a la otra.
+        realizados_barras = [
+            (barras * neto_barras / barras_compradas).quantize(DOS_DECIMALES)
+            if barras_compradas
+            else CERO
+            for _, _, _, _, _, barras, _ in del_periodo
         ]
         # El ajuste del residuo solo tiene sentido si de verdad hubo kilos que
         # repartir: sin `kilos_comprados` el reparto es todo ceros y sumarle la
         # diferencia le daría TODO el neto del período a la última fila, que es
         # justo la plata que no le corresponde a nadie de la lista.
-        if realizados and kilos_comprados:
-            realizados[-1] += neto_periodo - sum(realizados, CERO)
+        #
+        # Y el residuo se le da a la última fila QUE TENGA DE ESA UNIDAD. Antes de
+        # la mozzarella daba igual (todas las filas tenían kilos), pero ahora un
+        # productor de solo barras tiene kilos 0: darle a él los centavos del
+        # reparto de los kilos le inventaría una ganancia en una unidad que no
+        # vendió, y su fila diría "0 kg" con plata al lado.
+        def _ajustar(valores: list[Decimal], cantidades: list[Decimal], neto: Decimal) -> None:
+            ultimo = next(
+                (i for i in range(len(cantidades) - 1, -1, -1) if cantidades[i] > CERO), None
+            )
+            if ultimo is not None:
+                valores[ultimo] += neto - sum(valores, CERO)
+
+        if kilos_comprados:
+            _ajustar(realizados, [fila[2] for fila in del_periodo], neto_periodo)
+        if barras_compradas:
+            _ajustar(realizados_barras, [fila[5] for fila in del_periodo], neto_barras)
 
         filas: list[GananciaProductor] = []
         # El 5.º campo de por_productor (su saldo por grupo de SQL) NO se usa
         # aquí: la deuda sale de `pendiente_sistema`, que agrupa las variantes de
         # escritura en Python y así ninguna queda por fuera ni contada dos veces.
-        for (productor, compras, kilos, total_comprado, _), realizado in zip(
-            del_periodo, realizados
-        ):
+        for (
+            (productor, compras, kilos, total_comprado, _, barras, comprado_barras),
+            realizado,
+            realizado_barras,
+        ) in zip(del_periodo, realizados, realizados_barras):
+            # El precio promedio POR KILO se saca de la plata de los kilos: al
+            # total de sus compras se le quita el pedazo de las barras. Si no, a un
+            # productor que vendió 10 kg y 100 barras le saldría un precio por kilo
+            # que incluye toda la plata de la mozzarella.
+            comprado_kilos = total_comprado - comprado_barras
             precio_promedio = (
-                (total_comprado / kilos).quantize(DOS_DECIMALES) if kilos else CERO
+                (comprado_kilos / kilos).quantize(DOS_DECIMALES) if kilos else CERO
+            )
+            precio_promedio_barra = (
+                (comprado_barras / barras).quantize(DOS_DECIMALES) if barras else CERO
             )
             clave = _clave_tercero(productor)
             _, del_sistema = pendiente_sistema.pop(clave, ("", CERO))
@@ -1487,11 +1824,22 @@ class ReventaResumenService:
                     productor=productor,
                     compras=compras,
                     kilos=kilos,
+                    barras=barras,
                     total_comprado=total_comprado,
+                    total_comprado_barras=comprado_barras,
                     precio_promedio=precio_promedio,
+                    precio_promedio_barra=precio_promedio_barra,
                     por_pagar=del_sistema + del_libro,
-                    margen_por_kilo=valor_realizado_kilo - precio_promedio,
-                    ganancia_estimada=realizado - total_comprado,
+                    margen_por_kilo=(
+                        valor_realizado_kilo - precio_promedio if kilos else CERO
+                    ),
+                    margen_por_barra=(
+                        valor_realizado_barra - precio_promedio_barra if barras else CERO
+                    ),
+                    # Las dos ganancias se SUMAN porque son pesos. Cada una es lo
+                    # que su unidad realizó menos lo que su unidad costó.
+                    ganancia_estimada=(realizado - comprado_kilos)
+                    + (realizado_barras - comprado_barras),
                 )
             )
         # Productores a los que se les debe pero que NO tuvieron compras en el
@@ -1524,23 +1872,53 @@ class ReventaResumenService:
         return filas
 
     def resumen(self, desde: date, hasta: date) -> ResumenReventa:
-        kilos_comprados, total_compras = self.compras.totales_periodo(desde, hasta)
+        """El resumen del período, CON LAS DOS UNIDADES SEPARADAS.
+
+        La regla que manda sobre todo lo demás: los kilos y las barras nunca se
+        suman en una misma cifra ("20 kg + 8 barras" no es un número). La plata sí:
+        los pesos son pesos, vengan de kilos o de barras.
+
+        Cómo se sostiene eso aquí: cada consulta del repositorio ya viene filtrada
+        por unidad (las de kilos excluyen la mozzarella y al contrario), así que
+        NINGUNA de las variables de abajo puede traer las dos mezcladas. Las
+        cantidades se llevan en variables con la unidad en el nombre (`kilos_*` y
+        `barras_*`) y solo las de PLATA se suman entre unidades, con la suma escrita
+        de frente para que se vea que es a propósito.
+        """
+        # --------------------------------------------------- lo que se mide en kilos
+        kilos_comprados, compras_kilos = self.compras.totales_periodo(desde, hasta)
         kilos_queso, ventas_queso = self.ventas.totales_periodo(
             desde, hasta, tipo=TIPO_VENTA_QUESO
         )
-        # El total sale de la consulta SIN filtro de tipo y la borona por
-        # diferencia: si algún día hay un tercer tipo de venta, o un dato viejo
-        # con el tipo en blanco, su plata NO desaparece del resumen.
-        kilos_todos, total_ventas = self.ventas.totales_periodo(desde, hasta)
+        # El total sale de la consulta SIN filtro de tipo (que ya excluye la
+        # mozzarella: son las ventas en kilos) y la borona por diferencia: si algún
+        # día hay otro tipo de venta en kilos, o un dato viejo con el tipo en
+        # blanco, su plata NO desaparece del resumen.
+        kilos_todos, ventas_kilos = self.ventas.totales_periodo(desde, hasta)
         kilos_borona = kilos_todos - kilos_queso
-        ventas_borona = total_ventas - ventas_queso
-        total_gastos = self.ventas.gastos_periodo(desde, hasta)
+        ventas_borona = ventas_kilos - ventas_queso
+        gastos_kilos = self.ventas.gastos_periodo(desde, hasta)
         # Los gastos de la borona se sacan por diferencia (solo hay dos tipos de
-        # venta), así queso + borona siempre suma EXACTO el total de gastos.
+        # venta en kilos), así queso + borona siempre suma EXACTO el total de
+        # gastos de los kilos.
         gastos_queso = self.ventas.gastos_periodo(desde, hasta, tipo=TIPO_VENTA_QUESO)
-        gastos_borona = total_gastos - gastos_queso
+        gastos_borona = gastos_kilos - gastos_queso
         # Ajustes del período: lo que se pasó a borona y LA MERMA REAL.
         kilos_a_borona, kilos_merma = self.conversiones.totales_periodo(desde, hasta)
+
+        # ------------------------------------------------- lo que se cuenta en barras
+        # Su propio renglón de punta a punta: barras compradas, barras vendidas y la
+        # plata de cada lado. Ninguna de estas cifras entra en las de arriba.
+        barras_compradas, compras_mozzarella = self.compras.totales_periodo_barras(
+            desde, hasta
+        )
+        barras_vendidas, ventas_mozzarella = self.ventas.totales_periodo_barras(desde, hasta)
+        gastos_mozzarella = self.ventas.gastos_periodo_barras(desde, hasta)
+
+        # ---------------------------------------------- la plata, que SÍ se suma
+        total_compras = compras_kilos + compras_mozzarella
+        total_ventas = ventas_kilos + ventas_mozzarella
+        total_gastos = gastos_kilos + gastos_mozzarella
 
         kilos_hist_comprados, borona_de_compras, por_pagar = self.compras.acumulados()
         hist_queso_vendido, hist_borona_vendida, por_cobrar = self.ventas.acumulados()
@@ -1554,11 +1932,27 @@ class ReventaResumenService:
         convertido = self.conversiones.total_convertido()
         a_borona = self.conversiones.total_a_borona()
 
+        # El promedio POR KILO divide la plata DE LOS KILOS entre los kilos. Ojo con
+        # no ponerle `total_compras` (que ya incluye las barras): saldría un "precio
+        # por kilo" inflado con pesos que no salieron de ningún kilo, y el dueño lo
+        # cruza a mano con lo que le pagó al productor.
         precio_prom_compra = (
-            (total_compras / kilos_comprados).quantize(DOS_DECIMALES) if kilos_comprados else CERO
+            (compras_kilos / kilos_comprados).quantize(DOS_DECIMALES) if kilos_comprados else CERO
         )
         precio_prom_venta = (
             (ventas_queso / kilos_queso).quantize(DOS_DECIMALES) if kilos_queso else CERO
+        )
+        # Los mismos dos promedios en la otra unidad: plata de las barras entre
+        # barras. Nunca se cruzan con los de arriba.
+        precio_prom_compra_barra = (
+            (compras_mozzarella / barras_compradas).quantize(DOS_DECIMALES)
+            if barras_compradas
+            else CERO
+        )
+        precio_prom_venta_barra = (
+            (ventas_mozzarella / barras_vendidas).quantize(DOS_DECIMALES)
+            if barras_vendidas
+            else CERO
         )
         # Kilos que de verdad se vendieron: queso + borona. Es la base de los
         # promedios por kilo vendido (antes solo contaba el queso, y daba 0
@@ -1571,21 +1965,52 @@ class ReventaResumenService:
         # este residuo coincide con `kilos_disponibles` cuando el período abarca
         # todo el histórico, y las dos cifras no se contradicen en pantalla.
         kilos_pendientes = kilos_comprados - kilos_queso - kilos_a_borona - kilos_merma
+        # El residuo de las barras, CON SIGNO y en su propia unidad: compradas −
+        # vendidas. Negativo significa que se vendieron barras compradas antes del
+        # período, igual que en los kilos. No lleva conversiones ni merma: la
+        # mozzarella no participa en esos ajustes (ver `barras_disponibles`).
+        barras_pendientes = barras_compradas - barras_vendidas
         # Ganancia neta EXACTA del período = lo que se vendió − lo que se compró
         # − los gastos de venta. Al restar TODA la compra (no solo el costo de lo
         # vendido) queda contado lo que no se alcanzó a vender y la merma real.
+        # Suma las dos unidades porque son PESOS: es la cifra que el dueño espera
+        # ver como "lo que dejó el negocio", no "lo que dejó el queso".
         ganancia = (total_ventas - total_compras - total_gastos).quantize(DOS_DECIMALES)
+        # El margen POR KILO solo mira la plata de los kilos, y esto es lo delicado:
+        # dividir la ganancia TOTAL entre los kilos vendidos daría un "peso por
+        # kilo" que lleva adentro lo que dejaron las barras. Con 20 kg y 500 barras
+        # esa cifra no diría nada del queso.
+        ganancia_kilos = (ventas_kilos - compras_kilos - gastos_kilos).quantize(DOS_DECIMALES)
         margen = (
-            (ganancia / kilos_vendidos_total).quantize(DOS_DECIMALES)
+            (ganancia_kilos / kilos_vendidos_total).quantize(DOS_DECIMALES)
             if kilos_vendidos_total
+            else CERO
+        )
+        # Lo mismo por BARRA VENDIDA, con la plata de las barras y nada más.
+        ganancia_mozzarella = (
+            ventas_mozzarella - compras_mozzarella - gastos_mozzarella
+        ).quantize(DOS_DECIMALES)
+        margen_barra = (
+            (ganancia_mozzarella / barras_vendidas).quantize(DOS_DECIMALES)
+            if barras_vendidas
             else CERO
         )
         # Lo neto que dejó cada kilo COMPRADO en el período. El divisor son los
         # kilos comprados (no los vendidos) a propósito: así repartirlo entre los
         # productores suma exactamente la ganancia neta del período.
+        # El numerador es el neto DE LOS KILOS: si trajera la plata de las barras,
+        # repartirlo entre los kilos les acreditaría a los productores de queso una
+        # ganancia que salió de la mozzarella.
         valor_realizado_kilo = (
-            ((total_ventas - total_gastos) / kilos_comprados).quantize(DOS_DECIMALES)
+            ((ventas_kilos - gastos_kilos) / kilos_comprados).quantize(DOS_DECIMALES)
             if kilos_comprados
+            else CERO
+        )
+        valor_realizado_barra = (
+            ((ventas_mozzarella - gastos_mozzarella) / barras_compradas).quantize(
+                DOS_DECIMALES
+            )
+            if barras_compradas
             else CERO
         )
 
@@ -1604,12 +2029,27 @@ class ReventaResumenService:
             valor_realizado_kilo=valor_realizado_kilo,
             kilos_borona_vendidos=kilos_borona,
             total_ventas_borona=ventas_borona,
+            # ------------------------------------------------------ mozzarella
+            barras_compradas=barras_compradas,
+            total_compras_mozzarella=compras_mozzarella,
+            barras_vendidas=barras_vendidas,
+            total_ventas_mozzarella=ventas_mozzarella,
+            total_gastos_mozzarella=gastos_mozzarella,
+            precio_promedio_compra_barra=precio_prom_compra_barra,
+            precio_promedio_venta_barra=precio_prom_venta_barra,
+            margen_por_barra=margen_barra,
+            valor_realizado_barra=valor_realizado_barra,
+            barras_pendientes=barras_pendientes,
             kilos_a_borona=kilos_a_borona,
             kilos_merma=kilos_merma,
             kilos_pendientes=kilos_pendientes,
             por_producto=self._filas_por_producto(
                 kilos_comprados=kilos_comprados,
-                total_compras=total_compras,
+                # LA PLATA DE LOS KILOS, no `total_compras`: el desglose reparte
+                # este costo entre los DESTINOS DE LOS KILOS (vendido, borona,
+                # merma, inventario), y meterle lo que costaron unas barras le
+                # cargaría a esos destinos una plata que no es suya.
+                total_compras=compras_kilos,
                 costo_kilo=precio_prom_compra,
                 kilos_queso=kilos_queso,
                 ventas_queso=ventas_queso,
@@ -1620,18 +2060,33 @@ class ReventaResumenService:
                 gastos_borona=gastos_borona,
                 kilos_merma=kilos_merma,
                 kilos_pendientes=kilos_pendientes,
+                # La mozzarella con su plata y sus barras, para sus dos renglones.
+                barras_compradas=barras_compradas,
+                compras_mozzarella=compras_mozzarella,
+                barras_vendidas=barras_vendidas,
+                ventas_mozzarella=ventas_mozzarella,
+                gastos_mozzarella=gastos_mozzarella,
             ),
             por_productor=self._filas_por_productor(
                 desde,
                 hasta,
                 valor_realizado_kilo=valor_realizado_kilo,
                 # El reparto se hace con el neto SIN redondear por kilo, así la
-                # columna suma exacto la ganancia del período.
-                neto_periodo=total_ventas - total_gastos,
+                # columna suma exacto la ganancia del período. Y con el neto DE LOS
+                # KILOS: el de las barras va por su propio lado, abajo.
+                neto_periodo=ventas_kilos - gastos_kilos,
                 kilos_comprados=kilos_comprados,
+                valor_realizado_barra=valor_realizado_barra,
+                neto_barras=ventas_mozzarella - gastos_mozzarella,
+                barras_compradas=barras_compradas,
             ),
             kilos_disponibles=kilos_hist_comprados - hist_queso_vendido - convertido,
             borona_disponible=borona_de_compras + a_borona - hist_borona_vendida,
+            # El tercer inventario, en su propia unidad y jamás sumado con los dos
+            # de arriba. Sale del mismo cálculo que usan los guardias de
+            # existencias, para que la pantalla y el guardia no se contradigan.
+            barras_disponibles=self.compras.barras_acumuladas()
+            - self.ventas.barras_acumuladas(),
             # Las dos tarjetas de cartera suman el sistema MÁS el libro anterior
             # (es la plata que de verdad se debe hoy), y enseguida va ese pedazo
             # por separado para poder mostrar el desglose.
@@ -1711,13 +2166,18 @@ class ReventaResumenService:
         filas: list[EstadoCuentaVenta] = []
         pagos: list[EstadoCuentaPago] = []
         total_kilos = CERO
+        # El total de barras se acumula APARTE del de kilos. Sumarlos daría una
+        # cifra que el cliente no podría reconocer en ninguna entrega.
+        total_barras = CERO
         total_facturado = CERO
         total_abonado = CERO
         for venta in ventas:
             kilos = Decimal(venta.kilos)
+            barras = Decimal(venta.barras or CERO)
             valor = Decimal(venta.valor_total)
             abonado = Decimal(venta.abonado)
             total_kilos += kilos
+            total_barras += barras
             total_facturado += valor
             total_abonado += abonado
             tipo = venta.tipo or TIPO_VENTA_QUESO
@@ -1726,8 +2186,11 @@ class ReventaResumenService:
                     fecha=venta.fecha,
                     tipo=tipo,
                     producto=NOMBRE_PRODUCTO.get(tipo, tipo.capitalize()),
+                    unidad=unidad_de(tipo),
                     kilos=kilos,
                     precio_kilo=Decimal(venta.precio_kilo),
+                    barras=barras,
+                    precio_barra=Decimal(venta.precio_barra or CERO),
                     valor_total=valor,
                     abonado=abonado,
                     saldo=valor - abonado,
@@ -1777,6 +2240,7 @@ class ReventaResumenService:
             emitido=date.today(),
             compras=len(filas),
             total_kilos=total_kilos,
+            total_barras=total_barras,
             total_facturado=total_facturado,
             total_abonado=total_abonado,
             # TODO lo que debe: lo del sistema más lo del libro anterior.
@@ -1860,8 +2324,13 @@ class ReventaResumenService:
                 {
                     "fecha": v.fecha,
                     "producto": v.producto,
+                    # La unidad viaja para que el PDF rotule la cantidad como lo
+                    # que es. Sin ella, una venta de 8 barras se imprimiría "0 kg".
+                    "unidad": v.unidad,
                     "kilos": v.kilos,
                     "precio_kilo": v.precio_kilo,
+                    "barras": v.barras,
+                    "precio_barra": v.precio_barra,
                     "valor_total": v.valor_total,
                     "abonado": v.abonado,
                     "saldo": v.saldo,
@@ -1882,6 +2351,7 @@ class ReventaResumenService:
                 for s in datos.saldos_anteriores
             ],
             total_kilos=datos.total_kilos,
+            total_barras=datos.total_barras,
             total_facturado=datos.total_facturado,
             total_abonado=datos.total_abonado,
             libro_anterior_total=datos.libro_anterior_total,
@@ -1947,23 +2417,32 @@ class ReventaResumenService:
         filas: list[EstadoCuentaCompra] = []
         pagos: list[EstadoCuentaPagoProductor] = []
         total_kilos = CERO
+        # Las barras que se le compraron, en su propio total (ver EstadoCuentaCompra).
+        total_barras = CERO
         total_comprado = CERO
         total_pagado = CERO
         for compra in compras:
             # Los kilos que salen son los NETOS: son los que se le pagan. La
             # borona va en su propio campo, sin sumar al total ni al valor.
             kilos = Decimal(compra.kilos_netos)
+            barras = Decimal(compra.barras or CERO)
             valor = Decimal(compra.valor_total)
             abonado = Decimal(compra.abonado)
             total_kilos += kilos
+            total_barras += barras
             total_comprado += valor
             total_pagado += abonado
+            tipo = compra.tipo or TIPO_VENTA_QUESO
             filas.append(
                 EstadoCuentaCompra(
                     fecha=compra.fecha,
+                    tipo=tipo,
+                    unidad=unidad_de(tipo),
                     kilos=kilos,
                     borona_kilos=Decimal(compra.borona_kilos or CERO),
                     precio_kilo=Decimal(compra.precio_kilo),
+                    barras=barras,
+                    precio_barra=Decimal(compra.precio_barra or CERO),
                     valor_total=valor,
                     abonado=abonado,
                     saldo=valor - abonado,
@@ -2014,6 +2493,7 @@ class ReventaResumenService:
             emitido=date.today(),
             compras=len(filas),
             total_kilos=total_kilos,
+            total_barras=total_barras,
             total_comprado=total_comprado,
             total_pagado=total_pagado,
             saldos_anteriores=filas_libro,
@@ -2095,9 +2575,14 @@ class ReventaResumenService:
             compras_detalle=[
                 {
                     "fecha": c.fecha,
+                    # Igual que en el del cliente: la unidad decide cómo se rotula
+                    # la cantidad, para que una compra de barras no diga "0 kg".
+                    "unidad": c.unidad,
                     "kilos": c.kilos,
                     "borona_kilos": c.borona_kilos,
                     "precio_kilo": c.precio_kilo,
+                    "barras": c.barras,
+                    "precio_barra": c.precio_barra,
                     "valor_total": c.valor_total,
                     "abonado": c.abonado,
                     "saldo": c.saldo,
@@ -2118,6 +2603,7 @@ class ReventaResumenService:
                 for s in datos.saldos_anteriores
             ],
             total_kilos=datos.total_kilos,
+            total_barras=datos.total_barras,
             total_comprado=datos.total_comprado,
             total_pagado=datos.total_pagado,
             libro_anterior_total=datos.libro_anterior_total,
@@ -2246,6 +2732,10 @@ class TemporadaService(BaseService[Temporada]):
             kilos_a_borona=r.kilos_a_borona,
             kilos_merma=r.kilos_merma,
             kilos_pendientes=r.kilos_pendientes,
+            # La mozzarella de la temporada, en barras y aparte de los kilos.
+            barras_compradas=r.barras_compradas,
+            barras_vendidas=r.barras_vendidas,
+            barras_pendientes=r.barras_pendientes,
             total_compras=r.total_compras,
             total_ventas=r.total_ventas,
             total_gastos=r.total_gastos,
@@ -2253,13 +2743,25 @@ class TemporadaService(BaseService[Temporada]):
             margen_por_kilo=r.margen_por_kilo,
             precio_promedio_compra=r.precio_promedio_compra,
             precio_promedio_venta=r.precio_promedio_venta,
+            precio_promedio_compra_barra=r.precio_promedio_compra_barra,
+            precio_promedio_venta_barra=r.precio_promedio_venta_barra,
             por_cobrar=por_cobrar,
             por_pagar=por_pagar,
             # Los kilos pendientes pueden salir NEGATIVOS (se vendió queso que
             # venía de una temporada anterior): eso no es queso por vender, así
             # que "cerrada de verdad" mira que no SOBRE nada, no que dé cero justo.
+            #
+            # Y MIRA LAS DOS UNIDADES. Una temporada con 8 barras sin vender no está
+            # cerrada, aunque no le quede un gramo de queso: sin la condición de las
+            # barras la pantalla diría "cerrada de verdad" con mercancía todavía en
+            # la bodega, que es exactamente la clase de mentira que este trabajo
+            # tiene que evitar. Son dos condiciones separadas y no una suma: los
+            # kilos con los kilos y las barras con las barras.
             cerrada_de_verdad=(
-                r.kilos_pendientes <= CERO and por_cobrar <= CERO and por_pagar <= CERO
+                r.kilos_pendientes <= CERO
+                and r.barras_pendientes <= CERO
+                and por_cobrar <= CERO
+                and por_pagar <= CERO
             ),
         )
 
@@ -2395,6 +2897,13 @@ class LoteService:
             kilos_sin_lote=reparto.kilos_sin_lote,
             borona_sin_lote=reparto.borona_sin_lote,
             ingreso_sin_lote=reparto.ingreso_sin_lote,
+            # Cuántas barras de mozzarella hay compradas que NO están contadas en
+            # este panel. No es un error como los tres de arriba: es el alcance del
+            # panel dicho de frente. Este panel es de kilos, la mozzarella no entra
+            # al reparto FIFO (ver eventos_para_lotes) y su ganancia se lee completa
+            # en el Resumen. Callarlo dejaría al dueño creyendo que
+            # `total_ganancia` es todo lo que dejó el negocio.
+            barras_fuera_del_reparto=self.compras.barras_acumuladas(),
         )
 
     def ganancia_por_dia(self, desde: date, hasta: date) -> GananciaPorDia:

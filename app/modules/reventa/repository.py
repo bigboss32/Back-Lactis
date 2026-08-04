@@ -8,6 +8,7 @@ from app.common.repository import BaseRepository
 from app.modules.reventa.models import (
     DESTINO_BORONA,
     DESTINO_MERMA,
+    TIPO_MOZZARELLA,
     AdjuntoReventa,
     CompraQueso,
     ConversionBorona,
@@ -17,6 +18,27 @@ from app.modules.reventa.models import (
 )
 
 CERO = Decimal("0")
+
+
+def es_mozzarella(columna_tipo):
+    """La fila se mide en BARRAS (mozzarella)."""
+    return columna_tipo == TIPO_MOZZARELLA
+
+
+def se_mide_en_kilos(columna_tipo):
+    """La fila se mide en KILOS (queso o borona).
+
+    Se escribe con COALESCE y no con un simple `tipo != 'mozzarella'` a propósito.
+    En SQL cualquier comparación contra NULL da NULL —ni verdadero ni falso—, así
+    que una fila vieja con el tipo en blanco quedaría FUERA de los dos lados: sus
+    kilos y su plata desaparecerían del resumen sin que nada lo avise. Con el
+    COALESCE, lo que no es mozzarella son kilos, que es la verdad: la mozzarella
+    es lo nuevo y todo lo que ya existía se compró y se vendió por peso.
+
+    Es el mismo criterio del CHECK de las tablas, que también dice
+    `tipo <> 'mozzarella'` en vez de enumerar queso y borona.
+    """
+    return func.coalesce(columna_tipo, "") != TIPO_MOZZARELLA
 
 
 def clave_nombre(columna):
@@ -60,6 +82,18 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
     default_order_by = "fecha"
 
     def totales_periodo(self, desde: date, hasta: date) -> tuple[Decimal, Decimal]:
+        """(kilos netos, plata) de las compras EN KILOS del período.
+
+        FILTRA LA MOZZARELLA, y la plata que devuelve es SOLO la de los kilos. Es
+        la decisión que hace que el precio promedio por kilo siga significando
+        algo: `precio_promedio_compra = plata / kilos`, y si la plata trajera
+        adentro lo que costaron unas barras, ese promedio saldría inflado con
+        pesos que no salieron de ningún kilo. Lo mismo pasa con el desglose por
+        producto, que reparte esta plata entre los DESTINOS DE LOS KILOS.
+
+        La plata de la mozzarella no se pierde: sale por `totales_periodo_barras`
+        y el servicio la suma al total de compras, porque los pesos sí se suman.
+        """
         fila = self.db.execute(
             select(
                 func.coalesce(func.sum(CompraQueso.kilos_netos), 0),
@@ -69,6 +103,29 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                 CompraQueso.deleted_at.is_(None),
                 CompraQueso.estado != "anulada",
                 CompraQueso.fecha.between(desde, hasta),
+                se_mide_en_kilos(CompraQueso.tipo),
+            )
+        ).one()
+        return Decimal(fila[0]), Decimal(fila[1])
+
+    def totales_periodo_barras(self, desde: date, hasta: date) -> tuple[Decimal, Decimal]:
+        """(barras, plata) de las compras de MOZZARELLA del período.
+
+        El espejo exacto de `totales_periodo`, en la otra unidad. Son dos consultas
+        y no una con dos pares de columnas porque así ninguna de las dos puede
+        devolver una cifra contaminada con la otra unidad: cada una filtra por su
+        lado y lo que suma es homogéneo.
+        """
+        fila = self.db.execute(
+            select(
+                func.coalesce(func.sum(CompraQueso.barras), 0),
+                func.coalesce(func.sum(CompraQueso.valor_total), 0),
+            ).where(
+                CompraQueso.empresa_id == self.empresa_id,
+                CompraQueso.deleted_at.is_(None),
+                CompraQueso.estado != "anulada",
+                CompraQueso.fecha.between(desde, hasta),
+                es_mozzarella(CompraQueso.tipo),
             )
         ).one()
         return Decimal(fila[0]), Decimal(fila[1])
@@ -110,6 +167,16 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
 
         Devuelve (fecha, created_at, productor, kilos_netos, borona_kilos,
         valor_total, saldo acotado en cero, precio_kilo).
+
+        LA MOZZARELLA NO ENTRA AQUÍ, y es a propósito. El motor de lotes está
+        escrito en kilos de punta a punta: un lote son las compras de una fecha
+        con UN costo por kilo (`costo_total / kilos_comprados`). Una compra de
+        barras tiene kilos 0 y plata > 0, así que entraría inflando el costo por
+        kilo del lote con pesos que no salieron de ningún kilo, y su plata se
+        quedaría además dando vueltas en "costo de lo que sigue en inventario"
+        sin kilos a los que pertenecer: justo la mezcla de unidades que este
+        trabajo tiene que evitar. La ganancia de la mozzarella se ve completa en
+        el Resumen, en su propio renglón y en su propia unidad.
         """
         return list(
             self.db.execute(
@@ -127,16 +194,43 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                     CompraQueso.empresa_id == self.empresa_id,
                     CompraQueso.deleted_at.is_(None),
                     CompraQueso.estado != "anulada",
+                    se_mide_en_kilos(CompraQueso.tipo),
                 )
                 .order_by(CompraQueso.fecha, CompraQueso.created_at)
             ).all()
         )
+
+    def barras_acumuladas(self) -> Decimal:
+        """Barras de mozzarella compradas HISTÓRICAS (sin filtro de fechas).
+
+        Va en un método aparte y no como una cuarta columna de `acumulados()` para
+        que sea IMPOSIBLE unpackearla por descuido donde se esperan kilos. Quien
+        pide barras tiene que escribir `barras_acumuladas()`, con la unidad en el
+        nombre.
+        """
+        total = self.db.scalar(
+            select(func.coalesce(func.sum(CompraQueso.barras), 0)).where(
+                CompraQueso.empresa_id == self.empresa_id,
+                CompraQueso.deleted_at.is_(None),
+                CompraQueso.estado != "anulada",
+            )
+        )
+        return Decimal(total or 0)
 
     def acumulados(self) -> tuple[Decimal, Decimal, Decimal]:
         """(kilos netos históricos, borona de compras, saldo por pagar).
 
         El saldo va acotado en cero fila por fila (ver `saldo_pendiente`): una
         compra pagada de más no puede rebajar lo que se les debe a los demás.
+
+        NO LLEVA FILTRO DE TIPO, Y ESO ES CORRECTO EN LAS TRES CIFRAS:
+        - los kilos y la borona de una compra de mozzarella están en CERO (lo
+          exige el CHECK de la tabla), así que no pueden contaminar esas sumas
+          ni por descuido;
+        - el saldo SÍ tiene que incluirlas: lo que se le debe a un productor por
+          unas barras es plata que se le debe igual, y la tarjeta "Por pagar a
+          productores" es de pesos, no de kilos.
+        Las barras se piden con `barras_acumuladas()`.
         """
         fila = self.db.execute(
             select(
@@ -158,14 +252,25 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
 
     def por_productor(
         self, desde: date, hasta: date
-    ) -> list[tuple[str, int, Decimal, Decimal, Decimal]]:
+    ) -> list[tuple[str, int, Decimal, Decimal, Decimal, Decimal, Decimal]]:
         """Compras del período agrupadas por productor:
-        (productor, cuántas compras, kilos, valor comprado, saldo por pagar).
+        (productor, cuántas compras, kilos, valor comprado TOTAL, saldo por pagar,
+        barras, valor comprado en barras).
         Ordenadas por valor comprado de mayor a menor.
 
         Ojo: el valor comprado NO es lo que se le pagó (eso es `abonado`), es lo
         que valen sus compras. El saldo por pagar sí es HISTÓRICO (lo que se le
         debe hoy), para que cuadre con la tarjeta "Por pagar a productores".
+
+        LAS DOS UNIDADES VIAJAN SEPARADAS. `kilos` y `barras` son columnas
+        distintas y nunca se suman entre sí. La plata sí: el 4.º campo es TODA la
+        plata que se le compró (kilos + barras) y el 7.º es el pedazo de las
+        barras, para poder sacar los dos precios promedio por separado:
+            precio por kilo  = (4.º - 7.º) / kilos
+            precio por barra = 7.º / barras
+        Los tres primeros campos y el 5.º conservan el mismo significado que
+        antes de la mozzarella, así que el detalle de un productor que solo
+        vende queso sale idéntico al de siempre.
         """
         clave = clave_nombre(CompraQueso.productor)
         base = [
@@ -180,6 +285,17 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                 func.count(),
                 func.coalesce(func.sum(CompraQueso.kilos_netos), 0),
                 func.coalesce(func.sum(CompraQueso.valor_total), 0),
+                func.coalesce(func.sum(CompraQueso.barras), 0),
+                # La plata de SUS compras de mozzarella. Con .filter() (FILTER de
+                # SQL, que SQLAlchemy traduce a CASE donde no lo hay) y no con una
+                # segunda consulta: así el mismo GROUP BY entrega las dos y no hay
+                # forma de que una traiga productores que la otra no.
+                func.coalesce(
+                    func.sum(CompraQueso.valor_total).filter(
+                        es_mozzarella(CompraQueso.tipo)
+                    ),
+                    0,
+                ),
             )
             .where(*base, CompraQueso.fecha.between(desde, hasta))
             .group_by(clave)
@@ -207,6 +323,8 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                 Decimal(fila[3]),
                 Decimal(fila[4]),
                 Decimal(saldos.get(fila[0], 0)),
+                Decimal(fila[5]),
+                Decimal(fila[6]),
             )
             for fila in filas
         ]
@@ -319,11 +437,22 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
     def totales_periodo(
         self, desde: date, hasta: date, tipo: str | None = None
     ) -> tuple[Decimal, Decimal]:
+        """(kilos, plata) de las ventas EN KILOS del período.
+
+        SIN `tipo` NO SIGNIFICA "TODAS": significa todas las de kilos (queso y
+        borona). La mozzarella queda fuera siempre, y no es un detalle: el resumen
+        saca la borona POR DIFERENCIA (`total - queso`) para que ningún tipo nuevo
+        ni ningún dato viejo con el tipo en blanco pierda su plata. Si aquí
+        entrara la mozzarella, esa resta le acreditaría a la BORONA los pesos de
+        las barras y la fila de borona del desglose diría una cifra que no es.
+        Las barras salen por `totales_periodo_barras`.
+        """
         criterios = [
             VentaQueso.empresa_id == self.empresa_id,
             VentaQueso.deleted_at.is_(None),
             VentaQueso.estado != "anulada",
             VentaQueso.fecha.between(desde, hasta),
+            se_mide_en_kilos(VentaQueso.tipo),
         ]
         if tipo:
             criterios.append(VentaQueso.tipo == tipo)
@@ -335,6 +464,34 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
         ).one()
         return Decimal(fila[0]), Decimal(fila[1])
 
+    def totales_periodo_barras(self, desde: date, hasta: date) -> tuple[Decimal, Decimal]:
+        """(barras, plata) de las ventas de MOZZARELLA del período."""
+        fila = self.db.execute(
+            select(
+                func.coalesce(func.sum(VentaQueso.barras), 0),
+                func.coalesce(func.sum(VentaQueso.valor_total), 0),
+            ).where(
+                VentaQueso.empresa_id == self.empresa_id,
+                VentaQueso.deleted_at.is_(None),
+                VentaQueso.estado != "anulada",
+                VentaQueso.fecha.between(desde, hasta),
+                es_mozzarella(VentaQueso.tipo),
+            )
+        ).one()
+        return Decimal(fila[0]), Decimal(fila[1])
+
+    def barras_acumuladas(self) -> Decimal:
+        """Barras de mozzarella vendidas HISTÓRICAS. Método aparte y con la unidad
+        en el nombre, por lo mismo que en las compras."""
+        total = self.db.scalar(
+            select(func.coalesce(func.sum(VentaQueso.barras), 0)).where(
+                VentaQueso.empresa_id == self.empresa_id,
+                VentaQueso.deleted_at.is_(None),
+                VentaQueso.estado != "anulada",
+            )
+        )
+        return Decimal(total or 0)
+
     def acumulados(self) -> tuple[Decimal, Decimal, Decimal]:
         """(kilos queso vendidos, kilos borona vendidos, saldo por cobrar).
 
@@ -343,6 +500,11 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
         venta ya pagada deja esa venta con saldo negativo, y ese negativo restaba
         de la tarjeta "Por cobrar a clientes" como si los demás clientes debieran
         menos.
+
+        Los kilos ya venían filtrados por tipo ('queso' y 'borona' cada uno en su
+        columna), así que la mozzarella no entra en ninguno de los dos: las barras
+        se piden con `barras_acumuladas()`. El saldo SÍ la incluye, y tiene que
+        incluirla: lo que un cliente debe por unas barras es plata que debe igual.
         """
         fila = self.db.execute(
             select(
@@ -390,6 +552,13 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
 
         Devuelve (fecha, created_at, tipo, kilos, valor_total, gasto_monto,
         cliente, precio_kilo).
+
+        LA MOZZARELLA NO ENTRA, igual que en las compras y por la misma razón
+        (ver `CompraQuesoRepository.eventos_para_lotes`). Aquí además sería peor:
+        una venta de barras tiene kilos 0 y plata > 0, así que el reparto no le
+        encontraría kilos de dónde salir y su plata caería toda en
+        `ingreso_sin_lote` —el aviso de "falta cargar una compra"—, que empezaría
+        a gritar por unas ventas que están perfectamente registradas.
         """
         return list(
             self.db.execute(
@@ -407,24 +576,50 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
                     VentaQueso.empresa_id == self.empresa_id,
                     VentaQueso.deleted_at.is_(None),
                     VentaQueso.estado != "anulada",
+                    se_mide_en_kilos(VentaQueso.tipo),
                 )
                 .order_by(VentaQueso.fecha, VentaQueso.created_at)
             ).all()
         )
 
     def gastos_periodo(self, desde: date, hasta: date, tipo: str | None = None) -> Decimal:
-        """Suma de gastos de venta (transporte, etc.) del período. Con `tipo`
-        solo cuenta las ventas de ese tipo ('queso' o 'borona')."""
+        """Suma de gastos de venta (transporte, etc.) de las ventas EN KILOS del
+        período. Con `tipo` solo cuenta las ventas de ese tipo ('queso' o 'borona').
+
+        Sin `tipo` NO son todas: son las de kilos, por lo mismo que en
+        `totales_periodo`. El resumen saca los gastos de la borona por diferencia,
+        y con la mozzarella dentro esa resta le cargaría a la borona el flete de
+        unas barras. Los de la mozzarella salen por `gastos_periodo_barras`.
+        """
         criterios = [
             VentaQueso.empresa_id == self.empresa_id,
             VentaQueso.deleted_at.is_(None),
             VentaQueso.estado != "anulada",
             VentaQueso.fecha.between(desde, hasta),
+            se_mide_en_kilos(VentaQueso.tipo),
         ]
         if tipo:
             criterios.append(VentaQueso.tipo == tipo)
         total = self.db.scalar(
             select(func.coalesce(func.sum(VentaQueso.gasto_monto), 0)).where(*criterios)
+        )
+        return Decimal(total or 0)
+
+    def gastos_periodo_barras(self, desde: date, hasta: date) -> Decimal:
+        """Gastos de venta de la MOZZARELLA del período, en PESOS.
+
+        Ojo: lo que se suma es `gasto_monto` (pesos), no `gasto_por_barra`. El
+        gasto por barra es un precio unitario y sumarlo entre ventas no daría
+        nada: sumar "$500 por barra" con "$700 por barra" no son $1.200 de nada.
+        """
+        total = self.db.scalar(
+            select(func.coalesce(func.sum(VentaQueso.gasto_monto), 0)).where(
+                VentaQueso.empresa_id == self.empresa_id,
+                VentaQueso.deleted_at.is_(None),
+                VentaQueso.estado != "anulada",
+                VentaQueso.fecha.between(desde, hasta),
+                es_mozzarella(VentaQueso.tipo),
+            )
         )
         return Decimal(total or 0)
 

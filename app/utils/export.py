@@ -102,6 +102,26 @@ def kilogramos(valor: Any) -> str:
     return f"{_miles(numero, _decimales_utiles(numero, 2))} kg"
 
 
+def barras(valor: Any) -> str:
+    """Barras de mozzarella: "8 barras", "1 barra", y SIN decimales nunca.
+
+    Nunca dice "kg", y eso es el punto de que exista esta función en vez de
+    reutilizar `kilogramos`: un documento que le diga "8 kg" a alguien que recibió
+    8 barras está mintiendo sobre lo que se despachó, y el cliente o el productor
+    no reconocería su propia entrega al cuadrar a mano.
+
+    Sin decimales porque una barra es una barra: la columna es Numeric(12,0) y el
+    esquema de entrada rechaza "8,5 barras". Imprimir "8,0 barras" haría pensar que
+    puede haber medias.
+
+    Se pluraliza porque el documento lo lee una persona: "1 barras" se ve como un
+    error del sistema y le quita confianza a todo lo demás que diga la hoja.
+    """
+    numero = Decimal(valor or 0).quantize(Decimal("1"))
+    unidad = "barra" if abs(numero) == 1 else "barras"
+    return f"{_miles(numero, 0)} {unidad}"
+
+
 def build_pdf(
     *,
     title: str,
@@ -395,16 +415,25 @@ def build_estado_cuenta_pdf(
     libro_anterior_total: Decimal = Decimal("0"),
     libro_anterior_abonado: Decimal = Decimal("0"),
     libro_anterior_saldo: Decimal = Decimal("0"),
+    total_barras: Decimal = Decimal("0"),
 ) -> bytes:
     """Estado de cuenta de un cliente, con la misma familia visual del comprobante
     de liquidación.
 
     `ventas`: dicts con {fecha, producto, kilos, precio_kilo, valor_total,
-    abonado, saldo}. `pagos`: dicts con {fecha, valor}, y son SOLO los abonos de
+    abonado, saldo} y, si la venta es de mozzarella, {unidad: 'barra', barras,
+    precio_barra}. `pagos`: dicts con {fecha, valor}, y son SOLO los abonos de
     esas ventas: lo que el cliente abonó a una cuenta del sistema anterior va en
     la columna "Abonado" de `saldos_anteriores` (ver el comentario de la sección
     "Pagos recibidos", que explica por qué no se mezclan y cómo se le dice al
     cliente para no negarle un pago que sí hizo).
+
+    LAS DOS UNIDADES NO SE SUMAN. Cada fila imprime su cantidad con su unidad
+    ("40 kg" o "8 barras") y la fila de TOTALES lleva los dos subtotales en
+    renglones separados: `total_kilos` y `total_barras`. No hay ni puede haber una
+    casilla con la suma de los dos, porque 40 kg y 8 barras no son 48 de nada. Si
+    `total_barras` viene en cero —el caso de todos los clientes de hoy— el
+    documento sale exactamente igual que siempre, con la columna rotulada "Kilos".
 
     `saldos_anteriores`: dicts con {fecha, concepto, valor_total, abonado,
     saldo}, las cuentas a medio pagar que el cliente traía del sistema anterior.
@@ -534,24 +563,59 @@ def build_estado_cuenta_pdf(
     # --- Detalle de compras (solo lo que el cliente compró y pagó)
     elements.append(Paragraph("Detalle de compras", st_head))
     if ventas:
+        # Los rótulos de las dos columnas de cantidad cambian SOLO si el cliente
+        # tiene mozzarella. Con "Kilos" y "Precio/kg" encima de una fila de barras,
+        # la cabecera contradiría la celda; y poner "Cantidad" siempre le cambiaría
+        # el documento a todos los clientes de hoy sin necesidad.
+        hay_barras = bool(total_barras) or any(
+            v.get("unidad") == "barra" for v in ventas
+        )
         det_data: list[list[Any]] = [
-            ["Fecha", "Producto", "Kilos", "Precio/kg", "Total", "Abonado", "Saldo"]
+            [
+                "Fecha",
+                "Producto",
+                "Cantidad" if hay_barras else "Kilos",
+                "Precio" if hay_barras else "Precio/kg",
+                "Total",
+                "Abonado",
+                "Saldo",
+            ]
         ]
         for venta in ventas:
+            # Cada fila con SU unidad. La que manda es `unidad`, que el servicio
+            # deduce del tipo: no se adivina mirando cuál de las dos cantidades
+            # viene en cero, porque una venta de 0 kg no existe pero un dato raro sí
+            # podría, y entonces la fila diría cualquier cosa.
+            de_barras = venta.get("unidad") == "barra"
+            cantidad = (
+                barras(venta.get("barras")) if de_barras else kilogramos(venta["kilos"])
+            )
+            precio = (
+                pesos(venta.get("precio_barra")) if de_barras else pesos(venta["precio_kilo"])
+            )
             det_data.append(
                 [
                     venta["fecha"].strftime("%d/%m/%Y"),
                     venta["producto"],
-                    Paragraph(kilogramos(venta["kilos"]), st_kilos),
-                    pesos(venta["precio_kilo"]),
+                    Paragraph(cantidad, st_kilos),
+                    precio,
                     pesos(venta["valor_total"]),
                     pesos(venta["abonado"]),
                     pesos(venta["saldo"]),
                 ]
             )
+        # Los TOTALES de cantidad van en RENGLONES SEPARADOS dentro de la misma
+        # celda, uno por unidad, y solo aparece el de la unidad que el cliente de
+        # verdad compró. Nunca se suman: no hay una casilla que junte kilos con
+        # barras porque esa cifra no significaría nada.
+        partes_total = []
+        if total_kilos or not hay_barras:
+            partes_total.append(kilogramos(total_kilos))
+        if total_barras:
+            partes_total.append(barras(total_barras))
         det_data.append(
             [
-                "TOTALES", "", Paragraph(kilogramos(total_kilos), st_kilos_tot), "",
+                "TOTALES", "", Paragraph("<br/>".join(partes_total), st_kilos_tot), "",
                 pesos(total_facturado), pesos(total_abonado), pesos(saldo_sistema),
             ]
         )
@@ -830,6 +894,7 @@ def build_estado_cuenta_productor_pdf(
     libro_anterior_total: Decimal = Decimal("0"),
     libro_anterior_abonado: Decimal = Decimal("0"),
     libro_anterior_saldo: Decimal = Decimal("0"),
+    total_barras: Decimal = Decimal("0"),
 ) -> bytes:
     """Estado de cuenta de un PRODUCTOR: el espejo de build_estado_cuenta_pdf.
 
@@ -839,9 +904,15 @@ def build_estado_cuenta_productor_pdf(
     logo, las tablas con header BRAND y el pie).
 
     `compras_detalle`: dicts con {fecha, kilos, borona_kilos, precio_kilo,
-    valor_total, abonado, saldo}. La borona NO lleva columna propia (ensancharía
+    valor_total, abonado, saldo} y, si la compra es de mozzarella, {unidad:
+    'barra', barras, precio_barra}. La borona NO lleva columna propia (ensancharía
     la tabla): va en una nota corta al pie, porque es información suya y es
     honesto decirle cuántos kilos vinieron con los lotes sin que se le paguen.
+
+    LAS DOS UNIDADES NO SE SUMAN, igual que en el documento del cliente: cada fila
+    imprime su cantidad con su unidad y los TOTALES llevan un renglón por unidad.
+    Con `total_barras` en cero —el caso de todos los productores de hoy— el
+    documento sale exactamente igual que siempre.
     `pagos`: dicts con {fecha, valor}, y son SOLO los abonos de esas compras: lo
     que se le abonó a una cuenta del sistema anterior va en la columna "Abonado"
     de `saldos_anteriores` (ver el comentario de la sección "Pagos realizados").
@@ -977,25 +1048,52 @@ def build_estado_cuenta_productor_pdf(
     # --- 3. Detalle de compras (solo lo suyo: lo que se le compró y se le pagó)
     elements.append(Paragraph("Detalle de compras", st_head))
     if compras_detalle:
+        # Mismo criterio que en el documento del cliente: los rótulos cambian solo
+        # si de verdad hay barras, para no tocarles el documento a los productores
+        # de queso, que son todos los de hoy.
+        hay_barras = bool(total_barras) or any(
+            c.get("unidad") == "barra" for c in compras_detalle
+        )
         det_data: list[list[Any]] = [
-            ["Fecha", "Kilos", "Precio/kg", "Total", "Abonado", "Saldo"]
+            [
+                "Fecha",
+                "Cantidad" if hay_barras else "Kilos",
+                "Precio" if hay_barras else "Precio/kg",
+                "Total",
+                "Abonado",
+                "Saldo",
+            ]
         ]
         borona_total = Decimal("0")
         for compra in compras_detalle:
             borona_total += Decimal(compra.get("borona_kilos") or 0)
+            # La unidad la manda el campo `unidad`, no se adivina (ver el del cliente).
+            de_barras = compra.get("unidad") == "barra"
+            cantidad = (
+                barras(compra.get("barras")) if de_barras else kilogramos(compra["kilos"])
+            )
+            precio = (
+                pesos(compra.get("precio_barra")) if de_barras else pesos(compra["precio_kilo"])
+            )
             det_data.append(
                 [
                     compra["fecha"].strftime("%d/%m/%Y"),
-                    Paragraph(kilogramos(compra["kilos"]), st_kilos),
-                    pesos(compra["precio_kilo"]),
+                    Paragraph(cantidad, st_kilos),
+                    precio,
                     pesos(compra["valor_total"]),
                     pesos(compra["abonado"]),
                     pesos(compra["saldo"]),
                 ]
             )
+        # Un renglón por unidad, nunca una casilla que las junte.
+        partes_total = []
+        if total_kilos or not hay_barras:
+            partes_total.append(kilogramos(total_kilos))
+        if total_barras:
+            partes_total.append(barras(total_barras))
         det_data.append(
             [
-                "TOTALES", Paragraph(kilogramos(total_kilos), st_kilos_tot), "",
+                "TOTALES", Paragraph("<br/>".join(partes_total), st_kilos_tot), "",
                 pesos(total_comprado), pesos(total_pagado), pesos(saldo_sistema),
             ]
         )
