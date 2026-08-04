@@ -1,6 +1,6 @@
 import uuid
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -32,6 +32,34 @@ from app.modules.recepcion.schemas import (
 from app.modules.transportadores.repository import TransportadorRepository
 
 CERO = Decimal("0")
+CENTAVOS = Decimal("0.01")
+
+
+def _centavos(valor: Decimal) -> Decimal:
+    """Redondea a centavos con el medio centavo PARA ARRIBA, como lo hace una persona.
+
+    Hace falta porque los litros llevan dos decimales y la tarifa del
+    transportador TAMBIÉN puede llevarlos (el dueño tiene un transportador a
+    $242,76 por litro): 227,55 L × $242,76 da 55.239,978, o sea tres decimales
+    que la columna Numeric(14,2) no guarda.
+
+    Sin redondear aquí pasaban dos cosas, y las dos con plata:
+      - la sesión no expira los objetos al hacer commit (expire_on_commit=False),
+        así que al guardar se devolvía el 55.239,978 de memoria mientras en la
+        base quedaba 55.239,98: la pantalla mostraba una cifra y al recargar
+        salía otra;
+      - la liquidación del transportador suma lo que está GUARDADO, así que el
+        desglose por día no cuadraba contra el total que el dueño revisa a mano.
+
+    Se usa ROUND_HALF_UP y no el ROUND_HALF_EVEN que Python trae por defecto
+    porque así es como redondea Postgres al meter el valor en la columna: de esta
+    forma lo que se devuelve y lo que queda guardado son el mismo número.
+
+    Con las tarifas de pesos enteros que hay hoy esto NO mueve ni un peso: litros
+    (2 decimales) por una tarifa entera da 2 decimales, y redondear a 2 decimales
+    algo que ya tiene 2 decimales lo deja idéntico.
+    """
+    return valor.quantize(CENTAVOS, rounding=ROUND_HALF_UP)
 
 # De más trabada a menos. Un día puede estar en DOS liquidaciones a la vez (la
 # leche al proveedor y el flete al transportador): la que manda para el candado
@@ -245,8 +273,11 @@ class RecepcionService(BaseService[RecepcionLeche]):
             transportador = TransportadorRepository(self.db, self.ctx.empresa_id).get_or_fail(transportador_id)
             tarifa = Decimal(transportador.valor_transporte)
 
-        data["valor_bruto"] = litros * precio
-        data["valor_transporte"] = litros * tarifa
+        # Se redondea a centavos ACÁ y no se deja que lo haga la columna, para que
+        # la cifra que se devuelve sea exactamente la que queda guardada. Ver
+        # _centavos: es lo que hace que el desglose de la liquidación sume el total.
+        data["valor_bruto"] = _centavos(litros * precio)
+        data["valor_transporte"] = _centavos(litros * tarifa)
         data["valor_neto"] = data["valor_bruto"] + bonif - desc
         if data["valor_neto"] < 0:
             raise BusinessError("El valor neto no puede ser negativo: revise los descuentos")
