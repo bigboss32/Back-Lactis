@@ -82,6 +82,216 @@ def _estado_que_manda(estados: list[str]) -> str | None:
     return None
 
 
+# --------------------------------------------------------- el candado POR CAMPO
+# Un día vive en DOS liquidaciones independientes y de dos personas distintas: la
+# leche al proveedor (`liquidacion_id`) y el flete al transportador
+# (`liquidacion_transporte_id`). Antes bastaba con que UNA de las dos ya hubiera
+# movido plata para trabar LA FILA ENTERA, y eso dejó al dueño sin salida en un
+# caso muy concreto que reportó así: "no se deja editar, y lo que necesito es
+# solo poder editar el transportador, porque el transportador no se ha
+# liquidado". Le habían pagado la leche del 29/07 a Patricia Laguna (44 L a
+# $2.050 = $90.200), pero se equivocaron al anotar quién la recogió y el flete de
+# ese día todavía no se había liquidado: no había ninguna razón para trabarlo.
+#
+# La regla correcta es por CAMPO, según a quién le mueve la plata cada uno.
+
+# Campos que le mueven la cuenta al PROVEEDOR (la liquidación de la leche).
+_CAMPOS_DE_LA_LECHE = frozenset(
+    {
+        "cantidad_litros",  # litros × precio es el valor bruto de la quincena
+        "precio_litro",
+        "bonificaciones",  # entran en el VALOR TOTAL del comprobante
+        "descuentos",
+        "fecha",  # decide en qué quincena cae el día y en qué renglón
+        "proveedor_id",  # le cambiaría de dueño una leche ya pagada
+        "estado",  # apagar un día ya pagado es como borrarlo
+    }
+)
+
+# Campos que le mueven la cuenta al TRANSPORTADOR (la liquidación del flete).
+_CAMPOS_DEL_FLETE = frozenset(
+    {
+        "cantidad_litros",  # el flete se cobra POR LITRO recogido
+        "transportador_id",  # decide de quién es ese flete
+        "fecha",
+        "estado",
+    }
+)
+
+# Consecuencia de las dos listas de arriba, y es la parte que hay que leer con
+# cuidado: LOS LITROS, LA FECHA y EL ESTADO están en las DOS, así que quedan
+# trabados si CUALQUIERA de las dos liquidaciones ya movió plata. El precio por
+# litro (y las bonificaciones y los descuentos) solo los traba la leche, y el
+# transportador solo lo traba el flete: eso último es justo el caso del dueño.
+#
+# Lo que NO traba nadie: la ruta, la sucursal y las observaciones. Son datos de
+# clasificación y de anotación; no entran en ninguna liquidación. Así, con las
+# DOS liquidaciones pagadas todavía se puede dejar escrito qué pasó ese día.
+
+# El proveedor NO se cambia nunca, con liquidación o sin ella: `RecepcionUpdate`
+# ni siquiera trae el campo, así que el PUT no lo puede recibir. Se queda arriba
+# en `_CAMPOS_DE_LA_LECHE` para que el guardia lo cubra si mañana alguien lo
+# agrega al schema, pero NUNCA se anuncia como corregible: ofrecerle al usuario
+# "sí se puede corregir el proveedor" sería mandarlo a intentar algo imposible.
+_NUNCA_EDITABLES = frozenset({"proveedor_id"})
+
+# Orden y nombre con que los campos salen en los mensajes, para que el aviso se
+# lea como lo diría una persona y no como una lista de columnas de la base.
+_ETIQUETAS: tuple[tuple[str, str], ...] = (
+    ("fecha", "la fecha"),
+    ("proveedor_id", "el proveedor"),
+    ("cantidad_litros", "los litros"),
+    ("precio_litro", "el precio por litro"),
+    ("bonificaciones", "las bonificaciones"),
+    ("descuentos", "los descuentos"),
+    ("transportador_id", "el transportador"),
+    ("ruta_id", "la ruta"),
+    ("sucursal_id", "la sucursal"),
+    ("observaciones", "las observaciones"),
+    # 'el estado del día' y no 'el estado' a secas: en esta pantalla "estado" ya
+    # significa el de la liquidación, y el dueño leería que no puede cambiar algo
+    # que nunca se cambia a mano. Este es el activo/inactivo del registro.
+    ("estado", "el estado del día"),
+)
+_ORDEN_DE_CAMPOS: tuple[str, ...] = tuple(campo for campo, _ in _ETIQUETAS)
+_NOMBRE_DE_CAMPO: dict[str, str] = dict(_ETIQUETAS)
+
+
+def _ya_salio_plata(liquidacion: Liquidacion) -> bool:
+    """Si contra esta liquidación ya se le entregó plata al tercero.
+
+    Es "tiene algún pago", no "está en pagada": con un solo abono hecho, cambiar
+    las cifras deja ese abono contra un total que ya no existe. Se mira además el
+    estado 'pagada' porque hay un camino que la marca pagada SIN registrar pago
+    —cuando los anticipos se comieron todo el saldo— y ahí tampoco hay nada que
+    corregir.
+    """
+    return liquidacion.tiene_pagos or liquidacion.estado == ESTADO_PAGADA
+
+
+def _nombre_del_tercero(liquidacion: Liquidacion) -> str | None:
+    """A quién se le pagó: el proveedor de la leche o el transportador del flete."""
+    if liquidacion.tipo == TIPO_PROVEEDOR:
+        return liquidacion.proveedor.nombre if liquidacion.proveedor else None
+    return liquidacion.transportador.nombre if liquidacion.transportador else None
+
+
+def _en_palabras(campos: list[str]) -> str:
+    """'los litros, el precio por litro y la fecha' — con 'y', no con coma final."""
+    nombres = [_NOMBRE_DE_CAMPO.get(campo, campo) for campo in campos]
+    if not nombres:
+        return ""
+    if len(nombres) == 1:
+        return nombres[0]
+    return f"{', '.join(nombres[:-1])} y {nombres[-1]}"
+
+
+def _de_quien(liquidacion: Liquidacion) -> str:
+    """'la leche' o 'el flete': qué plata apartó esta liquidación."""
+    return "la leche" if liquidacion.tipo == TIPO_PROVEEDOR else "el flete"
+
+
+def _por_que_esta_trabada(liquidacion: Liquidacion) -> str:
+    """'la leche de este día ya se le pagó a Patricia Laguna'."""
+    que = _de_quien(liquidacion)
+    nombre = _nombre_del_tercero(liquidacion)
+    a_quien = f" a {nombre}" if nombre else ""
+    # Se distingue el pago total del abono porque para el usuario son dos
+    # situaciones distintas: del pagado no hay nada que hacer por dentro; del
+    # abono sí, se puede borrar el pago, corregir el día y volver a abonar.
+    if liquidacion.estado == ESTADO_PAGADA:
+        return f"{que} de este día ya se le pagó{a_quien}"
+    return f"{que} de este día ya se le abonó{a_quien}"
+
+
+class CandadoRecepcion:
+    """Qué se puede y qué no se puede tocar de un día, y por qué.
+
+    Se calcula en UN SOLO SITIO para que las tres cosas digan exactamente lo
+    mismo: el guardia del backend (que es el que de verdad manda), el aviso del
+    diálogo de la recepción y el tooltip de la celda en la grilla. Antes el
+    tooltip decía "Liquidada — no editable" y con la regla nueva estaría
+    mintiendo la mayoría de las veces.
+    """
+
+    __slots__ = ("liquidaciones", "leche", "flete", "bloqueados")
+
+    def __init__(
+        self,
+        liquidaciones: list[Liquidacion],
+        leche: Liquidacion | None,
+        flete: Liquidacion | None,
+        bloqueados: dict[str, Liquidacion],
+    ) -> None:
+        self.liquidaciones = liquidaciones
+        self.leche = leche
+        self.flete = flete
+        # campo -> la liquidación pagada que lo traba (sirve para el mensaje)
+        self.bloqueados = bloqueados
+
+    @property
+    def campos_bloqueados(self) -> list[str]:
+        return [campo for campo in _ORDEN_DE_CAMPOS if campo in self.bloqueados]
+
+    @property
+    def campos_editables(self) -> list[str]:
+        return [
+            campo
+            for campo in _ORDEN_DE_CAMPOS
+            if campo not in self.bloqueados and campo not in _NUNCA_EDITABLES
+        ]
+
+    @property
+    def leche_pagada(self) -> bool:
+        return self.leche is not None and _ya_salio_plata(self.leche)
+
+    @property
+    def flete_pagado(self) -> bool:
+        return self.flete is not None and _ya_salio_plata(self.flete)
+
+    def _cola_del_transportador(self) -> str:
+        """El remate del aviso cuando lo que se puede corregir es el transportador.
+
+        Es el caso del dueño y merece la explicación completa: no basta decirle
+        que "sí se puede", hay que decirle qué va a pasar con la liquidación del
+        flete si ya existía —porque el día se le sale y esa liquidación se
+        recalcula sin él—.
+        """
+        if "transportador_id" in self.bloqueados:
+            return ""
+        if self.flete is None:
+            return ", porque su flete todavía no se ha liquidado"
+        return (
+            f", porque su flete todavía no se ha pagado (está en {self.flete.estado}); "
+            "al cambiarlo, el día se suelta de esa liquidación y ella se recalcula sin él"
+        )
+
+    def aviso(self) -> str | None:
+        """El texto que la pantalla muestra, en el español del dueño.
+
+        Sale del backend y no del navegador a propósito: así la explicación y el
+        guardia no se pueden desincronizar. Si mañana cambia la regla, cambia
+        aquí y la pantalla dice la verdad nueva sola.
+        """
+        if not self.bloqueados:
+            return None
+        razones = [
+            _por_que_esta_trabada(liq)
+            for liq in (self.leche, self.flete)
+            if liq is not None and _ya_salio_plata(liq)
+        ]
+        motivo = "; ".join(razones) or "por este día ya salió plata"
+        motivo = motivo[0].upper() + motivo[1:]
+        no_se_puede = _en_palabras(self.campos_bloqueados)
+        editables = self.campos_editables
+        if not editables:
+            return f"{motivo}: no se puede cambiar {no_se_puede}, y no queda nada por corregir."
+        return (
+            f"{motivo}: no se puede cambiar {no_se_puede}. "
+            f"Sí se puede corregir {_en_palabras(editables)}{self._cola_del_transportador()}."
+        )
+
+
 class RecepcionService(BaseService[RecepcionLeche]):
     repository_cls = RecepcionRepository
     modulo = "recepcion"
@@ -107,23 +317,124 @@ class RecepcionService(BaseService[RecepcionLeche]):
         )
         return list(self.db.scalars(stmt).all())
 
+    def _candado_de(
+        self, recepcion: RecepcionLeche, por_id: dict[uuid.UUID, Liquidacion]
+    ) -> CandadoRecepcion:
+        """Arma el candado de un día con las liquidaciones YA CARGADAS.
+
+        Recibe el mapa en vez de consultarlo porque las lecturas lo resuelven de
+        un solo golpe para toda la quincena: si cada fila fuera a la base, la
+        grilla de una quesera con cientos de días haría cientos de consultas.
+        """
+        leche = por_id.get(recepcion.liquidacion_id) if recepcion.liquidacion_id else None
+        flete = (
+            por_id.get(recepcion.liquidacion_transporte_id)
+            if recepcion.liquidacion_transporte_id
+            else None
+        )
+        bloqueados: dict[str, Liquidacion] = {}
+        # El flete va primero y la leche después para que, cuando las DOS estén
+        # pagadas, de los campos compartidos (litros, fecha, estado) se culpe a la
+        # leche: es la cifra grande, la que el dueño reconoce en el comprobante.
+        for liquidacion, campos in ((flete, _CAMPOS_DEL_FLETE), (leche, _CAMPOS_DE_LA_LECHE)):
+            if liquidacion is not None and _ya_salio_plata(liquidacion):
+                for campo in campos:
+                    bloqueados[campo] = liquidacion
+        return CandadoRecepcion(
+            liquidaciones=[liq for liq in (leche, flete) if liq is not None],
+            leche=leche,
+            flete=flete,
+            bloqueados=bloqueados,
+        )
+
+    def _candado(self, recepcion: RecepcionLeche) -> CandadoRecepcion:
+        """El candado de un día, consultando sus liquidaciones. Para escribir."""
+        liquidaciones = self._liquidaciones_de(recepcion)
+        return self._candado_de(recepcion, {liq.id: liq for liq in liquidaciones})
+
+    def _cambios_reales(self, actual: RecepcionLeche, data: dict[str, Any]) -> set[str]:
+        """Los campos que el PUT de verdad quiere CAMBIAR, no los que vienen.
+
+        Hace falta porque el diálogo manda TODO el formulario en cada guardado
+        (incluidos los campos que dejó apagados). Si el guardia mirara la simple
+        presencia del campo, corregirle el transportador a un día con la leche ya
+        pagada rebotaría por culpa de unos litros que llegaron idénticos a los que
+        ya estaban guardados: el usuario no cambió nada ahí.
+
+        Los Decimal se comparan por valor y no por texto, porque '44' y '44.00'
+        son la misma leche y con `!=` de cadenas saldrían distintos.
+        """
+        cambios: set[str] = set()
+        for campo, valor in data.items():
+            if not hasattr(actual, campo):
+                continue
+            guardado = getattr(actual, campo)
+            if valor is None and guardado is None:
+                continue
+            if valor is None or guardado is None:
+                cambios.add(campo)
+                continue
+            if isinstance(valor, Decimal) or isinstance(guardado, Decimal):
+                if Decimal(valor) != Decimal(guardado):
+                    cambios.add(campo)
+            elif valor != guardado:
+                cambios.add(campo)
+        return cambios
+
+    def _exigir_campos_libres(
+        self, candado: CandadoRecepcion, cambios: set[str], verbo: str = "cambiar"
+    ) -> None:
+        """El candado POR CAMPO: rebota solo lo que de verdad movería plata pagada.
+
+        Es el guardia que reemplazó al de toda la fila. Está EN EL BACKEND y no en
+        la pantalla a propósito: quien conozca la dirección del endpoint entra
+        igual, y aquí es donde se decide si una liquidación pagada se descuadra.
+        """
+        choques = [
+            campo
+            for campo in _ORDEN_DE_CAMPOS
+            if campo in cambios and campo in candado.bloqueados
+        ]
+        if not choques:
+            return
+        # Se nombra el PRIMER campo en conflicto (el orden de `_ETIQUETAS` va de
+        # lo más grave a lo más leve) y enseguida qué sí se puede corregir: es la
+        # pregunta que el dueño tenía sin responder cuando le salía "no se deja
+        # editar" y no sabía qué era lo que no se dejaba.
+        liquidacion = candado.bloqueados[choques[0]]
+        que_toco = _en_palabras(choques)
+        editables = candado.campos_editables
+        salida = f" Sí se puede corregir {_en_palabras(editables)}." if editables else ""
+        de_quien = _de_quien(liquidacion)
+        if liquidacion.estado == ESTADO_PAGADA:
+            raise BusinessError(
+                f"No se puede {verbo} {que_toco} de este día: {de_quien} ya se pagó en una "
+                f"liquidación.{salida} Si la cifra está mala, corríjala por fuera del sistema "
+                "o registre el ajuste en la quincena siguiente"
+            )
+        raise BusinessError(
+            f"No se puede {verbo} {que_toco} de este día: {de_quien} ya tiene un pago "
+            f"registrado en una liquidación.{salida} Elimine primero ese pago si de verdad "
+            "hay que corregir la cifra, o registre el ajuste en la quincena siguiente"
+        )
+
     def _exigir_no_pagada(self, recepcion: RecepcionLeche, verbo: str) -> list[Liquidacion]:
-        """El candado de verdad: se traba en cuanto SALIÓ PLATA por ese día.
+        """Para BORRAR el día: lo traba cualquiera de las dos liquidaciones pagadas.
 
-        Antes se trababa apenas la recepción tuviera liquidación, sin mirar el
-        estado, y el dueño se quedaba sin poder corregir un día desde que la
-        generaba —aunque todavía no le hubiera pagado a nadie—. Ahora en borrador
-        y en aprobada se deja corregir (la liquidación se recuadra sola, ver
-        `_recuadrar`) y solo se dice que no cuando la plata ya salió.
+        Aquí sí es todo o nada, y con razón: borrar un día no cambia un campo, lo
+        saca de las DOS liquidaciones a la vez. Si a alguno de los dos terceros ya
+        se le pagó, su comprobante se quedaría con un renglón sin recepción detrás
+        y su total dejaría de ser la suma de los días —el descuadre silencioso que
+        el dueño encuentra cuadrando a mano contra el cuaderno—.
 
-        Con los pagos parciales, "ya salió plata" es TENER ALGÚN PAGO, no estar
-        en 'pagada': si al proveedor se le abonó la mitad y después le cambian
-        los litros, ese abono queda contra un total que ya no existe.
+        "Ya salió plata" es TENER ALGÚN PAGO, no estar en 'pagada': si al proveedor
+        se le abonó la mitad y después se le borra un día, ese abono queda contra
+        un total que ya no existe. Ver `_ya_salio_plata`.
 
         Devuelve las liquidaciones tocadas, para recuadrarlas después de escribir.
         """
-        liquidaciones = self._liquidaciones_de(recepcion)
-        con_pago = [liq for liq in liquidaciones if liq.tiene_pagos or liq.estado == ESTADO_PAGADA]
+        candado = self._candado(recepcion)
+        con_pago = [liq for liq in candado.liquidaciones if _ya_salio_plata(liq)]
         if con_pago:
             liq = con_pago[0]
             de_quien = "la leche" if liq.tipo == TIPO_PROVEEDOR else "el flete"
@@ -141,7 +452,7 @@ class RecepcionService(BaseService[RecepcionLeche]):
                 "registrado en una liquidación. Elimine primero ese pago si de verdad "
                 "hay que corregir la cifra, o registre el ajuste en la quincena siguiente"
             )
-        return liquidaciones
+        return candado.liquidaciones
 
     def _marcas_a_soltar(
         self,
@@ -186,25 +497,46 @@ class RecepcionService(BaseService[RecepcionLeche]):
     def _recuadrar(self, liquidaciones: list[Liquidacion]) -> None:
         """Vuelve a cuadrar las liquidaciones cuyo día se acaba de tocar.
 
+        Se salta las que YA MOVIERON PLATA, y esto es nuevo: desde que el candado
+        es por campo, un día puede tener la leche pagada y el flete en borrador, y
+        al corregirle el transportador llegan aquí las dos. `recuadrar` rebota con
+        un error si le pasan una pagada (y hace bien: recalcularla descuadraría el
+        pago), así que la corrección legítima moriría por culpa de la liquidación
+        que ni se tocó. Se recuadra solo la que sí cambió.
+
+        Que quede claro qué se deja atrás: en la liquidación pagada del proveedor
+        hay una columna informativa `valor_transporte` que puede quedar con el
+        flete del transportador viejo. NO entra en el VALOR TOTAL (que es bruto +
+        bonificaciones - descuentos) ni sale en el comprobante en PDF, así que
+        ningún cuadre se rompe; lo que no se hace es reescribir a mano una
+        liquidación ya pagada, que es peor remedio que la enfermedad.
+
         Se importa aquí adentro y no arriba a propósito: el servicio de
         liquidaciones ya usa el repositorio de recepciones, y con el import
         arriba las dos hojas quedarían amarradas en tiempo de carga.
         """
-        if not liquidaciones:
+        pendientes = [liq for liq in liquidaciones if not _ya_salio_plata(liq)]
+        if not pendientes:
             return
         from app.modules.liquidaciones.service import LiquidacionService
 
         servicio = LiquidacionService(self.db, self.ctx)
-        for liquidacion in liquidaciones:
+        for liquidacion in pendientes:
             servicio.recuadrar(liquidacion.id)
 
     def _marcar_estado_liquidacion(self, recepciones: list[RecepcionLeche]) -> None:
-        """Le cuelga a cada recepción el estado de la liquidación que manda.
+        """Le cuelga a cada recepción su candado, ya resuelto campo por campo.
 
-        No es una columna: se resuelve de un solo golpe para toda la lista (una
-        consulta, no una por fila) y se expone en `RecepcionRead` para que la
-        pantalla sepa cuándo poner el candado y cuándo avisar que al tocar el día
-        se va a mover una liquidación ya generada.
+        Nada de esto son columnas: se resuelve de un solo golpe para toda la lista
+        (una consulta, no una por fila) y se expone en `RecepcionRead` y en
+        `CeldaGrilla` para que la pantalla apague EXACTAMENTE los campos que el
+        backend va a rebotar, y no la fila entera.
+
+        `liquidacion_estado` se conserva tal como estaba —el estado de la
+        liquidación que manda, la más trabada de las dos— porque la lista y la
+        grilla lo usan para avisar que al tocar el día se mueve una liquidación ya
+        generada. Lo que se agrega al lado es el detalle que faltaba: cuál de las
+        dos plata está pagada y, de ahí, qué campos quedan trabados.
         """
         ids = {
             liq_id
@@ -212,21 +544,29 @@ class RecepcionService(BaseService[RecepcionLeche]):
             for liq_id in (r.liquidacion_id, r.liquidacion_transporte_id)
             if liq_id is not None
         }
-        estados: dict[uuid.UUID, str] = {}
+        por_id: dict[uuid.UUID, Liquidacion] = {}
         if ids:
             stmt = (
                 LiquidacionRepository(self.db, self.ctx.empresa_id)
                 .base_query()
                 .where(Liquidacion.id.in_(ids))
             )
-            estados = {liq.id: liq.estado for liq in self.db.scalars(stmt).all()}
+            por_id = {liq.id: liq for liq in self.db.scalars(stmt).all()}
         for r in recepciones:
             propios = [
-                estados[liq_id]
+                por_id[liq_id].estado
                 for liq_id in (r.liquidacion_id, r.liquidacion_transporte_id)
-                if liq_id in estados
+                if liq_id in por_id
             ]
             r.liquidacion_estado = _estado_que_manda(propios)
+            candado = self._candado_de(r, por_id)
+            r.liquidacion_estado_leche = candado.leche.estado if candado.leche else None
+            r.liquidacion_estado_flete = candado.flete.estado if candado.flete else None
+            r.leche_pagada = candado.leche_pagada
+            r.flete_pagado = candado.flete_pagado
+            r.campos_bloqueados = candado.campos_bloqueados
+            r.campos_editables = candado.campos_editables
+            r.candado_aviso = candado.aviso()
 
     def _completar_y_calcular(self, data: dict[str, Any], actual: RecepcionLeche | None = None) -> dict[str, Any]:
         """Completa precio/ruta desde el proveedor y calcula los valores monetarios."""
@@ -298,11 +638,17 @@ class RecepcionService(BaseService[RecepcionLeche]):
 
     def actualizar(self, entity_id: uuid.UUID, payload: Any) -> RecepcionLeche:
         actual = self.repo.get_or_fail(entity_id)
-        # El candado es "ya se pagó", no "ya se liquidó": ver `_exigir_no_pagada`.
+        data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
+        # El candado es POR CAMPO y no por fila: lo que traba un campo es que la
+        # plata a la que ESE campo le mueve la cuenta ya haya salido. Por eso se
+        # revisa contra los cambios de verdad y no contra la fila entera; es lo que
+        # deja corregirle el transportador a un día cuya leche ya se pagó, que es
+        # lo que el dueño necesitaba. Ver `_candado` y `_exigir_campos_libres`.
+        candado = self._candado(actual)
+        self._exigir_campos_libres(candado, self._cambios_reales(actual, data))
         # Las liquidaciones se apuntan ANTES de escribir, porque después de
         # guardar hay que volver a cuadrarlas con la cifra nueva.
-        liquidaciones = self._exigir_no_pagada(actual, "modificar")
-        data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
+        liquidaciones = candado.liquidaciones
         nueva_fecha = data.get("fecha", actual.fecha)
         if self.repo.existe_registro_dia(actual.proveedor_id, nueva_fecha, exclude_id=entity_id):
             raise ConflictError("Ya existe una recepción de este proveedor en esa fecha")
@@ -493,6 +839,14 @@ class RecepcionService(BaseService[RecepcionLeche]):
                 pagada=r.liquidacion_estado in _ESTADOS_CON_PAGO,
                 liquidacion_estado=r.liquidacion_estado,
                 con_transporte=r.transportador_id is not None,
+                # Las dos platas por separado, que es lo que le faltaba a la
+                # pantalla: con `pagada` sola, un día con el flete pagado y la
+                # leche sin pagar se veía igual que uno intocable, y el tooltip
+                # decía "Pagada — no editable" cuando sí se podía corregir casi
+                # todo. Con estos dos, la celda dice la verdad y deja pasar el
+                # clic a lo que sigue siendo editable.
+                leche_pagada=r.leche_pagada,
+                flete_pagado=r.flete_pagado,
             )
             fila.total_litros += r.cantidad_litros
             fila.valor_bruto += r.valor_bruto

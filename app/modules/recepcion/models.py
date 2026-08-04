@@ -45,9 +45,33 @@ class RecepcionLeche(TenantMixin, AuditMixin, Base):
     transportador = relationship("Transportador", lazy="joined")
     ruta = relationship("Ruta", lazy="joined")
 
-    # NO es una columna: lo llena RecepcionService._marcar_estado_liquidacion con
-    # el estado de la liquidación que manda sobre este día (la más trabada de las
-    # dos marcas de arriba). Se deja declarado aquí, con valor por omisión, para
-    # que RecepcionRead siempre encuentre el atributo aunque la lectura venga por
-    # un camino que no lo llene.
+    # NADA de lo que sigue es una columna: lo llena
+    # RecepcionService._marcar_estado_liquidacion. Se deja declarado aquí, con
+    # valor por omisión, para que RecepcionRead siempre encuentre el atributo
+    # aunque la lectura venga por un camino que no lo llene.
+
+    # El estado de la liquidación que MANDA sobre este día (la más trabada de las
+    # dos marcas de arriba). Es la seña de siempre: sirve para avisar que al tocar
+    # el día se mueve una liquidación ya generada.
     liquidacion_estado = None
+
+    # Las dos platas por separado, que es lo que hacía falta para que el candado
+    # sea por CAMPO y no por fila: al proveedor se le puede haber pagado la leche
+    # sin que el flete se haya liquidado siquiera, y en ese caso el transportador
+    # SÍ se puede corregir. Ver el bloque de `_CAMPOS_DE_LA_LECHE` en el servicio.
+    liquidacion_estado_leche = None
+    liquidacion_estado_flete = None
+    leche_pagada = False
+    flete_pagado = False
+
+    # El candado ya resuelto, para que la pantalla apague exactamente los campos
+    # que el backend va a rebotar y le explique al usuario por qué. Los nombres
+    # son los de los campos de la recepción ('cantidad_litros', 'precio_litro'…).
+    #
+    # Van SIN anotación de tipo y como tuplas a propósito: una anotación que no sea
+    # Mapped[...] hace que el declarativo de SQLAlchemy 2.0 intente mapear el
+    # atributo y reviente al cargar la clase, y un [] de clase sería un default
+    # mutable compartido por todas las instancias.
+    campos_bloqueados = ()
+    campos_editables = ()
+    candado_aviso = None
