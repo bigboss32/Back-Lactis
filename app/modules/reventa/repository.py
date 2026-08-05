@@ -8,10 +8,14 @@ from app.common.repository import BaseRepository
 from app.modules.reventa.models import (
     DESTINO_BORONA,
     DESTINO_MERMA,
+    TIPO_DOC_COMPRA,
+    TIPO_DOC_VENTA,
     TIPO_MOZZARELLA,
     AdjuntoReventa,
     CompraQueso,
     ConversionBorona,
+    DocumentoReventa,
+    ProductoReventa,
     SaldoAnterior,
     Temporada,
     VentaQueso,
@@ -196,7 +200,12 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                     CompraQueso.estado != "anulada",
                     se_mide_en_kilos(CompraQueso.tipo),
                 )
-                .order_by(CompraQueso.fecha, CompraQueso.created_at)
+                .order_by(
+                    CompraQueso.fecha,
+                    CompraQueso.created_at,
+                    CompraQueso.orden,
+                    CompraQueso.id,
+                )
             ).all()
         )
 
@@ -578,7 +587,12 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
                     VentaQueso.estado != "anulada",
                     se_mide_en_kilos(VentaQueso.tipo),
                 )
-                .order_by(VentaQueso.fecha, VentaQueso.created_at)
+                .order_by(
+                    VentaQueso.fecha,
+                    VentaQueso.created_at,
+                    VentaQueso.orden,
+                    VentaQueso.id,
+                )
             ).all()
         )
 
@@ -678,6 +692,236 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
             .order_by(clave)
         ).scalars().all()
         return [r for r in rows if r]
+
+
+class ProductoReventaRepository(BaseRepository[ProductoReventa]):
+    """El catálogo de lo que se compra y se revende.
+
+    NO SUMA NI UN PESO, y no es un olvido: un catálogo dice qué existe, no cuánto
+    valió. En este lote ninguna consulta de plata lo lee (ver el modelo).
+
+    Lo único fino que hay aquí es que dos de sus consultas MIRAN LAS FILAS
+    BORRADAS, al contrario que todo el resto del sistema. Está explicado en cada
+    una: el UNIQUE de (empresa_id, clave) tampoco filtra `deleted_at`, así que una
+    fila borrada en suave sigue ocupando su clave, y una consulta que no la viera
+    dejaría que el INSERT se estrellara contra la base.
+    """
+
+    model = ProductoReventa
+    search_fields = ("nombre", "clave")
+    # El catálogo se lee en el orden en que el dueño lo puso, no por fecha.
+    default_order_by = "orden"
+
+    def catalogo(self) -> list[ProductoReventa]:
+        """Todos los productos vivos de la empresa, en el orden de la pantalla."""
+        return list(
+            self.db.execute(
+                self.base_query().order_by(
+                    ProductoReventa.orden.asc(), ProductoReventa.nombre.asc()
+                )
+            )
+            .unique()
+            .scalars()
+        )
+
+    def por_clave(self, clave: str, *, incluir_borrados: bool = False):
+        """El producto de esa clave en ESTA empresa, si existe.
+
+        `incluir_borrados=True` es el modo que hay que usar ANTES DE INSERTAR, y es
+        la razón de ser de este parámetro: el UNIQUE no distingue filas borradas,
+        así que "no hay ninguno vivo con esta clave" no significa "la clave está
+        libre". Sin esto, volver a agregar un producto que se quitó reventaría con
+        un error de base de datos en vez de con un mensaje.
+        """
+        stmt = select(ProductoReventa).where(
+            ProductoReventa.empresa_id == self.empresa_id,
+            ProductoReventa.clave == clave,
+        )
+        if not incluir_borrados:
+            stmt = stmt.where(ProductoReventa.deleted_at.is_(None))
+        return self.db.execute(stmt).unique().scalars().first()
+
+    def siguiente_orden(self) -> int:
+        """El puesto que le toca a un producto nuevo: al final de la lista.
+
+        Cuenta las filas BORRADAS también. No es por gusto: si no, quitar el último
+        producto y agregar otro le daría el puesto que ya tuvo el anterior, y dos
+        filas con el mismo `orden` se muestran en el orden que quiera la base.
+        """
+        maximo = self.db.scalar(
+            select(func.max(ProductoReventa.orden)).where(
+                ProductoReventa.empresa_id == self.empresa_id
+            )
+        )
+        return int(maximo) + 1 if maximo is not None else 0
+
+    def hijos(self, producto_id) -> list[ProductoReventa]:
+        """Los productos vivos que dicen ser subproducto de este."""
+        return list(
+            self.db.execute(
+                self.base_query().where(ProductoReventa.subproducto_de_id == producto_id)
+            )
+            .unique()
+            .scalars()
+        )
+
+    def movimientos(self, clave: str) -> tuple[int, int]:
+        """(compras, ventas) de ese producto en esta empresa.
+
+        EL VÍNCULO ES LA CLAVE, el mismo puente que está explicado en el modelo:
+        `compras_queso.tipo` y `ventas_queso.tipo` guardan justamente esa cadena.
+        O sea que esto no es una aproximación mientras llega un `producto_id`: es
+        exactamente el conjunto de filas que hablan de este producto, hoy.
+
+        Se cuentan las ANULADAS también. Una compra anulada no suma plata, pero es
+        historia registrada de ese producto: quitarlo del catálogo dejaría una fila
+        del cuaderno hablando de algo que ya no aparece en la lista.
+        """
+        conteos = []
+        for modelo in (CompraQueso, VentaQueso):
+            conteos.append(
+                int(
+                    self.db.scalar(
+                        select(func.count())
+                        .select_from(modelo)
+                        .where(
+                            modelo.empresa_id == self.empresa_id,
+                            modelo.deleted_at.is_(None),
+                            modelo.tipo == clave,
+                        )
+                    )
+                    or 0
+                )
+            )
+        return conteos[0], conteos[1]
+
+
+class DocumentoReventaRepository(BaseRepository[DocumentoReventa]):
+    """Las facturas de reventa (la cabecera que agrupa varios renglones).
+
+    NINGUNA CONSULTA DE ESTE REPOSITORIO SUMA PLATA, y no es un olvido: la
+    cabecera no tiene columnas de plata. Lo que hace es traer los RENGLONES, que
+    son las filas de siempre de `compras_queso` / `ventas_queso`, y el servicio
+    suma su `valor_total` y su `abonado` al leer.
+    """
+
+    model = DocumentoReventa
+    search_fields = ("tercero",)
+    default_order_by = "fecha"
+
+    def listar_paginado(
+        self, params, *, tipo: str | None = None, search: str | None = None,
+        desde: date | None = None, hasta: date | None = None,
+    ) -> tuple[list[DocumentoReventa], int]:
+        """Una página de facturas, de la más reciente a la más vieja y EN UN ORDEN
+        TOTAL Y ESTABLE.
+
+        POR QUÉ NO USA `list_paginated` DEL REPOSITORIO GENÉRICO, que solo sabe
+        ordenar por UNA columna: en un mismo día se registran varias facturas, y con
+        un orden que empata la base puede devolverlas en cualquier orden en cada
+        consulta. La misma factura saldría en la página 1 y otra vez en la 2, o en
+        ninguna de las dos, y el dueño buscaría una compra que "desapareció". Por eso
+        el orden desempata por `created_at` y de últimas por `id`, que es único:
+        así el orden es TOTAL y la paginación no puede perder ni repetir una fila.
+        """
+        stmt = self.apply_search(self.base_query(), search)
+        if tipo:
+            stmt = stmt.where(DocumentoReventa.tipo == tipo)
+        if desde:
+            stmt = stmt.where(DocumentoReventa.fecha >= desde)
+        if hasta:
+            stmt = stmt.where(DocumentoReventa.fecha <= hasta)
+        total = self.db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+        stmt = (
+            stmt.order_by(
+                DocumentoReventa.fecha.desc(),
+                DocumentoReventa.created_at.desc(),
+                DocumentoReventa.id,
+            )
+            .offset(params.offset)
+            .limit(params.page_size)
+        )
+        return list(self.db.scalars(stmt).all()), total
+
+    def modelo_de_renglon(self, tipo: str):
+        """En cuál de las dos tablas viven los renglones de un documento.
+
+        Una sola función para la pregunta, porque la respuesta se necesita en
+        media docena de sitios y un `if` repetido es un `if` que algún día se
+        escribe al revés.
+        """
+        return CompraQueso if tipo == TIPO_DOC_COMPRA else VentaQueso
+
+    def _criterios_de_renglon(self, modelo, documento_ids: list) -> list:
+        """empresa_id + deleted_at IS NULL + los documentos pedidos, SIEMPRE.
+
+        El filtro por empresa va aquí aunque el documento ya venga filtrado por
+        ella: es la regla de la casa y es lo que hace que un `documento_id`
+        cruzado —que hoy nada puede escribir— no pueda traer el renglón de otra
+        quesera ni por un defecto futuro.
+        """
+        return [
+            modelo.empresa_id == self.empresa_id,
+            modelo.deleted_at.is_(None),
+            modelo.documento_id.in_(documento_ids),
+        ]
+
+    def renglones_de(self, documentos: list[DocumentoReventa]) -> dict:
+        """{documento_id: [renglones en su orden]} para una lista de documentos.
+
+        DE UN SOLO VIAJE POR TABLA (dos consultas en total, no una por documento):
+        la lista paginada trae veinte facturas y pedir los renglones de cada una
+        por separado serían veinte consultas que crecen con la página.
+        """
+        por_documento: dict = {d.id: [] for d in documentos}
+        for tipo in (TIPO_DOC_COMPRA, TIPO_DOC_VENTA):
+            ids = [d.id for d in documentos if d.tipo == tipo]
+            if not ids:
+                continue
+            modelo = self.modelo_de_renglon(tipo)
+            filas = self.db.scalars(
+                select(modelo)
+                .where(*self._criterios_de_renglon(modelo, ids))
+                .order_by(modelo.orden, modelo.id)
+            ).all()
+            for fila in filas:
+                por_documento[fila.documento_id].append(fila)
+        return por_documento
+
+    def renglones(self, documento: DocumentoReventa) -> list:
+        """Los renglones de UN documento, en su orden (orden, después id)."""
+        return self.renglones_de([documento])[documento.id]
+
+    def renglones_bloqueados(self, documento: DocumentoReventa) -> list:
+        """Los renglones de un documento con FOR UPDATE y EN ORDEN ESTABLE.
+
+        POR QUÉ EL ORDEN NO ES UN DETALLE. `_bloquear` toma UNA fila y con una
+        sola fila no hay forma de trenzarse; aquí se toman N, y dos abonos
+        simultáneos a la misma factura que las pidieran en orden distinto se
+        abrazarían en un deadlock: el primero tendría el renglón 1 esperando el 2
+        y el segundo el 2 esperando el 1. Con `ORDER BY orden, id` los dos las
+        piden en el mismo orden, así que el segundo se queda esperando la primera
+        y no hay abrazo. El `id` de segundo criterio no es adorno: dos renglones
+        pueden compartir `orden` (por ejemplo el 0 que dejó la migración) y ahí el
+        orden dejaría de estar definido.
+
+        `populate_existing` por la misma razón que en `_bloquear`: sin él el
+        candado se toma en la base pero SQLAlchemy devuelve los valores viejos que
+        tenía en memoria, que es exactamente lo que el candado venía a evitar.
+
+        SQLite descarta el FOR UPDATE en silencio, así que nada de esto lo delata
+        ninguna prueba: se sostiene por lectura del código.
+        """
+        modelo = self.modelo_de_renglon(documento.tipo)
+        return list(
+            self.db.scalars(
+                select(modelo)
+                .where(*self._criterios_de_renglon(modelo, [documento.id]))
+                .order_by(modelo.orden, modelo.id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            ).all()
+        )
 
 
 class SaldoAnteriorRepository(BaseRepository[SaldoAnterior]):
@@ -854,7 +1098,7 @@ class ConversionBoronaRepository(BaseRepository[ConversionBorona]):
                     ConversionBorona.deleted_at.is_(None),
                     ConversionBorona.estado == "activo",
                 )
-                .order_by(ConversionBorona.fecha, ConversionBorona.created_at)
+                .order_by(ConversionBorona.fecha, ConversionBorona.created_at, ConversionBorona.id)
             ).all()
         )
 

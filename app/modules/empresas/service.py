@@ -121,6 +121,7 @@ class EmpresaService(BaseService[Empresa]):
             AdjuntoReventa,
             CompraQueso,
             ConversionBorona,
+            DocumentoReventa,
             SaldoAnterior,
             Temporada,
             VentaQueso,
@@ -204,11 +205,19 @@ class EmpresaService(BaseService[Empresa]):
         # ventas_queso, que es de quienes depende. Va explícito y no confiado al
         # ON DELETE CASCADE porque en SQLite las llaves foráneas están apagadas
         # por defecto y ahí las filas sobrevivirían al reinicio.
+        # DocumentoReventa va aquí porque es una transacción, no un catálogo: es la
+        # FACTURA de una compra o de una venta. Y el orden lo resuelve solo
+        # `reversed(sorted_tables)`: `compras_queso` y `ventas_queso` apuntan a
+        # `documentos_reventa`, así que sus filas se borran ANTES que las cabeceras
+        # y ninguna llave foránea queda colgando. Va explícito y no confiado al
+        # ON DELETE SET NULL porque lo que hay que borrar son las cabeceras
+        # también: dejarlas vivas sería dejar facturas de una empresa que se supone
+        # que quedó en ceros.
         transaccionales = {
             Pago, MovimientoInventario, MovimientoCaja, MovimientoBancario,
             AdjuntoReventa, ConversionBorona, PagoEmpleado, Anticipo, Notificacion,
             RecepcionLeche, Venta, Liquidacion, Produccion, CompraQueso, VentaQueso,
-            Gasto, CajaDiaria, SaldoAnterior, Temporada,
+            DocumentoReventa, Gasto, CajaDiaria, SaldoAnterior, Temporada,
         }
         tablas = {m.__table__ for m in transaccionales}
         for table in reversed(Base.metadata.sorted_tables):

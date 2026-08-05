@@ -54,6 +54,67 @@ UNIDAD_KILO = "kg"
 UNIDAD_BARRA = "barra"
 
 
+# ------------------------------------------------------- catálogo de productos
+# QUÉ SE PUEDE ESCRIBIR Y QUÉ NO, que es todo el contrato de estas tres piezas.
+#
+# Al crear se pide lo MÍNIMO: el nombre y si se pesa o se cuenta. Ni `clave`, ni
+# `decimales`, ni `admite_ajustes` se preguntan, y no es por ahorrarle campos al
+# formulario: los tres se DEDUCEN (la clave del nombre, los otros dos de la
+# unidad), y un campo que se puede deducir y además se pregunta es una segunda
+# fuente para el mismo hecho — el día que las dos se contradigan no hay manera de
+# saber cuál creer. El porqué de cada uno está en el modelo `ProductoReventa`.
+class ProductoReventaCreate(BaseSchema):
+    nombre: str = Field(min_length=2, max_length=80)
+    # 'kg' se pesa, 'unidad' se cuenta. EN ESTE CORTE SOLO PASA 'kg': un producto
+    # por unidad exige tumbar los CHECK de `compras_queso` y `ventas_queso` que hoy
+    # obligan a que las barras vivan en sus propias columnas, y eso es el lote
+    # siguiente. El servicio lo rechaza con un mensaje que lo explica. Se admite en
+    # el esquema para poder dar ESE mensaje: si el campo no existiera, un producto
+    # por unidad se guardaría en silencio como si se pesara.
+    unidad: Literal["kg", "unidad"] = "kg"
+    # De qué producto es subproducto (la borona lo es del queso). Opcional y de un
+    # solo nivel: ver el modelo.
+    subproducto_de_id: uuid.UUID | None = None
+    # Sin `orden` va al final de la lista, que es lo que uno espera al agregar.
+    orden: int | None = Field(default=None, ge=0)
+
+
+class ProductoReventaUpdate(BaseSchema):
+    """Lo que se puede corregir de un producto ya creado.
+
+    NO SE PUEDE CAMBIAR NI LA CLAVE NI LA UNIDAD, y por eso no están aquí. La clave
+    es la identidad —es la misma cadena que ya está guardada en las filas de
+    compras y de ventas—, así que cambiarla desconectaría al producto de su propia
+    historia. Y la unidad decide la forma de la cantidad: pasar a 'unidad' un
+    producto con kilos registrados dejaría esos kilos contados como piezas. Si se
+    creó mal y no tiene movimientos, se quita y se vuelve a crear.
+
+    RENOMBRAR SÍ, Y SIEMPRE. Es la razón de que la clave exista aparte: "Queso"
+    puede pasar a decir "Queso costeño" sin que ninguna fila se entere.
+    """
+
+    nombre: str | None = Field(default=None, min_length=2, max_length=80)
+    # Mandarlo en null explícito significa "ya no es subproducto de nadie". Solo se
+    # puede mover mientras el producto no tenga movimientos: de quién hereda el
+    # costo un subproducto es una cuenta de plata (ver `lotes.py`), y cambiarla con
+    # movimientos encima recostearía historia que el dueño ya cuadró.
+    subproducto_de_id: uuid.UUID | None = None
+    orden: int | None = Field(default=None, ge=0)
+    estado: str | None = None
+
+
+class ProductoReventaRead(TenantRead):
+    nombre: str
+    clave: str
+    unidad: str
+    decimales: int
+    subproducto_de_id: uuid.UUID | None
+    subproducto_de_nombre: str | None
+    admite_ajustes: bool
+    se_pesa: bool
+    orden: int
+
+
 class AbonoRead(BaseSchema):
     id: uuid.UUID
     fecha: date
@@ -74,8 +135,14 @@ class AbonoCreate(BaseSchema):
 # lotes quedaría contando cantidades que nunca existieron. Si se registró mal, se
 # elimina o se anula y se vuelve a registrar. Es el mismo criterio que ya tenía
 # la venta: `VentaQuesoUpdate` nunca ha aceptado `tipo`.
-class CompraQuesoCreate(BaseSchema):
-    """Una compra a un productor, en kilos (queso) o en barras (mozzarella).
+class RenglonCompraCreate(BaseSchema):
+    """UN PRODUCTO de una compra: qué, cuánto y a qué precio. Sin fecha ni
+    productor, que son de la factura y no del renglón.
+
+    Es la MISMA pieza que valida el payload plano de un solo producto: por eso
+    `CompraQuesoCreate` hereda de aquí en vez de repetir los campos y el
+    validador. Una sola implementación de "qué necesita un renglón de compra",
+    dos puertas para escribirlo.
 
     Los campos de las dos unidades son OPCIONALES en el esquema y obligatorios
     según el tipo; lo exige `_exigir_campos_de_la_unidad`. No se pueden poner
@@ -83,8 +150,6 @@ class CompraQuesoCreate(BaseSchema):
     informar, y una de queso no tiene barras.
     """
 
-    fecha: date
-    productor: str = Field(min_length=2, max_length=150)
     tipo: Literal["queso", "mozzarella"] = "queso"
     # --- si tipo = queso (se pesa)
     kilos_brutos: Kilos | None = Field(default=None, gt=0)
@@ -96,7 +161,7 @@ class CompraQuesoCreate(BaseSchema):
     observaciones: str | None = None
 
     @model_validator(mode="after")
-    def _exigir_campos_de_la_unidad(self) -> "CompraQuesoCreate":
+    def _exigir_campos_de_la_unidad(self) -> "RenglonCompraCreate":
         """Exige la cantidad y el precio de LA UNIDAD DEL TIPO, y deja la otra en
         cero. No es solo una validación de formulario: es lo que hace que la fila
         cumpla el CHECK de la tabla (barras en cero en las compras de kilos y al
@@ -121,6 +186,22 @@ class CompraQuesoCreate(BaseSchema):
         return self
 
 
+class CompraQuesoCreate(RenglonCompraCreate):
+    """Una compra a un productor DE UN SOLO PRODUCTO, en kilos (queso) o en barras
+    (mozzarella). El payload plano de siempre, intacto.
+
+    SIGUE VIVO Y NO ES POR COMPATIBILIDAD NOSTÁLGICA: hay miles de líneas de
+    pruebas escritas sobre este payload y son la única prueba de que la plata
+    sigue cuadrando. Cambiar el modelo y la regla que lo mide en el mismo commit
+    es quedarse sin red. Por dentro arma un documento de un renglón (ver
+    `CompraQuesoService.crear`), así que las dos puertas escriben con el MISMO
+    código.
+    """
+
+    fecha: date
+    productor: str = Field(min_length=2, max_length=150)
+
+
 class CompraQuesoUpdate(BaseSchema):
     """Edición de una compra. NO lleva `tipo`: ver la nota de arriba.
 
@@ -142,6 +223,12 @@ class CompraQuesoUpdate(BaseSchema):
 class CompraQuesoRead(TenantRead):
     fecha: date
     productor: str
+    # A qué factura pertenece este renglón y en qué lugar de ella. Viajan para que
+    # la pantalla pueda agrupar la lista por documento y para que el orden de los
+    # renglones sea el que el usuario escribió (que es el orden en el que se
+    # derrama el abono). En nulo: una compra de las de antes, sin cabecera.
+    documento_id: uuid.UUID | None = None
+    orden: int = 0
     tipo: str  # 'queso' (kg) | 'mozzarella' (barras)
     # En qué se mide: 'kg' o 'barra'. Se deduce del tipo (ver models.unidad_de) y
     # viaja aquí para que la pantalla ponga el rótulo correcto sin repetir la regla.
@@ -157,6 +244,7 @@ class CompraQuesoRead(TenantRead):
     valor_total: Decimal
     abonado: Decimal
     saldo: Decimal
+    saldo_a_favor: Decimal = Decimal("0")
     observaciones: str | None
     abonos: list[AbonoRead] = []
     # Cuántos soportes de pago tiene. Solo el número: los adjuntos con sus
@@ -166,15 +254,14 @@ class CompraQuesoRead(TenantRead):
 
 
 # ------------------------------------------------------------------ ventas
-class VentaQuesoCreate(BaseSchema):
-    """Una venta a un cliente: queso o borona en KILOS, o mozzarella en BARRAS.
+class RenglonVentaCreate(BaseSchema):
+    """UN PRODUCTO de una venta: queso o borona en KILOS, o mozzarella en BARRAS.
+    Sin fecha ni cliente, que son de la factura.
 
-    Mismo criterio que en la compra: los campos de las dos unidades son
-    opcionales en el esquema y obligatorios según el tipo.
+    Igual que en la compra, `VentaQuesoCreate` hereda de aquí: una sola
+    implementación de "qué necesita un renglón de venta".
     """
 
-    fecha: date
-    cliente: str = Field(min_length=2, max_length=150)
     tipo: Literal["queso", "borona", "mozzarella"] = "queso"
     # --- si tipo = queso o borona (se pesa)
     kilos: Kilos | None = Field(default=None, gt=0)
@@ -186,11 +273,9 @@ class VentaQuesoCreate(BaseSchema):
     gasto_por_barra: Decimal = Field(default=Decimal("0"), ge=0)
     gasto_concepto: str | None = Field(default=None, max_length=150)
     observaciones: str | None = None
-    # Pago inmediato: registra la venta ya pagada por completo
-    pagada_de_contado: bool = False
 
     @model_validator(mode="after")
-    def _exigir_campos_de_la_unidad(self) -> "VentaQuesoCreate":
+    def _exigir_campos_de_la_unidad(self) -> "RenglonVentaCreate":
         """Igual que en la compra: la cantidad y el precio de la unidad del tipo,
         y la otra unidad en cero para que la fila cumpla el CHECK de la tabla."""
         if self.tipo == "mozzarella":
@@ -208,6 +293,19 @@ class VentaQuesoCreate(BaseSchema):
             self.precio_barra = CERO
             self.gasto_por_barra = CERO
         return self
+
+
+class VentaQuesoCreate(RenglonVentaCreate):
+    """Una venta a un cliente DE UN SOLO PRODUCTO. El payload plano de siempre.
+
+    Sigue vivo por la misma razón que el de la compra (ver `CompraQuesoCreate`) y
+    por dentro arma un documento de un renglón.
+    """
+
+    fecha: date
+    cliente: str = Field(min_length=2, max_length=150)
+    # Pago inmediato: registra la venta ya pagada por completo
+    pagada_de_contado: bool = False
 
 
 class VentaQuesoUpdate(BaseSchema):
@@ -230,6 +328,9 @@ class VentaQuesoUpdate(BaseSchema):
 class VentaQuesoRead(TenantRead):
     fecha: date
     cliente: str
+    # Mismo criterio que en la compra: ver CompraQuesoRead.
+    documento_id: uuid.UUID | None = None
+    orden: int = 0
     tipo: str  # 'queso' | 'borona' (kg) | 'mozzarella' (barras)
     unidad: str  # 'kg' | 'barra', deducida del tipo
     kilos: Decimal
@@ -244,10 +345,156 @@ class VentaQuesoRead(TenantRead):
     gasto_monto: Decimal  # el gasto en PESOS, ya sea por kilo o por barra
     abonado: Decimal
     saldo: Decimal
+    saldo_a_favor: Decimal = Decimal("0")
     observaciones: str | None
     abonos: list[AbonoRead] = []
     # Mismo criterio que en la compra: solo el número (ver CompraQuesoRead).
     adjuntos_count: int = 0
+
+
+# ----------------------------------- documentos (la factura de varios renglones)
+# CUÁNTOS RENGLONES CABEN EN UNA FACTURA. Cincuenta es muchísimo más de lo que un
+# día de reventa da (el cliente maneja tres o cuatro productos), y el tope existe
+# porque cada renglón de venta cuesta una validación de existencias y una fila: un
+# POST con diez mil renglones sería una forma barata de tumbar el servidor. Y
+# porque una "factura" de cien productos es un error de digitación, no un negocio.
+MAX_RENGLONES = 50
+
+
+class DocumentoCompraCreate(BaseSchema):
+    """UNA COMPRA con varios productos: la cabecera y sus renglones.
+
+    La cabecera NO TIENE NI UNA CIFRA DE PLATA, a propósito y por contrato: el
+    total es la suma de los renglones, calculada al leer. Ver el docstring de
+    `DocumentoReventa`.
+    """
+
+    tipo: Literal["compra"]
+    fecha: date
+    # El productor. Se canoniza contra los nombres ya usados con la MISMA regla
+    # del payload plano, así que "yeferson" y "Yeferson" siguen siendo el mismo
+    # señor y su cartera no se parte en dos.
+    tercero: str = Field(min_length=2, max_length=150)
+    # Nota de la FACTURA. Cada renglón tiene además la suya (lo que le pasó a ESE
+    # producto), y las dos son hechos distintos: no se propaga la una a la otra.
+    #
+    # SIN `max_length`, igual que en el payload plano, y a propósito: la puerta
+    # plana arma por dentro un documento con esta misma nota, así que un tope aquí
+    # que allá no exista convertiría una nota larga en un error raro desde el
+    # servicio en vez del comportamiento de siempre. Las dos puertas tienen que
+    # aceptar y rechazar exactamente lo mismo.
+    observaciones: str | None = None
+    renglones: list[RenglonCompraCreate] = Field(min_length=1, max_length=MAX_RENGLONES)
+
+
+class DocumentoVentaCreate(BaseSchema):
+    """UNA VENTA con varios productos: la cabecera y sus renglones."""
+
+    tipo: Literal["venta"]
+    fecha: date
+    tercero: str = Field(min_length=2, max_length=150)
+    # Sin `max_length`, por lo mismo que en DocumentoCompraCreate.
+    observaciones: str | None = None
+    renglones: list[RenglonVentaCreate] = Field(min_length=1, max_length=MAX_RENGLONES)
+    # Pago inmediato de TODA la factura. Se registra como un abono al documento,
+    # o sea que se DERRAMA sobre los renglones (ver el derrame en el servicio):
+    # cada renglón queda con su abono entero y la suma da el total, exacta.
+    pagada_de_contado: bool = False
+
+
+# La cabecera dice de qué clase es la factura y ESO decide la forma de sus
+# renglones: `discriminator="tipo"` hace que pydantic valide contra el esquema
+# correcto y que el error de un renglón de venta mandado como compra sea un 422
+# entendible en vez de "no coincide con ninguna de las dos opciones".
+DocumentoReventaCreate = Annotated[
+    DocumentoCompraCreate | DocumentoVentaCreate, Field(discriminator="tipo")
+]
+
+
+class DocumentoCompraUpdate(BaseSchema):
+    """Edición de una factura de compra.
+
+    `tipo` ES OBLIGATORIO aunque el id ya diga cuál es la factura, y no es un
+    descuido: es el discriminador que le dice a pydantic con qué forma validar los
+    renglones. El servicio comprueba que coincida con el de la factura guardada y
+    rechaza el cambio de tipo, que movería renglones de una tabla a la otra.
+
+    `renglones` en NULO significa "no me toques los productos" (edición de solo
+    cabecera). Mandar la lista significa REHACERLOS, y eso solo se permite si la
+    factura no tiene abonos: ver el candado en el servicio.
+    """
+
+    tipo: Literal["compra"]
+    fecha: date | None = None
+    tercero: str | None = Field(default=None, min_length=2, max_length=150)
+    # Sin `max_length`, por lo mismo que en DocumentoCompraCreate.
+    observaciones: str | None = None
+    renglones: list[RenglonCompraCreate] | None = Field(
+        default=None, min_length=1, max_length=MAX_RENGLONES
+    )
+
+
+class DocumentoVentaUpdate(BaseSchema):
+    """Edición de una factura de venta. Mismo criterio que en la compra."""
+
+    tipo: Literal["venta"]
+    fecha: date | None = None
+    tercero: str | None = Field(default=None, min_length=2, max_length=150)
+    # Sin `max_length`, por lo mismo que en DocumentoCompraCreate.
+    observaciones: str | None = None
+    renglones: list[RenglonVentaCreate] | None = Field(
+        default=None, min_length=1, max_length=MAX_RENGLONES
+    )
+
+
+DocumentoReventaUpdate = Annotated[
+    DocumentoCompraUpdate | DocumentoVentaUpdate, Field(discriminator="tipo")
+]
+
+
+class DocumentoReventaRead(TenantRead):
+    """Una factura con sus renglones y su total CALCULADO.
+
+    NINGUNA DE LAS CIFRAS DE AQUÍ ESTÁ GUARDADA. Todas salen de sumar los
+    renglones en el momento de leer, y por eso no pueden desactualizarse ni
+    contradecir la lista que van al lado.
+
+    Y LA IGUALDAD QUE EL DUEÑO PUEDE VERIFICAR A MANO, que es la razón de que
+    `total_anulado` exista y no se esconda:
+
+        total + total_anulado == la suma del valor_total de TODOS los renglones
+                                 que salen en esta respuesta
+        saldo               == total - abonado
+
+    O sea: el desglose que se ve en la pantalla suma EXACTO la cifra grande, sin
+    que sobre ni falte un renglón. Si un renglón se anuló, su plata no desaparece
+    de la vista: se va a `total_anulado`, que es la única forma honesta de que la
+    columna siga cerrando.
+    """
+
+    tipo: str  # 'compra' | 'venta'
+    fecha: date
+    tercero: str
+    observaciones: str | None
+    # ------------------------------------------------------------ lo calculado
+    # Suma del valor_total de los renglones QUE CUENTAN (los no anulados).
+    total: Decimal
+    # Suma de lo abonado en esos mismos renglones (la suma de sus abonos, exacta:
+    # el derrame no divide nada, así que no hay redondeo que la desvíe).
+    abonado: Decimal
+    saldo: Decimal
+    saldo_a_favor: Decimal = Decimal("0")
+    # La plata de los renglones ANULADOS, aparte. Ver la igualdad del docstring.
+    total_anulado: Decimal
+    # DERIVADO de los renglones, no una columna: 'pendiente' si ninguno tiene
+    # abonos, 'pagada' si todos están pagados, 'parcial' en el medio y 'anulada'
+    # si no queda ni un renglón vivo sin anular.
+    estado_pago: str
+    cantidad_renglones: int
+    # Los renglones tal como los devuelven /compras y /ventas: son las MISMAS
+    # filas, con los mismos campos. `tipo` de arriba dice cuál de las dos formas
+    # viene. Van en su orden (orden, después id).
+    renglones: list[CompraQuesoRead] | list[VentaQuesoRead] = []
 
 
 # ------------------------------------------- saldos de la cuenta anterior
@@ -288,6 +535,7 @@ class SaldoAnteriorRead(TenantRead):
     valor_total: Decimal
     abonado: Decimal
     saldo: Decimal
+    saldo_a_favor: Decimal = Decimal("0")
     observaciones: str | None
     abonos: list[AbonoRead] = []
 
@@ -549,6 +797,7 @@ class EstadoCuentaVenta(BaseSchema):
     valor_total: Decimal
     abonado: Decimal
     saldo: Decimal
+    saldo_a_favor: Decimal = Decimal("0")
     estado: str  # pendiente | parcial | pagada
 
 
@@ -582,6 +831,7 @@ class EstadoCuentaSaldoAnterior(BaseSchema):
     valor_total: Decimal
     abonado: Decimal
     saldo: Decimal
+    saldo_a_favor: Decimal = Decimal("0")
 
 
 class EstadoCuentaCliente(BaseSchema):
@@ -603,6 +853,7 @@ class EstadoCuentaCliente(BaseSchema):
     # TODO lo que el cliente debe hoy, que es la única cifra que le importa:
     #   (total_facturado - total_abonado) + libro_anterior_saldo = saldo
     saldo: Decimal
+    saldo_a_favor: Decimal = Decimal("0")
     ventas: list[EstadoCuentaVenta] = []
     pagos: list[EstadoCuentaPago] = []
     # Lo que traía debiendo del sistema anterior (vacío para casi todos)
@@ -648,6 +899,7 @@ class EstadoCuentaCompra(BaseSchema):
     valor_total: Decimal
     abonado: Decimal
     saldo: Decimal
+    saldo_a_favor: Decimal = Decimal("0")
     estado: str  # pendiente | parcial | pagada
 
 
@@ -685,6 +937,7 @@ class EstadoCuentaProductor(BaseSchema):
     # TODO lo que se le debe hoy, que es la única cifra que le importa a él:
     #   (total_comprado - total_pagado) + libro_anterior_saldo = saldo
     saldo: Decimal
+    saldo_a_favor: Decimal = Decimal("0")
     compras_detalle: list[EstadoCuentaCompra] = []
     pagos: list[EstadoCuentaPagoProductor] = []
 
@@ -813,7 +1066,8 @@ class CompraDelLoteRead(BaseSchema):
     borona_recibida: Decimal
     precio_kilo: Decimal
     valor_total: Decimal
-    saldo: Decimal  # lo que falta pagarle por esta compra
+    saldo: Decimal
+    saldo_a_favor: Decimal = Decimal("0")  # lo que falta pagarle por esta compra
     # A dónde fueron SUS kilos (los cuatro suman `kilos`)
     kilos_vendidos: Decimal
     kilos_a_borona: Decimal

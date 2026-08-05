@@ -33,6 +33,8 @@ from app.modules.reventa.models import (  # noqa: F401
     AdjuntoReventa,
     CompraQueso,
     ConversionBorona,
+    DocumentoReventa,
+    ProductoReventa,
     SaldoAnterior,
     Temporada,
     VentaQueso,

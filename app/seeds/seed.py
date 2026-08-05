@@ -20,6 +20,11 @@ from app.modules.gastos.models import CATEGORIAS_DEFECTO, CategoriaGasto
 from app.modules.inventario.models import Producto
 from app.modules.produccion.models import TipoQueso
 from app.modules.proveedores.models import Proveedor
+from app.modules.reventa.models import (
+    PRODUCTOS_REVENTA_DEFECTO,
+    ProductoReventa,
+    derivados_de_unidad,
+)
 from app.modules.rutas.models import Ruta
 from app.modules.sucursales.models import Sucursal
 from app.modules.transportadores.models import Transportador, TransportadorRuta
@@ -363,10 +368,76 @@ def seed_empresa_demo(db: Session, roles: dict[str, Rol]) -> None:
 TIPOS_QUESO_DEFECTO = ["Queso Costeño", "Queso Criollo", "Queso Doble Crema", "Queso Campesino"]
 
 
+def sembrar_productos_reventa(db: Session, empresa_id) -> list[ProductoReventa]:
+    """El catálogo de productos de reventa de UNA empresa: queso, borona y mozzarella.
+
+    POR QUÉ ACÁ Y NO EN `EmpresaService.crear`: crear una empresa NO siembra
+    catálogos —nunca lo ha hecho—, y este `ensure_*` es el único mecanismo que las
+    alcanza a todas, porque start.sh lo corre en CADA despliegue justo después de
+    `alembic upgrade head`. Es el mismo camino por el que ya llegan `tipos_queso` y
+    `categorias_gasto`.
+
+    LA IDEMPOTENCIA SE MIDE POR CLAVE Y MIRANDO TAMBIÉN LAS FILAS BORRADAS, y las
+    dos cosas importan:
+
+    · por clave y no por "la empresa no tiene ninguno" (que es como se siembran los
+      tipos de queso), porque si mañana se agrega un cuarto producto de fábrica, una
+      empresa que ya tenga los tres nunca lo recibiría;
+    · incluyendo las borradas porque el UNIQUE de (empresa_id, clave) no filtra
+      `deleted_at`: una fila borrada en suave sigue ocupando su clave, así que
+      insertar otra se estrellaría contra la base y tumbaría el despliegue.
+
+    Y DE AHÍ SALE LA REGLA QUE PARECE UN DESCUIDO Y NO LO ES: si el dueño quitó un
+    producto, la siembra NO LO RESUCITA. Es el mismo criterio que ya está escrito y
+    defendido en `seed_roles`: borrarlo fue la decisión de una persona, y un
+    despliegue no deshace decisiones de personas en silencio. Si lo quiere de vuelta,
+    lo agrega él y le vuelve la MISMA fila (ver `ProductoReventaService.crear`).
+
+    Devuelve los productos que dejó creados, para el log del despliegue.
+    """
+    # TODAS las filas de la empresa, borradas incluidas (ver el docstring).
+    existentes = {
+        p.clave: p
+        for p in db.scalars(
+            select(ProductoReventa).where(ProductoReventa.empresa_id == empresa_id)
+        ).unique()
+    }
+    creados: list[ProductoReventa] = []
+    for orden, (clave, nombre, unidad, clave_padre) in enumerate(PRODUCTOS_REVENTA_DEFECTO):
+        if clave in existentes:
+            continue
+        decimales, admite_ajustes = derivados_de_unidad(unidad)
+        # El padre se busca en el mismo diccionario, que ya se fue llenando con lo
+        # que se acabó de crear: el queso va antes que la borona en la lista, así que
+        # cuando le toca a la borona su padre ya tiene id.
+        padre = existentes.get(clave_padre) if clave_padre else None
+        producto = ProductoReventa(
+            empresa_id=empresa_id,
+            nombre=nombre,
+            clave=clave,
+            unidad=unidad,
+            decimales=decimales,
+            admite_ajustes=admite_ajustes,
+            subproducto_de_id=padre.id if padre is not None else None,
+            orden=orden,
+        )
+        db.add(producto)
+        # El flush va DENTRO del ciclo, y es lo que deja que la borona pueda apuntarle
+        # al queso: sin él, el queso todavía no tiene id que copiar.
+        db.flush()
+        existentes[clave] = producto
+        creados.append(producto)
+    return creados
+
+
 def ensure_catalogos_empresas(db: Session) -> None:
-    """Garantiza que cada empresa tenga catálogos mínimos (tipos de queso y
-    categorías de gasto) para que los formularios no queden con selects vacíos.
-    Idempotente: solo agrega si la empresa no tiene ninguno activo.
+    """Garantiza que cada empresa tenga catálogos mínimos (tipos de queso, categorías
+    de gasto y los productos de reventa) para que los formularios no queden con
+    selects vacíos. Idempotente.
+
+    Recorre TODAS las empresas vivas, no solo las que usan reventa, para que las dos
+    queseras queden iguales: el catálogo no cuesta nada en una empresa que no lo use y
+    no lo lee ninguna cuenta de plata (ver `ProductoReventa`).
     """
     empresas = db.scalars(select(Empresa).where(Empresa.deleted_at.is_(None))).all()
     for empresa in empresas:
@@ -387,6 +458,14 @@ def ensure_catalogos_empresas(db: Session) -> None:
         if not tiene_categorias:
             for nombre in CATEGORIAS_DEFECTO:
                 db.add(CategoriaGasto(empresa_id=empresa.id, nombre=nombre))
+
+        creados = sembrar_productos_reventa(db, empresa.id)
+        if creados:
+            logger.info(
+                "Productos de reventa sembrados en '%s': %s",
+                empresa.nombre,
+                ", ".join(p.clave for p in creados),
+            )
     db.flush()
 
 

@@ -18,8 +18,14 @@ from app.modules.reventa.schemas import (
     CompraQuesoUpdate,
     ConversionCreate,
     ConversionRead,
+    DocumentoReventaCreate,
+    DocumentoReventaRead,
+    DocumentoReventaUpdate,
     EstadoCuentaCliente,
     EstadoCuentaProductor,
+    ProductoReventaCreate,
+    ProductoReventaRead,
+    ProductoReventaUpdate,
     ResumenReventa,
     SaldoAnteriorCreate,
     SaldoAnteriorRead,
@@ -37,8 +43,10 @@ from app.modules.reventa.schemas import (
 from app.modules.reventa.service import (
     AdjuntoReventaService,
     CompraQuesoService,
+    DocumentoReventaService,
     LoteService,
     ConversionBoronaService,
+    ProductoReventaService,
     ReventaResumenService,
     SaldoAnteriorService,
     TemporadaService,
@@ -154,6 +162,271 @@ def sugerencias(
     ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
 ) -> SugerenciasReventa:
     return ReventaResumenService(db, ctx).sugerencias()
+
+
+# ----------------------------------------- catálogo de productos de reventa
+# QUÉ SE COMPRA Y SE REVENDE, como dato y no como una lista escrita en el código.
+# El dueño pidió poder "comprar y vender algo que quiera el cliente": estas cinco
+# rutas son ese "algo".
+#
+# EN ESTE LOTE EL CATÁLOGO ES DE SOLO LECTURA PARA LOS CAMINOS DE PLATA: ninguna
+# consulta de compras, ventas, resumen, temporadas, lotes ni FIFO lo mira todavía,
+# así que no puede mover una cifra. Lo que sí hay ya es el CRUD completo, para que
+# el dueño arme su lista antes de que las pantallas de registro la usen.
+#
+# LOS PERMISOS SON LOS DE SIEMPRE ('reventa', consultar/crear/editar/eliminar), los
+# mismos con los que ya se registra una compra. No lleva 'administrar': eso está
+# reservado para anular plata, y acá no hay plata.
+#
+# Van montadas a mano y no con `build_crud_router` porque ese registra su listado
+# en la raíz del router ("") y este router ya tiene la raíz ocupada por el resto
+# del módulo, que va colgado de /reventa.
+@router.get(
+    "/productos",
+    response_model=Page[ProductoReventaRead],
+    summary="Listar los productos que se compran y se revenden",
+)
+def listar_productos(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+    params: PageParams = Depends(page_params),
+    search: str | None = Query(None, description="Busca por nombre o por clave"),
+    estado: str | None = Query(None, description="'activo' o 'inactivo'"),
+) -> Page[ProductoReventaRead]:
+    """En el orden en que el dueño los puso, que es el de la lista de selección."""
+    items, total = ProductoReventaService(db, ctx).listar(
+        params, search=search, estado=estado
+    )
+    return Page.build(items, total, params)
+
+
+@router.post(
+    "/productos",
+    response_model=ProductoReventaRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Agregar un producto al catálogo (por ahora solo por kilo)",
+)
+def crear_producto(
+    payload: ProductoReventaCreate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+) -> ProductoReventaRead:
+    """Se pide el NOMBRE y si se pesa o se cuenta; lo demás se deduce.
+
+    La clave —el identificador con el que las compras y las ventas nombran al
+    producto— sale del nombre y no vuelve a cambiar. Los decimales y si admite
+    ajustes salen de la unidad.
+
+    EN ESTE CORTE SOLO PASA 'kg'. Un producto por unidad exige tumbar primero los
+    CheckConstraints de `compras_queso` y `ventas_queso`, y se rechaza con un
+    mensaje que lo explica en vez de guardarse a medias.
+
+    Si ese producto YA EXISTIÓ y se había quitado, se reactiva la misma fila con su
+    mismo id y su misma clave, y se le pone el nombre nuevo.
+    """
+    return ProductoReventaService(db, ctx).crear(payload)
+
+
+@router.get(
+    "/productos/{entity_id}",
+    response_model=ProductoReventaRead,
+    summary="Un producto del catálogo",
+)
+def obtener_producto(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+) -> ProductoReventaRead:
+    return ProductoReventaService(db, ctx).obtener(entity_id)
+
+
+@router.put(
+    "/productos/{entity_id}",
+    response_model=ProductoReventaRead,
+    summary="Renombrar un producto, reordenarlo o desactivarlo",
+)
+def editar_producto(
+    entity_id: uuid.UUID,
+    payload: ProductoReventaUpdate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "editar")),
+) -> ProductoReventaRead:
+    """RENOMBRAR SE PUEDE SIEMPRE Y NO TIENE RIESGO: la clave y el id no se mueven,
+    así que ninguna compra ni venta ya registrada se entera. Es a propósito, porque
+    el dueño va a querer que "Queso" diga "Queso costeño".
+
+    La clave y la unidad no se pueden cambiar (no están en el esquema): la clave es
+    la identidad con la que las filas nombran al producto, y la unidad decide la
+    forma de la cantidad. De quién es subproducto solo se puede mover mientras no
+    tenga movimientos, porque de ahí hereda el costo lo que se venda de él.
+    """
+    return ProductoReventaService(db, ctx).actualizar(entity_id, payload)
+
+
+@router.delete(
+    "/productos/{entity_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Quitar un producto del catálogo (solo si no tiene movimientos)",
+)
+def eliminar_producto(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "eliminar")),
+) -> None:
+    """Solo se puede quitar un producto que no tenga movimientos, igual que en el
+    resto del ERP. Si ya se compró o se vendió, lo que se hace es DESACTIVARLO: deja
+    de ofrecerse al registrar y su historia se queda completa."""
+    ProductoReventaService(db, ctx).eliminar(entity_id)
+
+
+# ------------------------------- documentos (facturas de varios productos)
+# UNA FACTURA ES UNA CABECERA Y N RENGLONES, y los renglones son las MISMAS filas
+# de /compras y /ventas: un producto, su cantidad, su precio, su plata y sus
+# abonos. La cabecera no guarda ni una cifra de plata; el total es la suma de los
+# renglones, calculada al leer.
+#
+# LOS PERMISOS SON LOS DE SIEMPRE ('reventa', crear/consultar/editar/...): registrar
+# una venta de tres productos es registrar una venta, y quien podía hacerlo de a
+# uno puede hacerlo de a tres. Lo único distinto es 'administrar' para anular, que
+# es lo que ya exigen /compras/{id}/anular y /ventas/{id}/anular.
+@router.get(
+    "/documentos",
+    response_model=Page[DocumentoReventaRead],
+    summary="Listar facturas de reventa (compras y ventas de varios productos)",
+)
+def listar_documentos(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+    params: PageParams = Depends(page_params),
+    tipo: str | None = Query(None, description="'compra' o 'venta'"),
+    search: str | None = Query(None, description="Busca por el nombre del tercero"),
+    desde: date | None = Query(None),
+    hasta: date | None = Query(None),
+) -> Page[DocumentoReventaRead]:
+    """Cada factura viene con sus renglones y con su total CALCULADO (no guardado).
+
+    De la más reciente a la más vieja. El estado de pago es derivado: sale de los
+    estados de los renglones, no de una columna.
+    """
+    items, total = DocumentoReventaService(db, ctx).listar_filtrado(
+        params, tipo=tipo, search=search, desde=desde, hasta=hasta
+    )
+    return Page.build(items, total, params)
+
+
+@router.post(
+    "/documentos",
+    response_model=DocumentoReventaRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Registrar una compra o una venta de VARIOS productos",
+)
+def crear_documento(
+    payload: DocumentoReventaCreate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+) -> DocumentoReventaRead:
+    """La cabecera (tipo, fecha, tercero, nota) y sus renglones, EN UNA TRANSACCIÓN.
+
+    `tipo` decide la forma de los renglones: 'compra' los recibe con
+    kilos_brutos/precio_kilo o barras/precio_barra, y 'venta' con
+    kilos/precio_kilo o barras/precio_barra más el gasto de venta.
+
+    Las existencias se validan sumando los renglones DEL MISMO producto y sobre la
+    factura COMPLETA antes de escribir la primera fila: con 400 kg en bodega, dos
+    renglones de 300 kg no pasan.
+    """
+    servicio = DocumentoReventaService(db, ctx)
+    return servicio.leer(servicio.crear(payload).id)
+
+
+@router.get(
+    "/documentos/{entity_id}",
+    response_model=DocumentoReventaRead,
+    summary="Una factura con sus renglones y su total calculado",
+)
+def obtener_documento(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "consultar")),
+) -> DocumentoReventaRead:
+    return DocumentoReventaService(db, ctx).leer(entity_id)
+
+
+@router.put(
+    "/documentos/{entity_id}",
+    response_model=DocumentoReventaRead,
+    summary="Editar una factura (los productos, solo si no tiene abonos)",
+)
+def editar_documento(
+    entity_id: uuid.UUID,
+    payload: DocumentoReventaUpdate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "editar")),
+) -> DocumentoReventaRead:
+    """La fecha, el tercero y la nota se pueden corregir siempre, y se les copian a
+    todos los renglones (que es de donde el resumen y la cartera leen esos datos).
+
+    Mandar `renglones` significa REHACERLOS, y eso solo se permite si la factura no
+    tiene abonos: los abonos cuelgan de los renglones, así que rehacerlos con plata
+    encima sería mover los pagos a productos distintos de los que el dueño vio
+    cuando la recibió. Con abonos hay que anular la factura y volverla a registrar.
+    """
+    servicio = DocumentoReventaService(db, ctx)
+    return servicio.leer(servicio.actualizar(entity_id, payload).id)
+
+
+@router.post(
+    "/documentos/{entity_id}/abonos",
+    response_model=DocumentoReventaRead,
+    summary="Abonar a la factura entera (el abono se derrama sobre los renglones)",
+)
+def abonar_documento(
+    entity_id: uuid.UUID,
+    payload: AbonoCreate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "crear")),
+) -> DocumentoReventaRead:
+    """El abono NO SE DIVIDE, SE DERRAMA: se le aplica a los renglones en su orden,
+    `min(lo que queda, el saldo del renglón)` a cada uno. Sin división no hay
+    redondeo, así que la suma de los abonos da el abono exacto, y cada abono queda
+    siendo una cifra entera que el dueño puede señalar.
+
+    El abono por renglón (`/compras/{id}/abonos`, `/ventas/{id}/abonos`) sigue
+    funcionando igual que siempre, para cuando el pago es de un producto.
+    """
+    servicio = DocumentoReventaService(db, ctx)
+    return servicio.leer(servicio.registrar_abono(entity_id, payload).id)
+
+
+@router.post(
+    "/documentos/{entity_id}/anular",
+    response_model=DocumentoReventaRead,
+    summary="Anular una factura (anula todos sus renglones)",
+)
+def anular_documento(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "administrar")),
+) -> DocumentoReventaRead:
+    """Cada renglón se anula por el camino de siempre, así que la factura de una
+    compra solo se anula si el queso de TODOS sus renglones sigue en la bodega."""
+    servicio = DocumentoReventaService(db, ctx)
+    return servicio.leer(servicio.anular(entity_id).id)
+
+
+@router.delete(
+    "/documentos/{entity_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Eliminar una factura y sus renglones",
+)
+def eliminar_documento(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("reventa", "eliminar")),
+) -> None:
+    """No se puede si alguno de sus renglones tiene abonos: primero se eliminan los
+    abonos, o se anula la factura."""
+    DocumentoReventaService(db, ctx).eliminar(entity_id)
 
 
 # ------------------------------------------------------------------- compras

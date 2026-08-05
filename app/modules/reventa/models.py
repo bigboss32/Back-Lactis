@@ -9,6 +9,7 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     ForeignKey,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import expression
 
 from app.common.models import AuditMixin, TenantMixin
 from app.core.database import Base
@@ -27,6 +29,11 @@ ESTADO_PENDIENTE = "pendiente"
 ESTADO_PARCIAL = "parcial"
 ESTADO_PAGADA = "pagada"
 ESTADO_ANULADA = "anulada"
+
+# ------------------------------------------------------ qué es un documento
+# Una factura de reventa: se le compró a un productor o se le vendió a un cliente.
+TIPO_DOC_COMPRA = "compra"
+TIPO_DOC_VENTA = "venta"
 
 # ------------------------------------------------- qué se comercia y en qué unidad
 # El queso y la borona se pesan (kilos). La mozzarella se cuenta: entra como BARRA
@@ -52,6 +59,272 @@ def unidad_de(tipo: str | None) -> str:
     las barras en las columnas de barras, siempre. Ver los CHECK de cada tabla.
     """
     return UNIDAD_BARRA if tipo == TIPO_MOZZARELLA else UNIDAD_KILO
+
+
+# ---------------------------------------------------- el catálogo de productos
+# La unidad de lo que SE CUENTA por piezas completas. El valor es "unidad" —el
+# mismo que ya usa `inventario.Producto`— y no "barra" a propósito: "barra" es
+# como se le dice a la pieza de LA MOZZARELLA (es el rótulo que devuelve
+# `unidad_de` para sus renglones), no la clase de medida. Si algún día entra algo
+# que se venda por bolsa o por canasta, sigue siendo "se cuenta"; lo que cambia
+# es el rótulo, y el rótulo es el nombre del producto.
+UNIDAD_UNIDAD = "unidad"
+
+
+class ProductoReventa(TenantMixin, AuditMixin, Base):
+    """QUÉ SE COMERCIA EN REVENTA, como DATO y no como una lista en el código.
+
+    Hoy el módulo maneja tres productos —queso, borona y mozzarella— escritos a
+    mano en las constantes de arriba, y cada fila de compra o de venta lleva el
+    suyo pegado en su columna `tipo`. El dueño pidió poder "comprar y vender algo
+    que quiera el cliente": esta tabla es ese "algo".
+
+    LA CLAVE ES EL PUENTE, y es lo que hace que esto no cueste una migración de
+    datos. `clave` es la MISMA cadena que ya vive en `compras_queso.tipo` y en
+    `ventas_queso.tipo`: los tres productos que se siembran llevan las claves
+    'queso', 'borona' y 'mozzarella', que son exactamente los valores que las
+    filas del cliente ya tienen guardados. Así, el día que las compras y las
+    ventas empiecen a mirar el catálogo, cada fila que ya existe encuentra su
+    producto sin que haya que tocar ni una columna. Y por eso la clave NO CAMBIA
+    NUNCA, ni cuando se renombra el producto: es la identidad, no el rótulo.
+
+    EN ESTE LOTE NINGUNA CUENTA DE PLATA MIRA ESTA TABLA: ni las compras, ni las
+    ventas, ni el resumen, ni las temporadas, ni los lotes, ni el FIFO. Es un
+    catálogo y nada más. De ahí sale la única afirmación que importa sobre la base
+    de un cliente real: no puede mover una cifra, porque no hay ninguna consulta
+    de plata que lo lea.
+
+    TRES DECISIONES QUE PARECEN DETALLE Y NO LO SON
+    ----------------------------------------------
+
+    1) `decimales` EN VEZ DE DOS JUEGOS DE COLUMNAS. Lo que de verdad distingue
+       hoy un kilo de una barra son los decimales: los kilos viven en
+       Numeric(12, 2) y las barras en Numeric(12, 0) más el validador que rechaza
+       "8,5 barras". Todo lo demás —tener columnas de cantidad y de precio
+       separadas para cada unidad— es la consecuencia de no haber tenido dónde
+       guardar ese dato. Aquí es UNA COLUMNA, UN HECHO: cuántos decimales admite
+       la cantidad de este producto. Un producto nuevo no obliga a agregarle dos
+       columnas más a las tablas de renglones.
+
+    2) `subproducto_de_id` ES LO QUE DEJA DE HACER DE LA BORONA UN CASO ESPECIAL.
+       El motor FIFO de `lotes.py` YA implementa esta relación completa: la cola
+       de borona con costo CERO cuando llega junto con la compra (no se paga), y
+       con el costo HEREDADO del queso cuando sale de desmenuzarlo (si no, pasar
+       queso a borona haría desaparecer plata). Eso hoy está cableado con el
+       nombre 'borona' adentro del código. Con esta columna pasa a ser un dato del
+       catálogo, y la relación queda dicha donde se puede leer.
+
+       Es de UN SOLO NIVEL a propósito (lo valida el servicio): el subproducto de
+       un subproducto no existe en el motor de reparto, y admitir la cadena sería
+       ofrecer algo que el costeo no sabe calcular.
+
+    3) `admite_ajustes` SE DEDUCE DE LA UNIDAD, NO SE PREGUNTA. Lo que se pesa
+       admite merma: se compran 800 kg y al venderlos la báscula marca menos,
+       porque el queso se seca. Una barra no pierde peso, porque no se está
+       pesando: entra como barra y sale como barra. Preguntárselo al usuario
+       sería dejarle marcar "la mozzarella pierde peso", que es una casilla que
+       solo puede producir un ajuste que no significa nada. Es el mismo argumento
+       que ya está escrito en `ConversionBorona`.
+
+    Y COMO SE DEDUCE, NO PUEDE HABER DOS FUENTES QUE SE CONTRADIGAN: el servicio
+    calcula `decimales` y `admite_ajustes` a partir de `unidad`, y el CHECK de la
+    tabla exige que concuerden. La garantía la da la base y no la disciplina de
+    quien escriba el próximo INSERT, igual que con el CHECK de kilos y barras de
+    `compras_queso`: lo que tiene que ser verdad siempre, se exige en la tabla.
+    """
+
+    __tablename__ = "productos_reventa"
+    __table_args__ = (
+        # LA CLAVE ES ÚNICA POR EMPRESA, y esto es lo que hace que la siembra se
+        # pueda correr en cada despliegue sin duplicar nada. Es por (empresa_id,
+        # clave) y no global porque las dos queseras son negocios distintos: cada
+        # una tiene su 'queso'.
+        #
+        # OJO, NO FILTRA `deleted_at`: una fila borrada en suave SIGUE ocupando su
+        # clave. Es la misma situación de `roles.nombre` y se trata igual (ver
+        # `ProductoReventaService.crear`): la siembra no la resucita, pero si el
+        # dueño vuelve a agregar ese producto a mano, se le devuelve la MISMA fila
+        # con su mismo id y su misma clave, que es lo que deja que los movimientos
+        # viejos sigan cuadrando con él.
+        UniqueConstraint("empresa_id", "clave", name="uq_productos_reventa_empresa_clave"),
+        CheckConstraint(
+            f"unidad IN ('{UNIDAD_KILO}', '{UNIDAD_UNIDAD}')",
+            name="ck_productos_reventa_unidad",
+        ),
+        # El techo es el de las columnas de cantidad de los renglones
+        # (Numeric(12, 2)): más de dos decimales no se podrían guardar, y ya nos
+        # costó caro una vez que un tercer decimal se redondeara en silencio.
+        CheckConstraint(
+            "decimales >= 0 AND decimales <= 2", name="ck_productos_reventa_decimales"
+        ),
+        # LA COHERENCIA DE LA UNIDAD, exigida por la base. Lo que se cuenta va en
+        # piezas enteras (decimales 0) y no admite merma; lo que se pesa sí la
+        # admite. Escrito con booleanos pelados (`admite_ajustes` / `NOT
+        # admite_ajustes`) porque es lo único que significa lo mismo en Postgres
+        # —que es producción— y en SQLite —que es donde corren las pruebas—.
+        CheckConstraint(
+            f"(unidad = '{UNIDAD_KILO}' AND admite_ajustes) "
+            f"OR (unidad = '{UNIDAD_UNIDAD}' AND decimales = 0 AND NOT admite_ajustes)",
+            name="ck_productos_reventa_unidad_coherente",
+        ),
+        # Nada es subproducto de sí mismo. Sin esto, una fila apuntándose a sí
+        # misma dejaría al reparto de costos girando sobre el mismo producto.
+        CheckConstraint(
+            "subproducto_de_id IS NULL OR subproducto_de_id <> id",
+            name="ck_productos_reventa_subproducto_no_es_si_mismo",
+        ),
+    )
+
+    # Cómo lo llama el dueño. SE PUEDE RENOMBRAR SIEMPRE y sin riesgo, porque no
+    # es la identidad de nada: ni el id ni la clave se mueven, así que ninguna
+    # fila de compra ni de venta se entera. Importa porque el dueño va a querer
+    # que "Queso" diga "Queso costeño".
+    nombre: Mapped[str] = mapped_column(String(80), nullable=False)
+    # La identidad. Se calcula del nombre la PRIMERA vez y no vuelve a cambiar
+    # (ver el docstring: es la misma cadena que `compras_queso.tipo`).
+    clave: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    # 'kg' (se pesa) o 'unidad' (se cuenta).
+    unidad: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=UNIDAD_KILO, server_default=UNIDAD_KILO
+    )
+    # Cuántos decimales admite la cantidad: 2 si se pesa, 0 si se cuenta. Lo
+    # deriva el servicio de `unidad` y lo amarra el CHECK.
+    decimales: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=2, server_default="2"
+    )
+    # De qué producto es subproducto (la borona lo es del queso). ON DELETE SET
+    # NULL: si el padre desapareciera, el subproducto se queda —es un producto
+    # completo que se vende— y lo que se pierde es la relación, no la fila.
+    subproducto_de_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("productos_reventa.id", ondelete="SET NULL"), index=True, default=None
+    )
+    # Si su cantidad puede corregirse con un ajuste (merma o paso a borona).
+    # Deducido de `unidad`, ver el docstring.
+    admite_ajustes: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=expression.true()
+    )
+    # En qué orden se le muestran al dueño. Es SOLO presentación: el orden de una
+    # lista de selección, no una prioridad de negocio y no un dato de ninguna
+    # cuenta.
+    orden: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+    # El producto del que este es subproducto. `remote_side` es lo que le dice al
+    # ORM cuál de las dos puntas de la llave es el padre en una tabla que se
+    # apunta a sí misma.
+    subproducto_de: Mapped["ProductoReventa | None"] = relationship(
+        "ProductoReventa", remote_side="ProductoReventa.id", lazy="joined"
+    )
+
+    @property
+    def subproducto_de_nombre(self) -> str | None:
+        """El nombre del padre, para que la pantalla lo muestre sin tener que
+        cruzar la lista contra sí misma."""
+        return self.subproducto_de.nombre if self.subproducto_de else None
+
+    @property
+    def se_pesa(self) -> bool:
+        """Si se mide en kilos. Es la misma pregunta que `admite_ajustes` y que
+        `decimales > 0`, y las tres tienen que dar lo mismo: el CHECK de la tabla
+        lo exige. Existe con nombre propio porque es así como se lee en el
+        negocio: "esto se pesa" o "esto se cuenta"."""
+        return self.unidad == UNIDAD_KILO
+
+
+def derivados_de_unidad(unidad: str) -> tuple[int, bool]:
+    """(decimales, admite_ajustes) que le corresponden a una unidad.
+
+    UNA SOLA IMPLEMENTACIÓN de la deducción, y vive acá —al lado del CHECK que la
+    exige— porque tiene DOS clientes: el servicio, cuando el dueño agrega un
+    producto, y la siembra de cada despliegue. Si cada uno la escribiera por su
+    cuenta, un día la siembra dejaría filas que el servicio no habría aceptado.
+
+    Lo que se pesa lleva dos decimales y admite merma; lo que se cuenta va entero y
+    no la admite. El porqué está en el docstring de `ProductoReventa`.
+    """
+    se_pesa = unidad == UNIDAD_KILO
+    return (2 if se_pesa else 0), se_pesa
+
+
+# Los productos con los que arranca TODA empresa: son exactamente los tres que el
+# módulo ya maneja hoy, con las claves que ya están guardadas en las filas del
+# cliente ('queso', 'borona', 'mozzarella').
+#
+#     (clave, nombre, unidad, clave del producto del que es subproducto)
+#
+# NI `decimales` NI `admite_ajustes` VAN EN LA TUPLA, aunque el queso lleve dos
+# decimales y la mozzarella cero: los deduce `derivados_de_unidad` de la unidad. Una
+# lista que los repitiera sería un segundo sitio donde se pueden desordenar, y es
+# exactamente el defecto que este diseño evita. El `orden` tampoco va: es la
+# posición en esta misma lista.
+#
+# La usan la siembra de cada despliegue (`app/seeds/seed.py`) y la migración
+# (`alembic/versions/*_catalogo_de_productos_de_reventa.py`, que no puede importar de
+# la aplicación y la lleva copiada). Una prueba exige que las dos digan lo mismo.
+PRODUCTOS_REVENTA_DEFECTO: tuple[tuple[str, str, str, str | None], ...] = (
+    (TIPO_QUESO, "Queso", UNIDAD_KILO, None),
+    (TIPO_BORONA, "Borona", UNIDAD_KILO, TIPO_QUESO),
+    (TIPO_MOZZARELLA, "Mozzarella", UNIDAD_UNIDAD, None),
+)
+
+
+class DocumentoReventa(TenantMixin, AuditMixin, Base):
+    """LA FACTURA de reventa: una compra o una venta con VARIOS productos.
+
+    POR QUÉ ESTA TABLA NO TIENE NI UNA COLUMNA DE PLATA, que es LA decisión de
+    todo este trabajo. La fila de `compras_queso` / `ventas_queso` que ya existía
+    ES un renglón de factura: un producto, su cantidad, su precio, su plata y sus
+    abonos. Lo único que faltaba era una cabecera ENCIMA que dijera "estos tres
+    renglones son la misma venta del mismo día al mismo cliente". Así que la
+    cabecera es SOLO eso: quién, cuándo y una nota.
+
+    El total del documento es la SUMA de sus renglones, calculada AL LEER, nunca
+    guardada. Es el mismo criterio que ya está escrito y defendido en `Temporada`:
+    dos fuentes para el mismo hecho terminan contradiciéndose, y el día que se
+    contradigan el dueño —que suma la columna a mano— pierde la confianza en todo
+    el tablero. Si el total viviera aquí, editarle el precio a un renglón dejaría
+    esta cifra vieja; peor todavía, `valor_total` y `abonado` viven en los
+    renglones porque los abonos viven en los renglones.
+
+    Y DE AHÍ SALE LO IMPORTANTE: el FIFO por lotes, el resumen, las temporadas, la
+    cartera, los abonos, los adjuntos y los PDF NO SE TOCARON. Todos siguen
+    leyendo filas de un producto cada una, que es lo que siempre leyeron; el
+    `documento_id` les es invisible. Una factura de tres renglones da EXACTAMENTE
+    las mismas cifras que esos tres productos vendidos por separado (lo fija
+    tests/test_reventa_documentos_neutralidad.py).
+
+    LA COLUMNA `estado` (que viene del AuditMixin) NO ES EL ESTADO DE PAGO. El
+    estado de pago del documento es DERIVADO: se deduce del estado de sus
+    renglones al leer. Aquí `estado` es lo que es en todas las tablas del
+    proyecto: el ciclo de vida de la fila ('activo' / 'inactivo' al borrarse).
+    """
+
+    __tablename__ = "documentos_reventa"
+    __table_args__ = (
+        # Solo hay dos clases de factura, y la base lo exige en vez de confiarlo
+        # al esquema de entrada: `tipo` decide en CUÁL de las dos tablas de
+        # renglones hay que buscar, así que un tercer valor dejaría un documento
+        # que ninguna lectura sabría abrir.
+        CheckConstraint(
+            "tipo IN ('compra', 'venta')", name="ck_documentos_reventa_tipo"
+        ),
+    )
+
+    tipo: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    fecha: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    # El productor (si es compra) o el cliente (si es venta). Se llama `tercero`
+    # como en `SaldoAnterior`, y por lo mismo: es el mismo hecho de las dos
+    # tablas, con la misma canonización de nombres.
+    #
+    # OJO, EL NOMBRE Y LA FECHA SE COPIAN AL RENGLÓN. No es redundancia por
+    # descuido: el resumen, la cartera y el estado de cuenta agrupan por
+    # `ventas_queso.cliente` y filtran por `ventas_queso.fecha`, y tenían que
+    # seguir haciéndolo sin aprender de documentos. El servicio propaga los dos
+    # campos de la cabecera a TODOS sus renglones en cada escritura, así que no
+    # pueden quedar diciendo cosas distintas.
+    tercero: Mapped[str] = mapped_column(String(150), nullable=False)
+    observaciones: Mapped[str | None] = mapped_column(String(500))
 
 
 class CompraQueso(TenantMixin, AuditMixin, Base):
@@ -81,6 +354,29 @@ class CompraQueso(TenantMixin, AuditMixin, Base):
 
     fecha: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     productor: Mapped[str] = mapped_column(String(150), nullable=False)
+    # ------------------------------------------------ a qué factura pertenece
+    # ANULABLE, y con ON DELETE SET NULL, por la misma razón: esta fila se
+    # sostiene sola. Fue una compra completa durante meses y sigue siendo la
+    # unidad que lee el FIFO, el resumen y la cartera. El documento es una
+    # cabecera que la AGRUPA, no su dueño: si algún día se borrara una cabecera
+    # sin pasar por el servicio, lo que NO puede pasar es que se lleve la plata
+    # por delante con un CASCADE. Queda el renglón, suelto, contando lo mismo
+    # que contaba antes de que existieran los documentos.
+    #
+    # En nulo significa exactamente eso: una compra de un solo producto de las
+    # de antes (la migración le puso su propia cabecera a cada una, así que en
+    # la práctica solo quedan en nulo las filas ya borradas en suave).
+    documento_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("documentos_reventa.id", ondelete="SET NULL"), index=True, default=None
+    )
+    # En qué lugar de la factura va este renglón (0, 1, 2...). NO es decoración:
+    # el abono al documento se DERRAMA sobre los renglones EN ESTE ORDEN, así que
+    # es el orden en el que el dueño ve caer su plata, y es el orden en el que se
+    # toman los candados FOR UPDATE (ver `_bloquear_renglones`: sin un orden fijo,
+    # dos abonos simultáneos a la misma factura se abrazan en un deadlock).
+    orden: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     # Qué se le compró: queso (se pesa) o mozzarella (se cuenta por barras).
     # server_default 'queso' a propósito: TODAS las filas que ya existen son de
     # kilos, y así quedan marcadas como tal y no en un estado ambiguo.
@@ -135,7 +431,11 @@ class CompraQueso(TenantMixin, AuditMixin, Base):
 
     @property
     def saldo(self) -> Decimal:
-        return self.valor_total - self.abonado
+        return max(Decimal("0"), self.valor_total - self.abonado)
+
+    @property
+    def saldo_a_favor(self) -> Decimal:
+        return max(Decimal("0"), self.abonado - self.valor_total)
 
     @property
     def unidad(self) -> str:
@@ -193,6 +493,15 @@ class VentaQueso(TenantMixin, AuditMixin, Base):
 
     fecha: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     cliente: Mapped[str] = mapped_column(String(150), nullable=False)
+    # A qué factura pertenece este renglón, y en qué lugar de ella. Mismo trato
+    # que en la compra y por las mismas razones: ver los comentarios largos en
+    # CompraQueso.documento_id y CompraQueso.orden.
+    documento_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("documentos_reventa.id", ondelete="SET NULL"), index=True, default=None
+    )
+    orden: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     # Qué se vende: queso entero (kg), borona (kg, subproducto más barato) o
     # mozzarella (barras). La unidad se deduce del tipo, ver `unidad_de`.
     tipo: Mapped[str] = mapped_column(
@@ -250,7 +559,11 @@ class VentaQueso(TenantMixin, AuditMixin, Base):
 
     @property
     def saldo(self) -> Decimal:
-        return self.valor_total - self.abonado
+        return max(Decimal("0"), self.valor_total - self.abonado)
+
+    @property
+    def saldo_a_favor(self) -> Decimal:
+        return max(Decimal("0"), self.abonado - self.valor_total)
 
     @property
     def unidad(self) -> str:
@@ -351,7 +664,11 @@ class SaldoAnterior(TenantMixin, AuditMixin, Base):
 
     @property
     def saldo(self) -> Decimal:
-        return self.valor_total - self.abonado
+        return max(Decimal("0"), self.valor_total - self.abonado)
+
+    @property
+    def saldo_a_favor(self) -> Decimal:
+        return max(Decimal("0"), self.abonado - self.valor_total)
 
 
 class AbonoSaldoAnterior(AuditMixin, Base):
