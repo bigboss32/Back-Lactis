@@ -12,6 +12,7 @@ from app.modules.liquidaciones.schemas import (
     AnticipoRead,
     AnticipoUpdate,
     GenerarLiquidaciones,
+    GenerarLiquidacionesResultado,
     LiquidacionDetallePrecioUpdate,
     LiquidacionRead,
     LiquidacionUpdate,
@@ -31,16 +32,31 @@ def _to_read(liq) -> LiquidacionRead:
     return dto
 
 
-@router.post("/generar", response_model=list[LiquidacionRead], summary="Generar liquidaciones del período")
+@router.post(
+    "/generar",
+    response_model=GenerarLiquidacionesResultado,
+    summary="Generar liquidaciones del período (devuelve las generadas y las omitidas)",
+)
 def generar(
     payload: GenerarLiquidaciones,
     db: DbSession,
     ctx: RequestContext = Depends(require_permission("liquidaciones", "crear")),
-) -> list[LiquidacionRead]:
-    liquidaciones = LiquidacionService(db, ctx).generar(
+) -> GenerarLiquidacionesResultado:
+    """ESTO YA NO DEVUELVE UNA LISTA PELADA, y el cambio de forma fue el arreglo.
+
+    "Generar" barre TODOS los terceros del período, y un tercero se puede quedar por
+    fuera (un período que se cruza, una tarifa de flete sin llenar). Antes eso era o un
+    error que tumbaba la corrida completa —dejando sin comprobante a los que no tenían
+    nada que ver— o un salto en silencio, y en los dos casos quedaba leche sin papel. La
+    respuesta trae ahora `generadas` y `omitidas`; el porqué está en
+    `GenerarLiquidacionesResultado` y en `LiquidacionOmitida`.
+    """
+    liquidaciones, omitidas = LiquidacionService(db, ctx).generar(
         payload.periodo_inicio, payload.periodo_fin, payload.tipo, payload.proveedor_id
     )
-    return [_to_read(liq) for liq in liquidaciones]
+    return GenerarLiquidacionesResultado(
+        generadas=[_to_read(liq) for liq in liquidaciones], omitidas=omitidas
+    )
 
 
 @router.post(

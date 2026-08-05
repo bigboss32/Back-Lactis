@@ -254,13 +254,33 @@ class ContabilidadService:
             )
         ) or CERO
 
-        # 'parcial' entra en el por pagar: se le abonó una parte y el resto sigue
-        # siendo deuda de la quesera. `saldo` ya trae solo lo que falta.
+        # "POR PAGAR" ES LO QUE HAY QUE SACAR DE LA CAJA: SOLO LOS SALDOS POSITIVOS. La
+        # misma cuenta y las mismas palabras que el tablero (ver `reportes/service.py`,
+        # que trae las cifras del caso): son la misma pregunta y no pueden contestarse
+        # distinto en dos pantallas.
+        #
+        # 'parcial' entra: se le abonó una parte y el resto sigue siendo deuda de la
+        # quesera. `saldo` ya trae solo lo que falta.
         por_pagar = self.db.scalar(
             select(func.coalesce(func.sum(Liquidacion.saldo), 0)).where(
                 Liquidacion.empresa_id == empresa,
                 Liquidacion.deleted_at.is_(None),
                 Liquidacion.estado.in_(["borrador", "aprobada", "parcial"]),
+                Liquidacion.saldo > 0,
+            )
+        ) or CERO
+
+        # Y LO QUE LOS TERCEROS LE QUEDARON DEBIENDO, en positivo y en su propia cifra:
+        # no es plata que el dueño tenga que sacar, es plata que se cobra descontándola
+        # de la próxima quincena del tercero. Mismo universo que `deudas_sin_cobrar`, la
+        # consulta que la cobra de verdad.
+        le_quedan_debiendo = self.db.scalar(
+            select(func.coalesce(func.sum(-Liquidacion.saldo), 0)).where(
+                Liquidacion.empresa_id == empresa,
+                Liquidacion.deleted_at.is_(None),
+                Liquidacion.estado != "anulada",
+                Liquidacion.saldo < 0,
+                Liquidacion.deuda_trasladada_a_id.is_(None),
             )
         ) or CERO
 
@@ -270,5 +290,6 @@ class ContabilidadService:
             saldo_bancos=saldo_bancos,
             cartera_por_cobrar=cartera,
             liquidaciones_por_pagar=por_pagar,
+            terceros_le_quedan_debiendo=le_quedan_debiendo,
             total_disponible=saldo_cajas + saldo_bancos,
         )

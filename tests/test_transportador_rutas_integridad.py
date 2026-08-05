@@ -334,7 +334,7 @@ def test_ataque_ruta_borrada_no_le_mueve_la_plata_ni_revienta_el_comprobante(
     })
     print(f"  generar el comprobante → {r.status_code}")
     assert r.status_code in (200, 201), r.text
-    liq = [x for x in r.json() if x["tipo"] == "transportador"][0]
+    liq = [x for x in r.json()["generadas"] if x["tipo"] == "transportador"][0]
     detalles = liq["detalles"]
     for d in detalles:
         print(f"    {d['fecha']}  ruta={d['ruta_nombre']!r}  "
@@ -633,10 +633,25 @@ def test_ataque_el_helper_nunca_devuelve_un_cero_callado(client, base_datos, db_
     r = client.post(f"{LIQUIDACIONES}/generar", headers=h, json={
         "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "transportador",
     })
-    generadas = [x for x in r.json() if x["tipo"] == "transportador"]
+    corrida = r.json()
+    generadas = [x for x in corrida["generadas"] if x["tipo"] == "transportador"]
     print(f"  comprobantes de transportador generados: {len(generadas)} "
           f"(no se genera uno en cero, se salta)")
     assert generadas == [], "un comprobante de flete en cero no debería generarse"
+
+    # Y EL SALTO SE AVISA, que es la otra mitad del "cero callado": antes Alex
+    # simplemente no salía en la respuesta —igual que quien no trajo leche—, y el dueño
+    # no tenía cómo distinguir "a este no le tocaba nada" de "a este le faltó la tarifa
+    # y sus 82 L se quedaron sin comprobante". Ahora sale en `omitidas` con el motivo.
+    omitida = corrida["omitidas"][0]
+    print(f"  omitidas: {len(corrida['omitidas'])} -> {omitida['motivo']}")
+    assert len(corrida["omitidas"]) == 1
+    assert omitida["motivo_codigo"] == "flete_sin_tarifa"
+    assert (omitida["tipo"], omitida["cuenta"]) == ("transportador", "flete")
+    assert omitida["tercero_id"] == alex["id"]
+    assert omitida["tercero_nombre"] == "Alex"
+    # Dice los litros que quedaron esperando y qué hacer.
+    assert "82 L" in omitida["motivo"] and "tarifa" in omitida["motivo"]
 
 
 # ===========================================================================
@@ -703,7 +718,7 @@ def test_ataque_invariante_con_tres_rutas_y_tarifas_cambiadas_a_media_quincena(
         "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "transportador",
     })
     assert r.status_code in (200, 201), r.text
-    liq = [x for x in r.json() if x["tipo"] == "transportador"][0]
+    liq = [x for x in r.json()["generadas"] if x["tipo"] == "transportador"][0]
 
     # Las fotos se leen DESPUÉS de generar, y no es un detalle de la prueba: al
     # liquidar un flete que todavía no ha movido plata, el comprobante vuelve a derivar

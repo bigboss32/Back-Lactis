@@ -84,8 +84,8 @@ def _liquidar(client, h, inicio="2026-07-16", fin="2026-07-31"):
                     json={"periodo_inicio": inicio, "periodo_fin": fin, "tipo": "transportador"},
                     headers=h)
     assert r.status_code in (200, 201), r.text
-    assert r.json(), "no se generó liquidación de flete"
-    return r.json()[0]
+    assert r.json()["generadas"], "no se generó liquidación de flete"
+    return r.json()["generadas"][0]
 
 
 def _leer(client, h, liq_id):

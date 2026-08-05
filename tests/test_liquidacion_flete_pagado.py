@@ -78,7 +78,7 @@ def generar_flete(client, headers, tipo="transportador", inicio="2026-06-01", fi
         headers=headers,
     )
     assert res.status_code == 200, res.text
-    return res.json()
+    return res.json()["generadas"]
 
 
 def generar_y_pagar(client, h):
@@ -683,7 +683,7 @@ def test_abono_y_luego_pagar_el_resto_no_mueve_nada(client, base_datos):
         json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15",
               "tipo": "transportador"},
         headers=h,
-    ).json()[0]
+    ).json()["generadas"][0]
     client.post(f"{API}/{liq['id']}/aprobar", headers=h)
     client.post(f"{API}/{liq['id']}/pagos", json={"fecha": "2026-06-16", "valor": "5000"}, headers=h)
     # Entre el abono y el pago final, le suben la tarifa y editan el dia

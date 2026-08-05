@@ -204,7 +204,7 @@ def test_liquidacion_del_transportador_cuadra_con_tarifa_decimal(client, base_da
     )
     assert generadas.status_code in (200, 201), generadas.text
     liq_id = [
-        liq for liq in generadas.json()
+        liq for liq in generadas.json()["generadas"]
         if liq.get("transportador_id") == transportador["id"]
     ][0]["id"]
     liq = client.get(f"{LIQUIDACIONES}/{liq_id}", headers=h).json()

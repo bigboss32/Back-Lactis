@@ -45,7 +45,7 @@ def _proveedor_con_recepciones(client, headers, dias, precio="1800", nombre="Yub
         f"{API}/generar",
         json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "proveedor"},
         headers=headers,
-    ).json()
+    ).json()["generadas"]
     liq = next(x for x in liquidaciones if x["proveedor_id"] == proveedor["id"])
     return proveedor, liq
 
@@ -192,7 +192,7 @@ def test_precio_que_deja_el_dia_en_negativo_rebota_sin_dejar_nada_a_medias(clien
         f"{API}/generar",
         json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "proveedor"},
         headers=h,
-    ).json()[0]
+    ).json()["generadas"][0]
 
     r = _cambiar_precio(client, h, liq["id"], liq["detalles"][0]["id"], "1000")
     print("\n===== (d) PRECIO QUE DEJA EL DÍA EN NEGATIVO =====")
@@ -287,7 +287,7 @@ def test_en_liquidacion_de_transportador_no_se_edita_el_precio(client, base_dato
         f"{API}/generar",
         json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "ambos"},
         headers=h,
-    ).json()
+    ).json()["generadas"]
     liq_t = {x["tipo"]: x for x in liqs}["transportador"]
 
     r = _cambiar_precio(client, h, liq_t["id"], liq_t["detalles"][0]["id"], "150")

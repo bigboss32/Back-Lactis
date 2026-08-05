@@ -603,7 +603,7 @@ def test_con_el_flete_pagado_la_ruta_del_dia_queda_trabada(client, base_datos):
         "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "transportador",
     })
     assert generadas.status_code in (200, 201), generadas.text
-    flete = generadas.json()[0]
+    flete = generadas.json()["generadas"][0]
     assert client.post(
         f"/api/v1/liquidaciones/{flete['id']}/aprobar", headers=h
     ).status_code == 200

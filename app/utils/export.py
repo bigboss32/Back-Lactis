@@ -236,6 +236,7 @@ def build_liquidacion_pdf(
     detalle_col_widths: Sequence[float] | None = None,
     detalle_wrap_cols: Sequence[int] = (),
     resumen_rows: Sequence[tuple[str, str, bool]],
+    notas_resumen: Sequence[str] = (),
     anticipos_rows: Sequence[Sequence[Any]] = (),
     observaciones: str | None = None,
 ) -> bytes:
@@ -250,6 +251,14 @@ def build_liquidacion_pdf(
     LIBRE. Esas se imprimen envueltas (parten en varias líneas en vez de
     desbordarse) y alineadas a la izquierda. Por omisión ninguna, así que el
     comprobante del proveedor sale idéntico a como salía.
+
+    `notas_resumen`: renglones de letra chica DEBAJO del resumen, para explicar de
+    dónde salió una cifra que no se puede deducir de este papel. Hoy son las dos
+    puntas de la deuda que se arrastra entre quincenas: "esta deuda se le cobró en la
+    liquidación del 16/06 al 30/06" en la que la dejó, y "este descuento viene de la
+    del 01/06 al 15/06" en la que la cobró. Sin ellas el dueño ve un descuento y no
+    tiene manera de saber de dónde salió. Van envueltas en Paragraph, así que un texto
+    largo parte en varias líneas en vez de desbordarse.
     """
     buffer = io.BytesIO()
     styles = getSampleStyleSheet()
@@ -369,7 +378,15 @@ def build_liquidacion_pdf(
 
     # --- Resumen (con VALOR TOTAL y SALDO destacados)
     elements.append(Paragraph("Resumen de liquidación", st_head))
-    res = Table([[c, v] for (c, v, _) in resumen_rows], colWidths=[6 * cm, 5 * cm], hAlign="RIGHT")
+    # LA COLUMNA DEL RÓTULO MIDE 7,6 cm Y NO 6, y el centímetro y medio es por un
+    # rótulo concreto: "Lo que quedó debiendo de la quincena pasada" mide 187 pt en
+    # Helvetica 9 y en una celda de 6 cm (154 pt útiles) se desbordaba encima de la
+    # cifra. Los rótulos van en texto plano —no en Paragraph— porque el resaltado de
+    # VALOR TOTAL y del SALDO se pone con FONTNAME/TEXTCOLOR de la tabla, y eso no
+    # alcanza a un Paragraph: quedarían los dos renglones grandes sin negrita.
+    res = Table(
+        [[c, v] for (c, v, _) in resumen_rows], colWidths=[7.6 * cm, 5 * cm], hAlign="RIGHT"
+    )
     res_style = [
         ("FONTSIZE", (0, 0), (-1, -1), 9),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
@@ -387,6 +404,15 @@ def build_liquidacion_pdf(
             ]
     res.setStyle(TableStyle(res_style))
     elements += [res, Spacer(1, 12)]
+
+    # --- Las notas al pie del resumen (de dónde salió una cifra que se arrastra)
+    if notas_resumen:
+        st_nota = ParagraphStyle(
+            "NotaResumen", parent=styles["Normal"], fontSize=8, textColor=GREY, leading=11
+        )
+        for nota in notas_resumen:
+            elements.append(Paragraph(_texto(nota), st_nota))
+        elements.append(Spacer(1, 12))
 
     # --- Anticipos aplicados
     if anticipos_rows:

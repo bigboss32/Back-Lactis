@@ -86,7 +86,7 @@ def _montar(client, h, *, litros="500", precio="1800", anticipo="200000", nombre
         f"{API}/generar",
         json={"periodo_inicio": INICIO, "periodo_fin": FIN, "tipo": "proveedor"},
         headers=h,
-    ).json()
+    ).json()["generadas"]
     liq = next(x for x in liquidaciones if x["proveedor_id"] == proveedor["id"])
     assert D(liq["anticipos"]) == D(anticipo), "el anticipo no quedó descontado al generar"
     return proveedor, ant.json(), liq
@@ -524,7 +524,7 @@ def test_mover_el_anticipo_a_otra_quincena_lo_suelta_de_la_liquidacion(client, b
         f"{API}/generar",
         json={"periodo_inicio": "2026-07-01", "periodo_fin": "2026-07-15", "tipo": "proveedor"},
         headers=h,
-    ).json()[0]
+    ).json()["generadas"][0]
     _mostrar("julio", julio)
     assert D(julio["anticipos"]) == D(200000), "el anticipo no lo recogió la quincena que le toca"
     assert D(julio["neto_a_pagar"]) == D(400 * 1800) - D(200000)

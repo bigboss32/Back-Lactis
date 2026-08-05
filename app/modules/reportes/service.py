@@ -185,13 +185,44 @@ class ReporteService:
             cartera_pendiente=self._sum(
                 Venta.total - Venta.pagado, Venta, Venta.estado.in_(["pendiente", "parcial"])
             ),
-            # 'parcial' cuenta: a esa liquidación se le abonó algo pero todavía
-            # se le debe el resto, y `saldo` ya es solo lo que falta. Dejarla por
-            # fuera haría desaparecer del tablero una deuda que sigue viva.
+            # "LIQUIDACIONES POR PAGAR" ES CUÁNTA PLATA TIENE QUE SACAR EL DUEÑO, y eso
+            # son SOLO LOS SALDOS POSITIVOS.
+            #
+            # Sumar los negativos con los positivos contesta otra pregunta y da una
+            # cifra que no le sirve a nadie. Las cifras del caso: Doña Rosa con saldo
+            # +$130.000 (que sí hay que pagarle) y Henri con -$120.000 (que quedó
+            # debiendo) sumaban $10.000, y con eso el tablero decía que la quincena se
+            # paga con diez mil pesos cuando de la caja tienen que salir $130.000. Lo que
+            # a él le deben es OTRA cosa y va en su propia cifra, abajo.
+            #
+            # 'parcial' cuenta: a esa liquidación se le abonó algo pero todavía se le
+            # debe el resto, y `saldo` ya es solo lo que falta. Dejarla por fuera haría
+            # desaparecer del tablero una deuda que sigue viva.
             liquidaciones_por_pagar=self._sum(
                 Liquidacion.saldo,
                 Liquidacion,
                 Liquidacion.estado.in_(["borrador", "aprobada", "parcial"]),
+                Liquidacion.saldo > 0,
+            ),
+            # LA OTRA MITAD, Y CON SU PROPIO NOMBRE: lo que los terceros le quedaron
+            # debiendo a la quesera, en POSITIVO (de ahí el menos delante del saldo, que
+            # en estas filas es negativo).
+            #
+            # Es plata que el dueño NO tiene que sacar: se la va a cobrar descontándola
+            # de la próxima quincena del tercero. Por eso el universo es EXACTAMENTE el
+            # de `deudas_sin_cobrar`, la consulta que la cobra —cualquier estado menos
+            # 'anulada', y sin marca de traslado—: la cifra que se muestra es la que de
+            # verdad se va a cobrar, no una aproximación parecida.
+            #
+            # Y LAS YA TRASLADADAS QUEDAN POR FUERA o se contaría la misma deuda dos
+            # veces: los $120.000 de Henri ya están restados adentro del saldo de la
+            # quincena que se los cobró.
+            terceros_le_quedan_debiendo=self._sum(
+                -Liquidacion.saldo,
+                Liquidacion,
+                Liquidacion.estado != "anulada",
+                Liquidacion.saldo < 0,
+                Liquidacion.deuda_trasladada_a_id.is_(None),
             ),
             alertas_no_leidas=alertas,
             litros_por_dia=litros_por_dia,

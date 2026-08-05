@@ -173,7 +173,7 @@ def generar(client, h, tipo="transportador", inicio="2026-06-01", fin="2026-06-1
         headers=h,
     )
     assert res.status_code == 200, res.text
-    return res.json()
+    return res.json()["generadas"]
 
 
 def recalcular(client, h, liq_id):
@@ -804,6 +804,10 @@ def test_generar_con_la_tarifa_en_cero_no_borra_el_flete_de_los_dias(client, bas
     Es el caso del dueño que quita la ruta de la lista del transportador y su tarifa
     general está en cero (el valor por omisión). Oprime Generar, no sale comprobante
     —y las cifras de flete de esos días se van a cero de todos modos—.
+
+    Y AHORA EL SALTO SE AVISA: el transportador sale en `omitidas` con su motivo. Antes
+    no salía en la respuesta, igual que quien no trajo leche, y esos 44,23 L quedaban sin
+    comprobante y sin nadie a quien preguntarle.
     """
     h = auth_headers(client, "admin.a")
     ruta = crear_ruta(client, h, "Napoles")
@@ -814,8 +818,24 @@ def test_generar_con_la_tarifa_en_cero_no_borra_el_flete_de_los_dias(client, bas
     assert D(antes) == centavos(D("44.23") * BUENA)
 
     poner_tarifa_ruta(client, h, t, [])  # cae en la general, que es 0
-    liqs = generar(client, h)
+    r = client.post(
+        f"{API}/generar",
+        json={
+            "periodo_inicio": "2026-06-01",
+            "periodo_fin": "2026-06-15",
+            "tipo": "transportador",
+        },
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    corrida = r.json()
+    liqs = corrida["generadas"]
     assert liqs == [], f"con la tarifa en cero no debería salir comprobante: {liqs}"
+    omitida = corrida["omitidas"][0]
+    print(f"\n  omitido por tarifa en cero: {omitida['motivo']}")
+    assert omitida["motivo_codigo"] == "flete_sin_tarifa"
+    assert omitida["tercero_nombre"] == "Alex"
+    assert "44,23 L" in omitida["motivo"], omitida["motivo"]
     despues = leer(client, h, rec["id"])["valor_transporte"]
     assert despues == antes, (
         f"'Generar' sin producir comprobante le borró el flete del día: {antes} -> "

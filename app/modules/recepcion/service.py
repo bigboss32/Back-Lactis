@@ -209,10 +209,35 @@ def _ya_salio_plata(liquidacion: Liquidacion) -> bool:
     Es "tiene algún pago", no "está en pagada": con un solo abono hecho, cambiar
     las cifras deja ese abono contra un total que ya no existe. Se mira además el
     estado 'pagada' porque hay un camino que la marca pagada SIN registrar pago
-    —cuando los anticipos se comieron todo el saldo— y ahí tampoco hay nada que
-    corregir.
+    —cuando los anticipos se comieron EXACTO todo el saldo— y ahí tampoco hay nada
+    que corregir: esa plata salió como anticipo, en la mano.
     """
     return liquidacion.tiene_pagos or liquidacion.estado == ESTADO_PAGADA
+
+
+def _traba_el_dia(liquidacion: Liquidacion) -> bool:
+    """Si esta liquidación deja SUS CIFRAS congeladas, y por lo tanto traba el día.
+
+    SON DOS RAZONES DISTINTAS y conviene no confundirlas, porque el mensaje que el
+    usuario lee es distinto en cada una:
+
+      1. YA SALIÓ PLATA contra ella (un abono, el pago total, o el anticipo que la
+         saldó). Cambiar los litros deja esa entrega contra un total que ya no existe.
+      2. LO QUE ESTA QUINCENA QUEDÓ DEBIENDO YA SE LE COBRÓ EN OTRA liquidación. Acá no
+         salió un peso, pero sus cifras están igual de congeladas: su
+         `le_queda_debiendo` está restado en un SEGUNDO comprobante —que puede estar
+         pagado y en la mano del proveedor—, así que corregirle un litro descuadraría
+         los dos papeles de una sola vez.
+
+    La segunda es nueva, y es la contraparte de haber quitado el 'pagada' falso: una
+    liquidación de saldo negativo se queda ahora en 'aprobada', o sea que sus días
+    siguen corregibles —que es lo que pidió el dueño: un día no puede quedar trabado si
+    no salió plata de verdad— HASTA el momento en que su deuda se cobra en la quincena
+    siguiente. Ese es el instante en que la quincena queda cerrada de verdad, y ahí sí
+    se traba. El porqué completo está en la nota "MARCAR PAGADA UNA LIQUIDACIÓN QUE
+    NADIE PAGÓ", en app/modules/liquidaciones/service.py.
+    """
+    return _ya_salio_plata(liquidacion) or liquidacion.deuda_ya_cobrada
 
 
 def _nombre_del_tercero(liquidacion: Liquidacion) -> str | None:
@@ -242,6 +267,18 @@ def _por_que_esta_trabada(liquidacion: Liquidacion) -> str:
     que = _de_quien(liquidacion)
     nombre = _nombre_del_tercero(liquidacion)
     a_quien = f" a {nombre}" if nombre else ""
+    # LA DEUDA YA COBRADA VA PRIMERO porque es la razón que el usuario no puede
+    # adivinar: por este día no salió plata, así que "ya se le pagó" sería mentira y lo
+    # mandaría a buscar un pago que no existe. Lo que necesita saber es en qué OTRA
+    # liquidación se le cobró, que es la que tendría que anular para poder corregir.
+    if liquidacion.deuda_ya_cobrada:
+        otra = liquidacion.deuda_trasladada_a
+        donde = f" en la del {otra.periodo_texto}" if otra is not None else " en otra"
+        de_quien = f"{nombre} " if nombre else ""
+        return (
+            f"lo que {de_quien}quedó debiendo en la quincena de {que} de este día ya "
+            f"se le cobró{donde}"
+        )
     # Se distingue el pago total del abono porque para el usuario son dos
     # situaciones distintas: del pagado no hay nada que hacer por dentro; del
     # abono sí, se puede borrar el pago, corregir el día y volver a abonar.
@@ -287,13 +324,19 @@ class CandadoRecepcion:
             if campo not in self.bloqueados and campo not in _NUNCA_EDITABLES
         ]
 
+    # Estas dos viajan a la pantalla (`RecepcionRead`, `CeldaGrilla`) y son las que
+    # apagan las celdas de la grilla. Van por `_traba_el_dia` y NO por
+    # `_ya_salio_plata` para que la grilla apague exactamente lo que el guardia va a
+    # rebotar: una quincena cuya deuda ya se cobró en otra liquidación también tiene
+    # las cifras congeladas, aunque no haya salido un peso. Se conservan los nombres
+    # —la pantalla ya los usa— y el aviso que va al lado explica el motivo real.
     @property
     def leche_pagada(self) -> bool:
-        return self.leche is not None and _ya_salio_plata(self.leche)
+        return self.leche is not None and _traba_el_dia(self.leche)
 
     @property
     def flete_pagado(self) -> bool:
-        return self.flete is not None and _ya_salio_plata(self.flete)
+        return self.flete is not None and _traba_el_dia(self.flete)
 
     def _cola_del_transportador(self) -> str:
         """El remate del aviso cuando lo que se puede corregir es el transportador.
@@ -324,7 +367,7 @@ class CandadoRecepcion:
         razones = [
             _por_que_esta_trabada(liq)
             for liq in (self.leche, self.flete)
-            if liq is not None and _ya_salio_plata(liq)
+            if liq is not None and _traba_el_dia(liq)
         ]
         motivo = "; ".join(razones) or "por este día ya salió plata"
         motivo = motivo[0].upper() + motivo[1:]
@@ -383,7 +426,7 @@ class RecepcionService(BaseService[RecepcionLeche]):
         # pagadas, de los campos compartidos (litros, fecha, estado) se culpe a la
         # leche: es la cifra grande, la que el dueño reconoce en el comprobante.
         for liquidacion, campos in ((flete, _CAMPOS_DEL_FLETE), (leche, _CAMPOS_DE_LA_LECHE)):
-            if liquidacion is not None and _ya_salio_plata(liquidacion):
+            if liquidacion is not None and _traba_el_dia(liquidacion):
                 for campo in campos:
                     bloqueados[campo] = liquidacion
         return CandadoRecepcion(
@@ -452,6 +495,31 @@ class RecepcionService(BaseService[RecepcionLeche]):
         editables = candado.campos_editables
         salida = f" Sí se puede corregir {_en_palabras(editables)}." if editables else ""
         de_quien = _de_quien(liquidacion)
+        # LA DEUDA YA COBRADA TIENE SU PROPIO MENSAJE, y va antes que los dos de pago:
+        # por este día no salió plata, así que "ya se pagó" mandaría al usuario a buscar
+        # un pago que no existe. Lo que le sirve es cuál liquidación se cobró esa deuda
+        # —esa es la que tendría que anular para poder corregir el día— y por eso el
+        # mensaje la nombra con su período.
+        if liquidacion.deuda_ya_cobrada:
+            otra = liquidacion.deuda_trasladada_a
+            donde = (
+                f"la liquidación del {otra.periodo_texto}"
+                if otra is not None
+                else "otra liquidación"
+            )
+            # Y EL ORDEN EN QUE HAY QUE VOLVER A GENERARLAS, con las fechas concretas:
+            # este es EL mensaje que le manda al dueño a anular las dos quincenas, y
+            # regenerarlas empezando por la nueva le saca plata de más ($480.000 por
+            # $430.000 de leche, medido). La redacción vive en el modelo
+            # (`orden_para_volver_a_generar`) para que este mensaje, el de anular una
+            # liquidación y el de borrar un día digan exactamente lo mismo.
+            orden = liquidacion.orden_para_volver_a_generar
+            raise BusinessError(
+                f"No se puede {verbo} {que_toco} de este día: lo que el tercero quedó "
+                f"debiendo en esta quincena de {de_quien} ya se le cobró en {donde}, así "
+                f"que cambiar la cifra descuadraría los dos comprobantes.{salida} Si de "
+                f"verdad hay que corregirlo, anule primero esa liquidación. {orden}".rstrip()
+            )
         if liquidacion.estado == ESTADO_PAGADA:
             raise BusinessError(
                 f"No se puede {verbo} {que_toco} de este día: {de_quien} ya se pagó en una "
@@ -498,13 +566,32 @@ class RecepcionService(BaseService[RecepcionLeche]):
         se le abonó la mitad y después se le borra un día, ese abono queda contra
         un total que ya no existe. Ver `_ya_salio_plata`.
 
+        Y TAMBIÉN LO TRABA UNA DEUDA YA COBRADA (ver `_traba_el_dia`): borrarle un día a
+        la quincena que quedó debiendo le cambiaría el `le_queda_debiendo`, que ya está
+        restado en el comprobante de la quincena siguiente.
+
         Devuelve las liquidaciones tocadas, para recuadrarlas después de escribir.
         """
         candado = self._candado(recepcion)
-        con_pago = [liq for liq in candado.liquidaciones if _ya_salio_plata(liq)]
+        con_pago = [liq for liq in candado.liquidaciones if _traba_el_dia(liq)]
         if con_pago:
             liq = con_pago[0]
             de_quien = "la leche" if liq.tipo == TIPO_PROVEEDOR else "el flete"
+            if liq.deuda_ya_cobrada:
+                otra = liq.deuda_trasladada_a
+                donde = (
+                    f"la liquidación del {otra.periodo_texto}"
+                    if otra is not None
+                    else "otra liquidación"
+                )
+                # Con el orden para regenerarlas, igual que el mensaje de corregir un
+                # campo: la misma redacción del modelo para la misma regla.
+                raise BusinessError(
+                    f"No se puede {verbo} este día: lo que el tercero quedó debiendo en "
+                    f"esta quincena de {de_quien} ya se le cobró en {donde}. Si de verdad "
+                    "hay que corregirlo, anule primero esa liquidación. "
+                    f"{liq.orden_para_volver_a_generar}".rstrip()
+                )
             # Dos mensajes porque son dos situaciones distintas para el usuario:
             # de la pagada no hay nada que hacer por dentro; del abono sí, se
             # puede borrar el pago, corregir el día y volver a abonar.
@@ -597,7 +684,12 @@ class RecepcionService(BaseService[RecepcionLeche]):
         # reparto y quedaría un centavo corrida hasta el siguiente recuadre.
         en_orden = sorted(liquidaciones, key=lambda liq: liq.tipo == TIPO_PROVEEDOR)
         for liquidacion in en_orden:
-            if _ya_salio_plata(liquidacion):
+            # `_traba_el_dia` y no `_ya_salio_plata`: la que dejó una deuda ya cobrada
+            # tampoco se puede recuadrar (rebota), y llegar acá con ella tumbaría el
+            # guardado de un campo libre —una observación— con un 422 que el usuario no
+            # entendería. Se le pone al día su columna informativa de flete y nada más,
+            # que es lo mismo que se hace con las pagadas.
+            if _traba_el_dia(liquidacion):
                 servicio.refrescar_transporte_informativo(liquidacion.id)
             else:
                 servicio.recuadrar(liquidacion.id)

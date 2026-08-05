@@ -143,8 +143,8 @@ def _liquidar_flete(client, h, inicio="2026-07-16", fin="2026-07-31"):
         headers=h,
     )
     assert generadas.status_code in (200, 201), generadas.text
-    assert generadas.json(), "no se generó ninguna liquidación de flete"
-    return generadas.json()[0]
+    assert generadas.json()["generadas"], "no se generó ninguna liquidación de flete"
+    return generadas.json()["generadas"][0]
 
 
 def _renglones(liq):
@@ -574,7 +574,12 @@ def test_recalcular_despues_de_repartir_los_centavos_no_mueve_el_papel(client, b
     for i, litros_ in enumerate(("44.23", "82.48", "137.23", "103.73")):
         nuevo_proveedor(f"Cuatro {i}")
         _recibir(client, h, esc, "2026-07-16", f"Cuatro {i}", litros_)
-    liq_id = _liquidar_flete(client, h)["id"]
+    # El período se cierra EL MISMO 16, y no el 31, porque más abajo se liquida el día
+    # 17 aparte: dos liquidaciones del mismo transportador con los períodos montados ya
+    # no se dejan generar (ver `_exigir_periodo_sin_cruce` en el servicio: por ese camino
+    # la deuda de la primera se quedaba sin cobrar). Las cifras que mide esta prueba son
+    # las del día, así que no cambia nada.
+    liq_id = _liquidar_flete(client, h, fin="2026-07-16")["id"]
     antes = papel(liq_id)
     print(f"  generado    ${antes[0]}  {[str(r[4]) for r in antes[1]]}")
     assert antes[0] == centavos(D("367.67") * NAPOLES) == D("89255.57")
@@ -734,7 +739,7 @@ def test_el_pdf_del_proveedor_no_cambia(client, base_datos):
         f"{LIQUIDACIONES}/generar",
         json={"periodo_inicio": "2026-07-16", "periodo_fin": "2026-07-31", "tipo": "proveedor"},
         headers=h,
-    ).json()
+    ).json()["generadas"]
     liq = client.get(f"{LIQUIDACIONES}/{generadas[0]['id']}", headers=h).json()
 
     print("\n===== 6b. EL COMPROBANTE DEL PROVEEDOR =====")

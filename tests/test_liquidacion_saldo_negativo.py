@@ -115,7 +115,7 @@ def _generar(client, h, tipo="proveedor", inicio="2026-06-01", fin="2026-06-15")
         headers=h,
     )
     assert r.status_code == 200, r.text
-    return r.json()
+    return r.json()["generadas"]
 
 
 def _leer(client, h, liq_id):
@@ -201,11 +201,28 @@ def test_el_comprobante_dice_LE_QUEDA_DEBIENDO_y_no_un_saldo_negativo(client, ba
     assert "$300.000" in papel
 
 
-def test_pagar_una_liquidacion_con_saldo_negativo_no_le_entrega_un_peso(client, base_datos):
-    """Aprobar y pagar tienen que seguir funcionando, y sin sacar plata.
+def test_pagar_una_liquidacion_con_saldo_negativo_rebota_y_la_deja_en_aprobada(
+    client, base_datos
+):
+    """El botón "Pagar" REBOTA cuando el tercero es el que quedó debiendo.
 
-    No se le debe nada: el pago queda en $0,00 y la liquidación se cierra. Lo que
-    NO puede pasar es que el botón le entregue los $180.000 de la quincena.
+    POR QUÉ ESTA PRUEBA CAMBIÓ DE EXPECTATIVA. Antes exigía que "Pagar" devolviera 200
+    y dejara la liquidación en 'pagada' con pagado $0,00 —lo importante era que no le
+    saliera plata—, y eso se conserva: no sale un peso. Lo que se corrigió es el
+    ESTADO, y son tres defectos de uno:
+
+      · el papel y la pantalla decían "PAGADA" al lado de "LE QUEDA DEBIENDO
+        $120.000". Las dos cosas no pueden ser ciertas a la vez;
+      · 'pagada' TRABA los días de esa quincena en Recepción diaria, así que un litro
+        mal anotado quedaba imposible de corregir para siempre sin que hubiera salido
+        plata contra esas cifras;
+      · y de 'pagada' no se puede anular, o sea que tampoco quedaba la salida de
+        rehacer la quincena.
+
+    Se queda en APROBADA, que es lo que de verdad es: unas cifras en firme por las que
+    no hay que entregar plata. La quincena se cierra cuando su deuda SE COBRA en la
+    siguiente (ver tests/test_liquidacion_saldo_anterior.py), y ese es el momento en
+    que sus días quedan trabados.
     """
     h = auth_headers(client, "admin.a")
     henri = _proveedor(client, h, "Henri C")
@@ -215,15 +232,21 @@ def test_pagar_una_liquidacion_con_saldo_negativo_no_le_entrega_un_peso(client, 
 
     assert client.post(f"{API}/{liq['id']}/aprobar", headers=h).status_code == 200
     r = client.post(f"{API}/{liq['id']}/pagar", headers=h)
-    assert r.status_code == 200, r.text
-    pagada = _leer(client, h, liq["id"])
     print("\n===== 3. PAGAR =====")
-    print(f"  estado={pagada['estado']}  pagado={pagada['pagado']}  "
-          f"saldo={pagada['saldo']}  le_queda_debiendo={pagada['le_queda_debiendo']}")
-    assert pagada["estado"] == "pagada"
-    assert D(pagada["pagado"]) == CERO, "no se le debía nada y salió plata"
-    assert D(pagada["saldo"]) == D("-120000")
-    assert D(pagada["le_queda_debiendo"]) == D("120000")
+    print(f"  respuesta={r.status_code} · {r.json()['error']['detail']}")
+    assert r.status_code == 422, r.text
+    assert "le quedó debiendo" in r.json()["error"]["detail"]
+
+    despues = _leer(client, h, liq["id"])
+    print(f"  estado={despues['estado']}  pagado={despues['pagado']}  "
+          f"saldo={despues['saldo']}  le_queda_debiendo={despues['le_queda_debiendo']}")
+    assert despues["estado"] == "aprobada", (
+        "quedó marcada pagada sin que saliera un peso: eso traba los días de la "
+        "quincena para siempre y de 'pagada' no se puede anular"
+    )
+    assert D(despues["pagado"]) == CERO, "no se le debía nada y salió plata"
+    assert D(despues["saldo"]) == D("-120000")
+    assert D(despues["le_queda_debiendo"]) == D("120000")
 
     # Un abono contra ella rebota: no hay saldo pendiente que abonar.
     r = client.post(

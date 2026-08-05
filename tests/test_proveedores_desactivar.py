@@ -83,7 +83,7 @@ def test_desactivar_deja_intacta_la_historia_del_proveedor(client, base_datos):
         headers=h,
     )
     assert g.status_code == 200, g.text
-    liq_antes = g.json()[0]
+    liq_antes = g.json()["generadas"][0]
 
     def foto():
         recs = client.get(f"{RECEP}/filtrar/avanzado?proveedor_id={prov['id']}", headers=h).json()

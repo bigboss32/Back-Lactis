@@ -203,7 +203,8 @@ def test_1e_el_precio_por_litro_del_comprobante_tambien_sube_el_medio_centavo(
         "fecha": "2026-06-01", "proveedor_id": prov["id"],
         "transportador_id": trans["id"], "cantidad_litros": "137.45"})
     gen = _post(client, h, f"{LIQUIDACIONES}/generar", {
-        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "proveedor"})
+        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15",
+        "tipo": "proveedor"})["generadas"]
     liq_id = gen[0]["id"]
     detalle_id = gen[0]["detalles"][0]["id"]
 
@@ -475,7 +476,8 @@ def test_3b_el_pago_parcial_rechaza_el_tercer_decimal(client, base_datos):
     _post(client, h, RECEPCIONES, {
         "fecha": "2026-06-01", "proveedor_id": prov["id"], "cantidad_litros": "600"})
     gen = _post(client, h, f"{LIQUIDACIONES}/generar", {
-        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "proveedor"})
+        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15",
+        "tipo": "proveedor"})["generadas"]
     liq_id = gen[0]["id"]
     _post(client, h, f"{LIQUIDACIONES}/{liq_id}/aprobar", {})
 
@@ -519,7 +521,8 @@ def test_3c_neto_es_pagado_mas_saldo_EXACTO_en_los_dos_motores(client, base_dato
     _post(client, h, RECEPCIONES, {
         "fecha": "2026-06-01", "proveedor_id": prov["id"], "cantidad_litros": "600"})
     gen = _post(client, h, f"{LIQUIDACIONES}/generar", {
-        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "proveedor"})
+        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15",
+        "tipo": "proveedor"})["generadas"]
     liq_id = gen[0]["id"]
     _post(client, h, f"{LIQUIDACIONES}/{liq_id}/aprobar", {})
 
@@ -567,7 +570,8 @@ def test_3d_un_pago_de_un_milesimo_no_traba_la_liquidacion(client, base_datos, d
     _post(client, h, RECEPCIONES, {
         "fecha": "2026-06-01", "proveedor_id": prov["id"], "cantidad_litros": "600"})
     gen = _post(client, h, f"{LIQUIDACIONES}/generar", {
-        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "proveedor"})
+        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15",
+        "tipo": "proveedor"})["generadas"]
     liq_id = gen[0]["id"]
     _post(client, h, f"{LIQUIDACIONES}/{liq_id}/aprobar", {})
 
@@ -618,7 +622,8 @@ def test_3e_corregir_un_anticipo_a_tres_decimales_rebota_y_el_comprobante_cuadra
     _post(client, h, RECEPCIONES, {
         "fecha": "2026-06-01", "proveedor_id": prov["id"], "cantidad_litros": "600"})
     gen = _post(client, h, f"{LIQUIDACIONES}/generar", {
-        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "proveedor"})
+        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15",
+        "tipo": "proveedor"})["generadas"]
     liq_id = gen[0]["id"]
 
     print("\n===== 3e. CORREGIR UN ANTICIPO =====")
@@ -668,7 +673,8 @@ def _quincena_completa(client, h, tarifa="242.76", sufijo=""):
 
 def _liqs(client, h, tipo="ambos", inicio="2026-06-01", fin="2026-06-15"):
     return _post(client, h, f"{LIQUIDACIONES}/generar",
-                 {"periodo_inicio": inicio, "periodo_fin": fin, "tipo": tipo})
+                 {"periodo_inicio": inicio, "periodo_fin": fin,
+                  "tipo": tipo})["generadas"]
 
 
 def test_4a_dia_apagado_sale_de_los_dos_comprobantes_al_generar(client, base_datos):
@@ -1153,7 +1159,8 @@ def test_6b_el_pdf_imprime_la_misma_cifra_que_guarda_la_columna(client, base_dat
         "fecha": "2026-06-01", "proveedor_id": prov["id"],
         "transportador_id": trans["id"], "cantidad_litros": "44.235"})
     gen = _post(client, h, f"{LIQUIDACIONES}/generar", {
-        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "transportador"})
+        "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15",
+        "tipo": "transportador"})["generadas"]
     liq_id = gen[0]["id"]
     d = client.get(f"{LIQUIDACIONES}/{liq_id}", headers=h).json()
     fila = db_session.get(RecepcionLeche, U(rec["id"]))

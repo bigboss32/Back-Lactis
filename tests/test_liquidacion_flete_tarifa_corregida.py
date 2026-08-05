@@ -118,8 +118,8 @@ def generar_flete(client, h, inicio="2026-06-01", fin="2026-06-15"):
         headers=h,
     )
     assert res.status_code == 200, res.text
-    assert res.json(), "no se generó liquidación de flete"
-    return res.json()[0]
+    assert res.json()["generadas"], "no se generó liquidación de flete"
+    return res.json()["generadas"][0]
 
 
 BUENA = D("242.76")
@@ -399,7 +399,7 @@ def test_la_liquidacion_del_proveedor_no_deriva_su_precio(client, base_datos):
         json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15",
               "tipo": "proveedor"},
         headers=h,
-    ).json()[0]
+    ).json()["generadas"][0]
     esperado = centavos(D("44.00") * D("1900"))
     assert D(liq["valor_total"]) == esperado
 

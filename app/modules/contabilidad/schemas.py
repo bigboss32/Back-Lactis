@@ -80,5 +80,10 @@ class BalanceResponse(BaseSchema):
     saldo_cajas: Decimal
     saldo_bancos: Decimal
     cartera_por_cobrar: Decimal
+    # Cuánta plata hay que SACAR por liquidaciones: solo los saldos positivos. El
+    # porqué, con las cifras, está en `reportes/service.py`.
     liquidaciones_por_pagar: Decimal
+    # Y lo que los terceros le quedaron debiendo A ÉL, en positivo y aparte: no es plata
+    # que tenga que sacar, se cobra descontándola de la próxima quincena del tercero.
+    terceros_le_quedan_debiendo: Decimal = Decimal("0")
     total_disponible: Decimal

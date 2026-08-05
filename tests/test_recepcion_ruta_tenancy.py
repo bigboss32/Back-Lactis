@@ -146,7 +146,7 @@ def test_el_nombre_de_la_ruta_ajena_ya_no_puede_llegar_al_comprobante(client, ba
         json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15",
               "tipo": "transportador"},
         headers=h,
-    ).json()
+    ).json()["generadas"]
     liq = liqs[0]
     nombres = [d["ruta_nombre"] for d in liq["detalles"]]
     pdf = client.get(f"{API}/{liq['id']}/pdf", headers=h)

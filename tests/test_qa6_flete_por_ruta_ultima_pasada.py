@@ -103,7 +103,7 @@ def generar(client, h, tipo="transportador", inicio="2026-06-01", fin="2026-06-1
         headers=h,
     )
     assert r.status_code == 200, r.text
-    return r.json()
+    return r.json()["generadas"]
 
 
 def leer_liq(client, h, liq_id):
@@ -551,9 +551,17 @@ def test_el_anticipo_mayor_que_la_quincena_se_aplica_completo(client, base_datos
     assert D(d["le_queda_debiendo"]) == D("120000"), d
 
     assert client.post(f"{API}/{liq['id']}/aprobar", headers=h).status_code == 200
+    # "Pagar" REBOTA sobre una liquidación en la que el TERCERO es el que debe, y eso
+    # cambió a propósito: antes devolvía 200 y la dejaba en 'pagada' con pagado $0,00.
+    # Lo importante sigue cumpliéndose —no le sale un peso— y ahora además no queda un
+    # comprobante que dice "PAGADA" al lado de "LE QUEDA DEBIENDO $120.000", que era lo
+    # que trababa los días de la quincena sin que hubiera salido plata. El porqué
+    # completo está en tests/test_liquidacion_saldo_negativo.py.
     pag = client.post(f"{API}/{liq['id']}/pagar", headers=h)
-    assert pag.status_code == 200, pag.text
-    assert D(pag.json()["pagado"]) == CERO, (
+    assert pag.status_code == 422, pag.text
+    d = leer_liq(client, h, liq["id"])
+    assert d["estado"] == "aprobada", d
+    assert D(d["pagado"]) == CERO, (
         "no se le debía nada y le salió plata: se le habría pagado la quincena "
         "completa teniendo $300.000 de anticipo entregado")
 

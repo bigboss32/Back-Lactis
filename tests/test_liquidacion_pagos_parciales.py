@@ -60,7 +60,7 @@ def _montar(client, headers, dias, precio="1800", nombre="Libardo"):
         f"{API}/generar",
         json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "proveedor"},
         headers=headers,
-    ).json()
+    ).json()["generadas"]
     liq = next(x for x in generadas if x["proveedor_id"] == proveedor["id"])
     return recepciones, liq
 

@@ -76,7 +76,7 @@ def _montar(client, headers, dias, precio="1800", nombre="Libardo", con_flete=Fa
             "tipo": "ambos" if con_flete else "proveedor",
         },
         headers=headers,
-    ).json()
+    ).json()["generadas"]
     por_tipo = {
         liq["tipo"]: liq
         for liq in liquidaciones
@@ -442,7 +442,7 @@ def test_cambiar_el_transportador_suelta_el_dia_de_la_liquidacion_del_flete(clie
         f"{API}/generar",
         json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "transportador"},
         headers=h,
-    ).json()
+    ).json()["generadas"]
     de_efrain = next(x for x in nuevas if x["transportador_id"] == otro["id"])
     print(f"  se le genera a Efraín: {de_efrain['total_litros']} L × $120 = "
           f"{de_efrain['valor_total']}")
@@ -482,7 +482,7 @@ def test_mover_un_dia_a_otra_quincena_lo_suelta_de_la_liquidacion(client, base_d
         f"{API}/generar",
         json={"periodo_inicio": "2026-07-01", "periodo_fin": "2026-07-15", "tipo": "proveedor"},
         headers=h,
-    ).json()[0]
+    ).json()["generadas"][0]
     print(f"  la liquidación de julio: {julio['total_litros']} L · {julio['valor_total']}")
     assert D(julio["valor_total"]) == D(100 * 1800)
 

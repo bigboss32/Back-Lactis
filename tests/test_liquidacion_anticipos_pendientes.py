@@ -79,7 +79,7 @@ def _generar(client, h, inicio=INICIO, fin=FIN, tipo="proveedor"):
         headers=h,
     )
     assert r.status_code == 200, r.text
-    return r.json()
+    return r.json()["generadas"]
 
 
 def _henri_con_sus_644_litros(client, h, nombre="Henri"):
@@ -226,6 +226,24 @@ def test_un_anticipo_ya_aplicado_en_otra_liquidacion_no_se_cuenta_dos_veces(clie
     """Lo más caro que podría hacer este arreglo: recoger en la quincena de julio
     un anticipo que ya se le había descontado en la de junio. Al proveedor le
     quitarían dos veces la misma plata.
+
+    ESTA PRUEBA CAMBIÓ UNA CIFRA cuando la deuda empezó a cobrarse en la quincena
+    siguiente (ver tests/test_liquidacion_saldo_anterior.py). Las cuentas, a mano:
+
+        JUNIO: 100 L a $1.800 = $180.000 con un anticipo de $200.000 ya entregado
+            -> saldo -$20.000: Henri le quedó DEBIENDO $20.000 a la quesera
+        JULIO: 644 L a $1.800 = $1.159.200, sin anticipos nuevos
+            - lo que quedó debiendo de junio                  -$20.000
+            saldo a pagar                                  $1.139.200
+
+    Antes esta prueba esperaba $1.159.200 —los $20.000 de junio se quedaban escritos en
+    un papel viejo y nadie los cobraba—. Y la cuenta grande cuadra exacto: $180.000 +
+    $1.159.200 = $1.339.200 de leche; $200.000 de anticipo + $1.139.200 de julio =
+    $1.339.200 entregados. Ni un peso de más ni de menos.
+
+    LO QUE LA PRUEBA SIGUE VIGILANDO, que es lo suyo: el ANTICIPO de junio no vuelve a
+    aparecer en julio (`anticipos` en cero). Lo que viaja es la DEUDA que dejó, que son
+    $20.000 y no $200.000.
     """
     h = auth_headers(client, "admin.a")
     henri = _proveedor(client, h, "Henri")
@@ -235,6 +253,7 @@ def test_un_anticipo_ya_aplicado_en_otra_liquidacion_no_se_cuenta_dos_veces(clie
     _anticipo(client, h, henri, "2026-06-10", "200000")
     liq_junio = _generar(client, h, "2026-06-01", "2026-06-30")[0]
     assert D(liq_junio["anticipos"]) == D("200000")
+    assert D(liq_junio["le_queda_debiendo"]) == D("20000")
 
     # Julio: sus 644 L, sin anticipo nuevo
     for fecha, litros in (("2026-07-16", "200"), ("2026-07-24", "200"), ("2026-07-31", "244")):
@@ -243,14 +262,24 @@ def test_un_anticipo_ya_aplicado_en_otra_liquidacion_no_se_cuenta_dos_veces(clie
 
     recalculada = client.post(f"{API}/{liq_julio['id']}/recalcular", headers=h).json()
     print("\n===== EL ANTICIPO DE JUNIO NO VUELVE A APARECER EN JULIO =====")
-    print(f"  junio · anticipos: {liq_junio['anticipos']}")
-    print(f"  julio · anticipos: {recalculada['anticipos']} (tiene que ser 0)")
+    print(f"  junio · anticipos: {liq_junio['anticipos']} · le queda debiendo: "
+          f"{liq_junio['le_queda_debiendo']}")
+    print(f"  julio · anticipos: {recalculada['anticipos']} (tiene que ser 0) · "
+          f"deuda de junio cobrada: {recalculada['saldo_anterior']}")
     assert D(recalculada["anticipos"]) == D("0"), "el anticipo de junio se descontó dos veces"
-    assert D(recalculada["saldo"]) == D("1159200")
+    assert D(recalculada["saldo_anterior"]) == D("20000"), (
+        "la deuda que Henri dejó en junio no se le cobró en julio: esos $20.000 son un "
+        "anticipo que ya salió de la caja"
+    )
+    assert D(recalculada["saldo"]) == D("1139200")
 
-    # Y la de junio quedó intacta
+    # Y la de junio quedó intacta (su anticipo sigue siendo el suyo)
     junio = client.get(f"{API}/{liq_junio['id']}", headers=h).json()
     assert D(junio["anticipos"]) == D("200000")
+    # La cuenta grande: leche entregada = plata entregada.
+    print(f"  leche = $180.000 + $1.159.200 = $1.339.200 · entregado = $200.000 de "
+          f"anticipo + {recalculada['saldo']} de julio")
+    assert D("180000") + D("1159200") == D("200000") + D(recalculada["saldo"])
 
 
 def test_recalcular_dos_veces_seguidas_no_duplica_el_anticipo(client, base_datos):

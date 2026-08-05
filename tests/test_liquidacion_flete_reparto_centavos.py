@@ -91,8 +91,8 @@ def _generar(client, h, tipo="transportador", inicio="2026-07-16", fin="2026-07-
                     json={"periodo_inicio": inicio, "periodo_fin": fin, "tipo": tipo},
                     headers=h)
     assert r.status_code in (200, 201), r.text
-    assert r.json(), "no se genero liquidacion"
-    return r.json()
+    assert r.json()["generadas"], "no se genero liquidacion"
+    return r.json()["generadas"]
 
 
 def _leer(client, h, liq_id):
@@ -372,7 +372,9 @@ def test_prender_otra_vez_el_dia_lo_devuelve_a_su_comprobante(client, base_datos
               "tipo": "transportador"},
         headers=h,
     )
-    assert otra.json() == [], f"el dia apagado se volvio a liquidar aparte: {otra.json()}"
+    assert otra.json()["generadas"] == [], (
+        f"el dia apagado se volvio a liquidar aparte: {otra.json()}"
+    )
 
 
 def test_un_estado_que_no_existe_no_apaga_el_dia_en_silencio(client, base_datos):

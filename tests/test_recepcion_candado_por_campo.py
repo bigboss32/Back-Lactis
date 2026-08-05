@@ -82,7 +82,7 @@ def _montar_el_dia_del_dueno(client, h, *, con_flete=True, nombre="Patricia Lagu
             "tipo": "ambos" if con_flete else "proveedor",
         },
         headers=h,
-    ).json()
+    ).json()["generadas"]
     por_tipo = {liq["tipo"]: liq for liq in liquidaciones}
     return recepcion, por_tipo, stella
 
@@ -435,7 +435,7 @@ def test_con_la_leche_pagada_y_el_flete_en_borrador_el_dia_se_suelta_y_recalcula
             f"{API}/generar",
             json={"periodo_inicio": "2026-07-16", "periodo_fin": "2026-07-31", "tipo": "ambos"},
             headers=h,
-        ).json()
+        ).json()["generadas"]
     }
     leche = _pagar(client, h, liqs["proveedor"])  # la leche SÍ se paga
     flete_stella = liqs["transportador"]          # el flete se queda en borrador
@@ -475,7 +475,7 @@ def test_con_la_leche_pagada_y_el_flete_en_borrador_el_dia_se_suelta_y_recalcula
         f"{API}/generar",
         json={"periodo_inicio": "2026-07-16", "periodo_fin": "2026-07-31", "tipo": "transportador"},
         headers=h,
-    ).json()
+    ).json()["generadas"]
     de_efrain = next(x for x in nuevas if x["transportador_id"] == efrain["id"])
     print(f"  a Efraín: {de_efrain['total_litros']} L × $120 = {de_efrain['valor_total']}")
     assert D(de_efrain["valor_total"]) == D(44 * 120)

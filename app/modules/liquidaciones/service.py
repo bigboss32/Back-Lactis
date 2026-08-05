@@ -30,6 +30,9 @@ from app.modules.liquidaciones.models import (
 )
 from app.modules.liquidaciones.repository import AnticipoRepository, LiquidacionRepository
 from app.modules.liquidaciones.schemas import (
+    MOTIVO_FLETE_SIN_TARIFA,
+    MOTIVO_PERIODO_CRUZADO,
+    LiquidacionOmitida,
     PagoLiquidacionCreate,
     PreLiquidacionAnticipo,
     PreLiquidacionDetalle,
@@ -624,6 +627,57 @@ def _estado_pago(neto_a_pagar: Decimal, pagado: Decimal) -> str:
     return ESTADO_PAGADA if pagado >= neto_a_pagar else ESTADO_PARCIAL
 
 
+# ---------------------------------------------------------------------------
+# MARCAR PAGADA UNA LIQUIDACIÓN QUE NADIE PAGÓ: por qué ya no se hace
+# ---------------------------------------------------------------------------
+# EL PROBLEMA, con las cifras del dueño. Quincena de $180.000 con $300.000 de anticipo
+# ya entregado: el saldo queda en -$120.000 y el proveedor le quedó debiendo esa plata.
+# Hasta ahora, oprimir "Pagar" sobre ese comprobante lo marcaba PAGADA sin registrar un
+# solo peso (no había saldo que pagar), y de ahí salían tres cosas malas:
+#
+#   1. el papel y la pantalla decían "PAGADA" al lado de "LE QUEDA DEBIENDO $120.000".
+#      Las dos cosas no pueden ser ciertas a la vez;
+#   2. TRABABA LOS DÍAS de esa quincena en Recepción diaria —el candado mira 'pagada' o
+#      tiene_pagos—, así que un litro mal anotado quedaba imposible de corregir para
+#      siempre, sin que hubiera salido plata contra esas cifras;
+#   3. y de 'pagada' no se puede anular, o sea que tampoco quedaba la salida de rehacer
+#      la quincena.
+#
+# LO QUE SE HACE AHORA: si el tercero quedó debiendo, "Pagar" REBOTA y la liquidación se
+# queda en APROBADA, que es exactamente lo que es —unas cifras en firme por las que no
+# hay que entregar plata—. La quincena no se "cierra" con una mentira: se cierra sola
+# cuando su deuda SE COBRA en la liquidación siguiente, y ese es el momento en que sus
+# días quedan trabados (ver `deuda_ya_cobrada` y el candado de Recepción diaria).
+#
+# Y REBOTA IGUAL POR EL BORDE, que se escapaba: cuando el neto no baja de cero sino que
+# CAE JUSTO EN CERO porque la deuda arrastrada se llevó lo que faltaba. Ahí
+# `le_queda_debiendo` es cero, el guardia de arriba lo dejaba pasar, y la quincena
+# quedaba 'pagada' con los días trabados diciendo "ya se pagó" sin que hubiera salido un
+# peso. Las cifras y la regla, en `_no_sale_un_peso_por_la_deuda`.
+#
+# ASÍ QUEDAN CONTESTADAS LAS DOS MITADES DE LO QUE PIDIÓ EL DUEÑO:
+#   · "un día NO debería quedar trabado si no salió plata de verdad": mientras la deuda
+#     no se le haya cobrado en ninguna parte, la quincena sigue corregible. Los
+#     anticipos se vuelven a aplicar completos en cada recálculo, así que corregirla no
+#     pierde de vista la plata que sí salió;
+#   · "tampoco se puede dejar una quincena cerrada abierta a que le cambien las
+#     cifras": en el instante en que la deuda se cobra en otro comprobante, esas cifras
+#     quedan congeladas por los dos lados —recalcular y anular rebotan nombrando la
+#     liquidación que se la cobró, y los días de la quincena quedan trabados—.
+#
+# LO QUE NO SE TOCÓ: el estado 'pagada' cuando el saldo quedó EXACTO en cero PORQUE LOS
+# ANTICIPOS DE ESA MISMA QUINCENA la cubrieron justo, sin deuda arrastrada de por medio.
+# Ahí sí salió plata —el anticipo, entregado en la mano contra estas mismas cifras— y no
+# hay nada que cobrar después: la quincena está saldada de verdad. El candado la sigue
+# trabando por su estado, como siempre. La diferencia con el caso de arriba es DE DÓNDE
+# VINO lo que tapó el neto: de la caja de la quesera, o de una deuda que se arrastró.
+#
+# Y NO SE INVENTÓ UN ESTADO NUEVO ('saldada', 'cerrada') a propósito: sería un valor que
+# ninguna pantalla, filtro ni reporte del sistema conoce, y el día que se despliegue
+# aparecería como un chip vacío en la lista del dueño. 'aprobada' ya significa "en firme,
+# sin plata entregada", que es la verdad de este documento.
+
+
 def _refrescar_saldo(liquidacion: Liquidacion) -> None:
     """Deja el saldo al día: lo que falta por pagar.
 
@@ -632,6 +686,83 @@ def _refrescar_saldo(liquidacion: Liquidacion) -> None:
     bien en los cinco caminos que recalculan una liquidación.
     """
     liquidacion.saldo = liquidacion.neto_a_pagar - Decimal(liquidacion.pagado or 0)
+
+
+def _no_sale_un_peso_por_la_deuda(liquidacion: Liquidacion) -> str | None:
+    """El aviso cuando el neto se fue a cero (o menos) por la deuda arrastrada.
+
+    Devuelve el texto para rebotar, o None si esta liquidación sí tiene algo que
+    entregar. Es el HUECO DEL NETO EN CERO, medido con las cifras del dueño: la
+    quincena 1 dejó debiendo $120.000; la quincena 2 vale EXACTAMENTE $120.000, sin
+    anticipos propios y sin abonos, así que su neto queda en $0,00 clavado. Ahí
+    `le_queda_debiendo` es cero —el saldo no bajó de cero, cayó justo en cero— y el
+    guardia que solo miraba "¿quedó debiendo?" dejaba pasar el botón Pagar: devolvía 200
+    y la marcaba 'pagada' sin que saliera un peso de la caja. Después los días de esa
+    quincena salían trabados en Recepción diaria diciendo "ya se pagó", que es justo la
+    mentira que este trabajo vino a quitar.
+
+    LA REGLA, y es la misma decisión de siempre —NO SE MARCA PAGADA LO QUE NADIE PAGÓ—:
+    si lo que dejó el neto sin nada por entregar fue una deuda que se arrastró de otra
+    quincena, la liquidación se queda en 'aprobada'. Es lo que es: unas cifras en firme
+    por las que no hay que sacar plata. Y no queda "abierta" de una forma peligrosa: no
+    tiene abonos que descuadrar, y si mañana le corrigen un día su propio saldo se
+    recalcula solo (si queda debiendo, esa deuda viaja a la siguiente).
+
+    LO QUE NO ENTRA POR ACÁ, y sigue igual que antes: el saldo en cero cuando fueron LOS
+    ANTICIPOS DE ESTA QUINCENA los que la cubrieron exacto (sin deuda arrastrada de por
+    medio). Ahí sí salió plata —el anticipo, entregado en la mano contra estas mismas
+    cifras— y 'pagada' es la verdad. La diferencia es de dónde vino lo que tapó el neto.
+    """
+    if Decimal(liquidacion.saldo or 0) > CERO:
+        return None
+    arrastrada = Decimal(liquidacion.saldo_anterior or 0)
+    if arrastrada <= CERO or liquidacion.tiene_pagos:
+        return None
+    return (
+        "Esta liquidación no hay que pagarla: no queda un peso por entregar —lo que el "
+        f"tercero quedó debiendo de la quincena pasada ({pesos(arrastrada)}) se llevó lo "
+        f"que faltaba del neto—. Déjela en '{ESTADO_APROBADA}': marcarla pagada sin que "
+        "salga un peso trabaría los días de la quincena con un aviso que no es cierto"
+    )
+
+
+def _exigir_deuda_no_trasladada(liquidacion: Liquidacion, verbo: str) -> None:
+    """Rebota cuando la deuda de ESTA liquidación ya se le cobró en otra.
+
+    Es el guardia del caso peligroso, y hay que leerlo con la plata en la mano: esta
+    liquidación quedó debiendo $120.000, y esos $120.000 YA están restados en el
+    comprobante de la quincena siguiente, que puede estar aprobado, pagado y en la mano
+    del proveedor. Cambiarle la cifra acá —recalculándola, anulándola, corrigiéndole un
+    anticipo o un día— descuadra DOS comprobantes de una sola vez: este dejaría de
+    deber lo que el otro le cobró.
+
+    EL MENSAJE NOMBRA la liquidación que se la cobró y su período, porque lo que el
+    dueño necesita saber es qué anular primero. Con un "no se puede" a secas queda
+    atascado sin saber por dónde salir.
+
+    Y DICE EL ORDEN EN QUE HAY QUE VOLVER A GENERARLAS, con las fechas concretas, porque
+    el flujo que este mismo mensaje recomienda saca plata de más si se hace al revés:
+    $480.000 por $430.000 de leche, medido. La redacción está en
+    `Liquidacion.orden_para_volver_a_generar`, que es la misma que usan los mensajes del
+    candado de Recepción diaria.
+
+    Es una función del módulo y no un método porque la usan los DOS servicios (el de
+    liquidaciones y el de anticipos) y el candado de Recepción diaria pregunta lo mismo
+    por su lado: una sola redacción para una sola regla.
+    """
+    if not liquidacion.deuda_ya_cobrada:
+        return
+    otra = liquidacion.deuda_trasladada_a
+    donde = (
+        f"la liquidación del {otra.periodo_texto}" if otra is not None else "otra liquidación"
+    )
+    orden = liquidacion.orden_para_volver_a_generar
+    raise BusinessError(
+        f"No se puede {verbo} esta liquidación: lo que el tercero quedó debiendo "
+        f"({pesos(liquidacion.le_queda_debiendo)}) ya se le cobró en {donde}. Anule "
+        "primero esa liquidación —así esta deuda vuelve a quedar libre— y vuelva a "
+        f"intentarlo. {orden}".rstrip()
+    )
 
 
 def _bloquear(db: Session, liquidacion: Liquidacion) -> Liquidacion:
@@ -657,13 +788,23 @@ def _bloquear(db: Session, liquidacion: Liquidacion) -> Liquidacion:
       con ese mismo 0A000. Quedan como carga diferida, así que el nombre del
       tercero se sigue leyendo igual cuando la respuesta lo pide.
 
+    Las dos puntas de la deuda trasladada van también en `lazyload`: son selectin, o
+    sea que no le meten JOIN a esta consulta, pero sí dispararían dos SELECT más
+    MIENTRAS SE TIENE EL CANDADO PUESTO. Un candado se suelta rápido o no sirve. Se
+    cargan solas cuando la respuesta las pida.
+
     SQLite descarta el FOR UPDATE en silencio, así que la suite no delata nada de
     esto. La corrección se sostiene por lectura del código, no por la prueba.
     """
     return db.execute(
         select(Liquidacion)
         .where(Liquidacion.id == liquidacion.id)
-        .options(lazyload(Liquidacion.proveedor), lazyload(Liquidacion.transportador))
+        .options(
+            lazyload(Liquidacion.proveedor),
+            lazyload(Liquidacion.transportador),
+            lazyload(Liquidacion.deuda_trasladada_a),
+            lazyload(Liquidacion.deudas_cobradas),
+        )
         .execution_options(populate_existing=True)
         .with_for_update()
     ).scalar_one()
@@ -674,13 +815,115 @@ class LiquidacionService(BaseService[Liquidacion]):
     modulo = "liquidaciones"
 
     # ------------------------------------------------------------- generación
+    def _omitido_por_periodo_cruzado(
+        self, tipo: str, tercero_id: uuid.UUID, inicio: date, fin: date
+    ) -> LiquidacionOmitida | None:
+        """No se generan DOS liquidaciones montadas una sobre la otra al mismo tercero.
+
+        EL HUECO QUE CIERRA, con las cifras medidas. Henri entrega 100 L a $1.800 el 02
+        de junio ($180.000) contra $300.000 de anticipo ya entregado: la quincena del 01
+        al 15 queda debiendo $120.000. Después se genera una quincena "del 10 al 20" —que
+        SE PISA con la anterior—, y esa liquidación NO le cobra los $120.000: la deuda
+        solo viaja a un período que empiece después de que el origen termine (el origen
+        termina el 15 y esta empieza el 10; ver `deudas_sin_cobrar`). Resultado: se le
+        pagan $200.000 completos a quien debe $120.000, y de la caja salen $500.000 por
+        $380.000 de leche. La plata no se pierde —queda registrada como deuda— pero salió,
+        y si el productor no vuelve a entregar leche no vuelve.
+
+        Se cierra AQUÍ, en la puerta, y no relajando el filtro de la deuda: es más barato
+        no dejar nacer el documento montado que enseñarle a la deuda a viajar entre
+        períodos que se cruzan (el porqué completo, en `deudas_sin_cobrar`).
+
+        ESTO SE SALTA AL TERCERO Y SIGUE CON LOS DEMÁS: NO REBOTA LA CORRIDA. Y ese fue el
+        arreglo de un hallazgo crítico, con sus cifras. Antes esta función lanzaba un
+        BusinessError, o sea que tumbaba la petición completa —y "Generar" es un BOTÓN DE
+        BARRIDA sobre TODOS los terceros del período—:
+
+          · Henri C tenía su quincena del 01 al 15 en borrador y se le anotaba un día
+            tarde; al correr la quincena, MARLENY Y ALEIDA se quedaban SIN COMPROBANTE:
+            $720.000 de leche de dos proveedoras que nunca tuvieron liquidación de ese
+            período, afuera por un cruce que no era de ellas;
+          · y peor por el lado del flete: UN transportador con su liquidación en borrador
+            tumbaba la corrida tipo="ambos" —que es el payload EXACTO que manda la
+            pantalla, sin `proveedor_id`— y se llevaba $1.080.000 de leche de tres
+            proveedores. El flete va primero en `generar`, así que rebotaba antes de que a
+            la leche le tocara turno.
+          El dueño no tenía botón para la salida "de a uno": lo único que sabe hacer es
+          oprimir Generar, y lo que veía era un "no se puede" hablándole de un tercero que
+          no era el que le importaba.
+
+        ES EXACTAMENTE EL MISMO RAZONAMIENTO QUE YA ESTABA ESCRITO quince líneas más abajo,
+        para el transportador al que le falta la tarifa: "tumbar la corrida entera, dejando
+        sin comprobante a los que sí tienen tarifa, por uno al que le falta llenar la suya,
+        es peor". Acá aplica igual, y ahora los dos casos se saltan por el mismo camino.
+
+        PERO NO SE SALTA EN SILENCIO, que es la otra mitad y la que de verdad importa: un
+        tercero que se queda sin comprobante sin que nadie avise es PEOR que el error,
+        porque el dueño cierra la pantalla creyendo que ya liquidó a todos. Por eso el
+        motivo sale REDACTADO en la respuesta (`omitidas`, ver `LiquidacionOmitida`) con el
+        mismo texto que antes salía como error.
+
+        EL MENSAJE NOMBRA AL TERCERO, EL TIPO Y EL PERÍODO de la que ya existe, porque el
+        dueño no sabe qué es un "período solapado" y lo que necesita es saber con cuál se
+        está cruzando para corregir las fechas. Y le dice las DOS salidas que tiene:
+        ajustar las fechas, o anular esa liquidación si lo que quiere es rehacerla.
+
+        LO QUE SIGUE PASANDO IGUAL, que es la mitad del trabajo de este guardia:
+        · el MISMO período para OTRO tercero es lo normal —una quincena se le genera a
+          todos— y no se cruza con nada: el filtro va por tipo Y por id del tercero;
+        · la deuda de un PROVEEDOR no estorba la liquidación del TRANSPORTADOR aunque sea
+          la misma persona: son dos cuentas y dos comprobantes distintos;
+        · una ANULADA no estorba: regenerar después de anular es EL flujo de corrección;
+        · y tampoco estorban la PAGADA NORMAL ni la que YA TIENE SU DEUDA COBRADA en otra
+          (ver `solapada_para_periodo`): ninguna de las dos puede ser el origen de una deuda
+          sin cobrar, y como ninguna de las dos se puede anular, si reservaran sus fechas el
+          día que se anota tarde dentro de ese período no tendría por dónde entrar NUNCA y
+          esa leche no se le pagaría jamás al productor. La que SÍ estorba, aunque esté
+          'pagada', es la que tiene el saldo por debajo de cero con su deuda sin cobrar: esa
+          es la fila vieja de la base del cliente, y sobre ella el hueco seguía abierto (el
+          porqué completo, en `solapada_para_periodo`).
+        """
+        otra = self.repo.solapada_para_periodo(tipo, tercero_id, inicio, fin)
+        if otra is None:
+            return None
+        # "leche" y "flete", el mismo par de palabras con que el candado de Recepción
+        # diaria nombra las dos liquidaciones: el dueño no dice "de tipo proveedor".
+        cuenta = "leche" if tipo == TIPO_PROVEEDOR else "flete"
+        quien = otra.proveedor if tipo == TIPO_PROVEEDOR else otra.transportador
+        nombre = quien.nombre if quien is not None else "Este tercero"
+        return LiquidacionOmitida(
+            tipo=tipo,
+            cuenta=cuenta,
+            tercero_id=tercero_id,
+            tercero_nombre=nombre,
+            motivo_codigo=MOTIVO_PERIODO_CRUZADO,
+            motivo=(
+                f"{nombre} ya tiene una liquidación de {cuenta} del {otra.periodo_texto}, "
+                f"que se cruza con estas fechas ({inicio.strftime('%d/%m/%Y')} al "
+                f"{fin.strftime('%d/%m/%Y')}). Dos liquidaciones montadas una sobre la "
+                "otra dejan sin cobrar lo que el tercero quedó debiendo en la primera, y "
+                "se le vuelve a pagar una plata que ya se le adelantó. Ajuste las fechas "
+                "para que no se monten, o anule esa liquidación primero si hay que "
+                "rehacerla"
+            ),
+        )
+
     def generar(
         self,
         periodo_inicio: date,
         periodo_fin: date,
         tipo: str = "ambos",
         proveedor_id: uuid.UUID | None = None,
-    ) -> list[Liquidacion]:
+    ) -> tuple[list[Liquidacion], list[LiquidacionOmitida]]:
+        """Corre la quincena y devuelve DOS listas: las generadas y las omitidas.
+
+        LAS DOS, y no solo las generadas, porque este es un botón de barrida y algún
+        tercero se puede quedar por fuera —por un período que se cruza o por una tarifa de
+        flete sin llenar—. Antes eso era o un error que tumbaba la corrida completa o un
+        salto en silencio, y las dos cosas dejaban leche sin comprobante: la primera la de
+        todos los demás, la segunda la del saltado. El porqué está en
+        `_omitido_por_periodo_cruzado` y en `_generar_transportadores`.
+        """
         if periodo_fin < periodo_inicio:
             raise BusinessError("El fin del período no puede ser anterior al inicio")
         recepciones_repo = RecepcionRepository(self.db, self.ctx.empresa_id)
@@ -696,20 +939,21 @@ class LiquidacionService(BaseService[Liquidacion]):
         # recuadre: una cifra que se mueve sin causa visible.
         #
         # La RESPUESTA sigue saliendo con las de proveedor primero: es el orden en que
-        # la pantalla las lista, y no hay razón para moverlo.
-        transportadores = (
+        # la pantalla las lista, y no hay razón para moverlo. Y las OMITIDAS salen en ese
+        # mismo orden por lo mismo: la pantalla las muestra al lado de las generadas.
+        transportadores, omitidos_flete = (
             self._generar_transportadores(recepciones_repo, periodo_inicio, periodo_fin)
             if tipo in ("transportador", "ambos")
-            else []
+            else ([], [])
         )
-        proveedores = (
+        proveedores, omitidos_leche = (
             self._generar_proveedores(
                 recepciones_repo, periodo_inicio, periodo_fin, proveedor_id
             )
             if tipo in ("proveedor", "ambos")
-            else []
+            else ([], [])
         )
-        return proveedores + transportadores
+        return proveedores + transportadores, omitidos_leche + omitidos_flete
 
     def _generar_proveedores(
         self,
@@ -717,11 +961,29 @@ class LiquidacionService(BaseService[Liquidacion]):
         inicio: date,
         fin: date,
         proveedor_id: uuid.UUID | None,
-    ) -> list[Liquidacion]:
+    ) -> tuple[list[Liquidacion], list[LiquidacionOmitida]]:
         pendientes = recepciones_repo.sin_liquidar(inicio, fin, proveedor_id)
         por_proveedor: dict[uuid.UUID, list[RecepcionLeche]] = defaultdict(list)
         for r in pendientes:
             por_proveedor[r.proveedor_id].append(r)
+
+        # LOS CRUCES SE MIRAN ANTES DE ESCRIBIR UNA SOLA LIQUIDACIÓN, sobre los mismos
+        # proveedores que se van a generar, Y AL QUE SE CRUZA SE LO SACA DE LA CORRIDA
+        # ANTES DE EMPEZAR. Va en un recorrido aparte a propósito, y ahora por una razón
+        # más fuerte que antes: el que se omite NO PUEDE QUEDAR A MEDIO ESCRIBIR. Sacándolo
+        # del diccionario acá arriba, el recorrido que escribe ni lo ve —no se le crea la
+        # liquidación, no se le marcan los días, no se le aplican los anticipos y no se le
+        # cobra ninguna deuda—, así que la transacción queda limpia para el omitido y
+        # completa para los demás sin depender de ningún rollback.
+        # Se mira el MISMO universo que se va a generar —las claves de este diccionario— y
+        # no una consulta aparte, que es lo que hace imposible que el guardia y la
+        # generación miren cosas distintas.
+        omitidas: list[LiquidacionOmitida] = []
+        for prov_id in list(por_proveedor):
+            omitida = self._omitido_por_periodo_cruzado(TIPO_PROVEEDOR, prov_id, inicio, fin)
+            if omitida is not None:
+                omitidas.append(omitida)
+                del por_proveedor[prov_id]
 
         anticipos_repo = AnticipoRepository(self.db, self.ctx.empresa_id)
         generadas = []
@@ -773,14 +1035,19 @@ class LiquidacionService(BaseService[Liquidacion]):
                 r.liquidacion_id = liquidacion.id
             for a in anticipos:
                 a.liquidacion_id = liquidacion.id
+            # Y LO QUE QUEDÓ DEBIENDO DE QUINCENAS PASADAS SE LE COBRA AQUÍ. Va después
+            # del flush porque hay que marcar cada origen con el id de esta, y antes de
+            # la auditoría para que el "crear" del libro traiga ya el `saldo_anterior`
+            # con el que salió el comprobante.
+            self._cobrar_deudas_anteriores(liquidacion)
             self.db.flush()
             self._audit("crear", liquidacion.id, None, serialize_entity(liquidacion))
             generadas.append(liquidacion)
-        return generadas
+        return generadas, omitidas
 
     def _generar_transportadores(
         self, recepciones_repo: RecepcionRepository, inicio: date, fin: date
-    ) -> list[Liquidacion]:
+    ) -> tuple[list[Liquidacion], list[LiquidacionOmitida]]:
         stmt = recepciones_repo.base_query().where(
             RecepcionLeche.fecha >= inicio,
             RecepcionLeche.fecha <= fin,
@@ -795,6 +1062,7 @@ class LiquidacionService(BaseService[Liquidacion]):
 
         anticipos_repo = AnticipoRepository(self.db, self.ctx.empresa_id)
         generadas = []
+        omitidas: list[LiquidacionOmitida] = []
         for trans_id, recepciones in por_transportador.items():
             total_litros = sum((r.cantidad_litros for r in recepciones), CERO)
             # UN RENGLÓN POR DÍA Y RUTA, no por día: el transportador puede haber
@@ -836,10 +1104,33 @@ class LiquidacionService(BaseService[Liquidacion]):
             # NO SE REBOTA CON UN ERROR a propósito: "Generar" es un botón de barrida que
             # recorre TODOS los transportadores del período, y tumbar la corrida entera
             # —dejando sin comprobante a los que sí tenían tarifa— por uno al que le falta
-            # llenar la suya sería peor. El transportador sin tarifa simplemente no sale
-            # en la respuesta, igual que quien no tuvo recepciones.
+            # llenar la suya sería peor.
+            #
+            # PERO YA NO SE SALTA EN SILENCIO, Y ESO SÍ CAMBIÓ. Antes "simplemente no salía
+            # en la respuesta, igual que quien no tuvo recepciones", y eso era el mismo
+            # problema del cruce de períodos con otro disfraz: el dueño no puede distinguir
+            # "a este no le tocaba nada" de "a este le faltó la tarifa y su flete se quedó
+            # sin papel". Son dos hechos distintos y el segundo hay que arreglarlo —hay
+            # litros recogidos esperando— así que sale en `omitidas` con su motivo. El caso
+            # es de todos los días: la tarifa por omisión es cero, o sea que el
+            # transportador recién creado al que nadie le llenó la tarifa cae justo aquí.
             previstos = _reparto_del_flete(_con_el_flete_de_hoy(recepciones)).renglones
             if sum((renglon["valor"] for renglon in previstos), CERO) == CERO:
+                omitidas.append(self._omitido_por_flete_sin_tarifa(recepciones))
+                continue
+            # EL CRUCE DE PERÍODOS SE MIRA AQUÍ, DENTRO DEL RECORRIDO, y no antes como en
+            # la de proveedor: hasta esta línea no se sabe si a este transportador le va a
+            # salir comprobante (el de arriba se salta sin tarifa), y avisar de un cruce de
+            # alguien a quien no se le iba a generar nada sería mandar al dueño a arreglar
+            # algo que no hace falta. Va ANTES de `_rederivar_el_flete`, que es la primera
+            # línea que escribe: al omitirlo, este transportador no queda tocado ni a medio
+            # escribir —ni sus fotos del flete, ni sus días, ni sus anticipos— y los demás
+            # de la corrida quedan completos.
+            omitida = self._omitido_por_periodo_cruzado(
+                TIPO_TRANSPORTADOR, trans_id, inicio, fin
+            )
+            if omitida is not None:
+                omitidas.append(omitida)
                 continue
             self._rederivar_el_flete(recepciones, frozenset())
             reparto = _reparto_del_flete(recepciones)
@@ -892,10 +1183,47 @@ class LiquidacionService(BaseService[Liquidacion]):
             self._aplicar_fotos_del_flete(recepciones, reparto.fotos)
             for a in anticipos:
                 a.liquidacion_id = liquidacion.id
+            # Igual que en la del proveedor: lo que el TRANSPORTADOR quedó debiendo en
+            # una quincena pasada se le cobra en esta. Y solo lo del transportador: la
+            # deuda de un proveedor no entra acá aunque sea la misma persona, porque
+            # son dos cuentas y dos comprobantes distintos.
+            self._cobrar_deudas_anteriores(liquidacion)
             self.db.flush()
             self._audit("crear", liquidacion.id, None, serialize_entity(liquidacion))
             generadas.append(liquidacion)
-        return generadas
+        return generadas, omitidas
+
+    def _omitido_por_flete_sin_tarifa(
+        self, recepciones: list[RecepcionLeche]
+    ) -> LiquidacionOmitida:
+        """El aviso del transportador al que no se le puede armar el comprobante del flete.
+
+        LO QUE PASÓ, y por qué hay que decirlo: con la tarifa en cero —el valor por
+        omisión, o sea el caso normal de quien no la llenó, y también el del transportador
+        al que le quitaron la ruta de la lista— el reparto del flete da $0,00 y no hay
+        comprobante que sacar. Generar NO le toca las fotos (ver la nota larga de arriba:
+        una tarifa que se volvió cero no borra una foto que valía plata), así que sus días
+        siguen pendientes y con arreglarle la tarifa y volver a generar queda listo.
+
+        EL MOTIVO DICE LOS LITROS QUE ESTÁN ESPERANDO, porque es lo que hace que el dueño
+        entienda que esto no es "no le tocaba nada": son litros que ya se recogieron.
+        """
+        quien = recepciones[0].transportador
+        nombre = quien.nombre if quien is not None else "Este transportador"
+        pendientes = sum((Decimal(r.cantidad_litros) for r in recepciones), CERO)
+        return LiquidacionOmitida(
+            tipo=TIPO_TRANSPORTADOR,
+            cuenta="flete",
+            tercero_id=recepciones[0].transportador_id,
+            tercero_nombre=nombre,
+            motivo_codigo=MOTIVO_FLETE_SIN_TARIFA,
+            motivo=(
+                f"{nombre} no tiene tarifa de flete —o quedó en cero—, así que el "
+                f"comprobante le saldría en $0 y no se generó. Sus {litros(pendientes)} "
+                "de este período quedan pendientes y no se perdió nada: póngale la tarifa "
+                "por litro (o vuélvale a asignar la ruta) y genere otra vez"
+            ),
+        )
 
     # -------------------------------------------------------- previsualización
     def previsualizar(
@@ -948,6 +1276,14 @@ class LiquidacionService(BaseService[Liquidacion]):
             anticipos=total_anticipos,
             valor_total=valor_total,
             saldo=valor_total - total_anticipos,
+            # LA DEUDA QUE ESTE AVANCE TODAVÍA NO DESCUENTA, la misma cifra y la misma
+            # consulta con que el papel del avance ya lo advertía (ver
+            # `_aviso_de_la_deuda_que_falta_por_cobrar`). Sin esto la pantalla decía
+            # "saldo $250.000" y el papel del MISMO avance decía que iban a salir
+            # $130.000: una cifra en pantalla y otra en el papel, y el dueño manda el
+            # papel mirando la pantalla. `antes_de` es el inicio del período, igual que
+            # al generar: se cobra lo que quedó debiendo de quincenas ANTERIORES.
+            deuda_pendiente=self.repo.deuda_pendiente_de(TIPO_PROVEEDOR, prov_id, inicio),
             detalles=[
                 PreLiquidacionDetalle(
                     fecha=r.fecha, litros=r.cantidad_litros, precio_litro=r.precio_litro, valor=r.valor_neto
@@ -1001,6 +1337,11 @@ class LiquidacionService(BaseService[Liquidacion]):
             anticipos=total_anticipos,
             valor_total=valor_transporte,
             saldo=valor_transporte - total_anticipos,
+            # Igual que en el avance del proveedor: la deuda del TRANSPORTADOR, que es su
+            # propia cuenta (la del proveedor no entra acá aunque sea la misma persona).
+            deuda_pendiente=self.repo.deuda_pendiente_de(
+                TIPO_TRANSPORTADOR, trans_id, inicio
+            ),
             detalles=[
                 PreLiquidacionDetalle(
                     fecha=renglon["fecha"],
@@ -1384,8 +1725,13 @@ class LiquidacionService(BaseService[Liquidacion]):
           del día y agrupa varias recepciones de la ruta; cambiarla ahí sería
           otra cosa, y se cruzaría con el transporte que ya lleva la liquidación
           del proveedor. Se deja por fuera a propósito.
+        - Y TAMPOCO SI SU DEUDA YA SE COBRÓ EN OTRA. "Está en borrador" dejó de
+          alcanzar desde que la deuda de un borrador también viaja: corregirle el
+          precio le cambiaría el `le_queda_debiendo` que ya está restado en un segundo
+          comprobante, y descuadraría los dos papeles de una sola vez.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
+        _exigir_deuda_no_trasladada(liquidacion, "corregir el precio de un día de")
         if liquidacion.estado != ESTADO_BORRADOR:
             raise BusinessError(
                 f"Esta liquidación está en '{liquidacion.estado}': solo se puede "
@@ -1544,6 +1890,140 @@ class LiquidacionService(BaseService[Liquidacion]):
         _refrescar_saldo(liquidacion)
         return total
 
+    # ------------------------------------------- la deuda que viaja a la siguiente
+    # LO QUE PIDIÓ EL DUEÑO, textual: "necesito que en la liquidación, a los que
+    # quedaron en negativo, ese saldo que se queda debiendo —es decir, el proveedor a
+    # la quesera— se cobre en la siguiente liquidación".
+    #
+    # DE DÓNDE SALE EL NEGATIVO: los anticipos que se le entregaron en la mano suman
+    # más que lo que valió su quincena. El caso del dueño: $180.000 de leche contra
+    # $300.000 de anticipo ya entregado -> el proveedor le quedó debiendo $120.000.
+    # Hasta ahora eso solo se DECÍA (el rótulo "LE QUEDA DEBIENDO" del comprobante):
+    # nada lo cobraba, y la plata se perdía en un papel viejo.
+    #
+    # CÓMO QUEDA LA CUENTA:
+    #   neto_a_pagar = valor_total - anticipos - saldo_anterior
+    # y si la nueva vuelve a quedar negativa, SU remanente viaja a la siguiente. Ese
+    # remanente ya trae la deuda vieja adentro (está restada), así que la cadena de
+    # quincenas no cobra dos veces lo mismo.
+    #
+    # LA MARCA ES LO QUE LO HACE SEGURO: cada origen queda con
+    # `deuda_trasladada_a_id` apuntando a la que se lo cobró, y la consulta que busca
+    # deudas (`deudas_sin_cobrar`) no vuelve a mirar a los marcados. Es el mismo
+    # idioma que ya usan las recepciones y los anticipos.
+    def _cobrar_deudas_anteriores(self, liquidacion: Liquidacion) -> Decimal:
+        """Le cobra a esta liquidación lo que el tercero quedó debiendo antes.
+
+        Corre AL GENERAR, una sola vez, cuando la liquidación ya tiene id (hay que
+        marcar los orígenes con él). Deja `saldo_anterior` con el total cobrado, marca
+        cada origen y vuelve a cuadrar el saldo.
+
+        NO CORRE AL RECALCULAR, y es a propósito: `saldo_anterior` no sale de las
+        recepciones ni de los anticipos de este período, es una plata que se arrastra
+        de otro documento que ya está marcado. Volver a "recogerla" no encontraría
+        nada (el origen ya está marcado) y, peor, un recálculo no puede cambiar de
+        opinión sobre una deuda que ya se cobró en un comprobante.
+
+        Si no hay nada que cobrar no escribe una sola letra: la enorme mayoría de las
+        liquidaciones pasan por acá sin deuda pendiente.
+
+        Y SOLO SE COBRA LO DE QUINCENAS ANTERIORES: `antes_de` es el inicio de este
+        período, así que el origen tiene que haber terminado antes de que esta empiece.
+        Sin eso, generar la quincena del 16 al 30 antes que la del 01 al 15 dejaba al
+        comprobante viejo cobrando "lo que quedó debiendo de la quincena pasada" de una
+        quincena que todavía no había empezado.
+
+        LO QUE ESTE FILTRO NO ALCANZA A TAPAR LO TAPA LA PUERTA DE ENTRADA: un período
+        que SE PISA con el que dejó la deuda tampoco la encuentra ($120.000 saliendo otra
+        vez de la caja, medidos), y eso no se arregló aflojando el filtro sino impidiendo
+        que ese documento nazca (`_exigir_periodo_sin_cruce`). El porqué de no aflojarlo
+        está en `deudas_sin_cobrar`.
+        """
+        tercero_id = (
+            liquidacion.proveedor_id
+            if liquidacion.tipo == TIPO_PROVEEDOR
+            else liquidacion.transportador_id
+        )
+        if tercero_id is None:
+            return CERO
+        origenes = self.repo.deudas_sin_cobrar(
+            liquidacion.tipo,
+            tercero_id,
+            antes_de=liquidacion.periodo_inicio,
+            excepto=liquidacion.id,
+        )
+        total = sum((o.le_queda_debiendo for o in origenes), CERO)
+        if total <= CERO:
+            return CERO
+        for origen in origenes:
+            # SE ASIGNA LA RELACIÓN Y NO LA COLUMNA PELADA, y el detalle importa:
+            # escribiendo solo `deuda_trasladada_a_id`, un objeto que ya estuviera
+            # cargado en la sesión se queda con la relación en nulo y la respuesta de
+            # esa misma petición diría "esta deuda no se le cobró en ninguna parte"
+            # cuando acaba de cobrarse. Con la relación, SQLAlchemy pone la columna, la
+            # punta contraria (`deudas_cobradas`) y lo que se responde, todo de una.
+            #
+            # Queda en la bitácora POR LIQUIDACIÓN, no en un solo renglón de la nueva:
+            # mañana el dueño va a abrir la vieja preguntando "¿y esta deuda quién se la
+            # cobró?", y la respuesta tiene que estar en el libro de ELLA.
+            origen.deuda_trasladada_a = liquidacion
+            origen.updated_by = self.ctx.user_id
+            self._audit(
+                "editar",
+                origen.id,
+                {"deuda_trasladada_a_id": None},
+                {
+                    "deuda_trasladada_a_id": str(liquidacion.id),
+                    "le_queda_debiendo": float(origen.le_queda_debiendo),
+                    "motivo": (
+                        "lo que el tercero quedó debiendo en esta quincena se le cobró "
+                        f"en la liquidación del {liquidacion.periodo_texto}"
+                    ),
+                },
+            )
+        # SE SUMA A LO QUE YA TENÍA en vez de reemplazarlo. Hoy siempre parte de cero
+        # (esto corre una sola vez, al generar), y ese `+` es un seguro para el día en
+        # que alguien lo llame desde otro camino —al aprobar, por ejemplo—: con un `=`
+        # pelado, cobrar una segunda deuda de $30.000 borraría los $120.000 que ya
+        # estaban cobrados y marcados, y esa plata no la volvería a cobrar nadie.
+        liquidacion.saldo_anterior = Decimal(liquidacion.saldo_anterior or 0) + total
+        _refrescar_saldo(liquidacion)
+        return total
+
+    def _soltar_deudas_cobradas(self, liquidacion: Liquidacion, motivo: str) -> int:
+        """Suelta los orígenes que esta liquidación se estaba cobrando.
+
+        SIN ESTO SE PIERDE PLATA DE VERDAD: si la liquidación que se cobró la deuda se
+        anula (o se borra), y los orígenes se quedan marcados, el proveedor queda
+        debiendo $120.000 que ninguna liquidación futura va a volver a encontrar —la
+        consulta de deudas salta a los marcados—. Nadie los cobra nunca.
+
+        Devuelve cuántas soltó, para la bitácora de la que se anuló.
+        """
+        origenes = self.repo.cobradas_por(liquidacion.id)
+        for origen in origenes:
+            # Por la relación y no por la columna, por lo mismo que al cobrarla (ver
+            # `_cobrar_deudas_anteriores`): así la respuesta de esta misma petición ya
+            # dice que la deuda quedó libre.
+            origen.deuda_trasladada_a = None
+            origen.updated_by = self.ctx.user_id
+            self._audit(
+                "editar",
+                origen.id,
+                {"deuda_trasladada_a_id": str(liquidacion.id)},
+                {
+                    "deuda_trasladada_a_id": None,
+                    "le_queda_debiendo": float(origen.le_queda_debiendo),
+                    "motivo": (
+                        f"{motivo}: esta deuda vuelve a quedar libre y se le cobrará "
+                        "en la próxima liquidación que se le genere al tercero"
+                    ),
+                },
+            )
+        if origenes:
+            self.db.flush()
+        return len(origenes)
+
     def recalcular(
         self, entity_id: uuid.UUID, *, rederivar_tarifas: bool = True
     ) -> Liquidacion:
@@ -1567,8 +2047,20 @@ class LiquidacionService(BaseService[Liquidacion]):
         En la del PROVEEDOR no cambia nada: su plata sale del precio por litro que el
         usuario ESCRIBIÓ en el día, no de una tarifa derivada, y volver a "derivarlo"
         del precio del proveedor le reescribiría un precio que alguien puso a mano.
+
+        LO QUE NO SE RECALCULA NUNCA ES `saldo_anterior`: no sale de las recepciones,
+        es la deuda que se arrastró de otra quincena y que quedó marcada en su origen.
+        El neto y el saldo sí quedan al día —los rearma `_refrescar_saldo`, que ya
+        resta esa columna—, así que la igualdad que el dueño verifica a mano sigue
+        exacta después de recalcular.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
+        # Y SI LA DEUDA DE ESTA YA SE COBRÓ EN OTRA, no se recalcula: cambiarle el
+        # total le cambiaría el descuento a un comprobante ya emitido. Este es el
+        # camino por el que de verdad llega —el recuadre automático de una recepción
+        # editada la devuelve a borrador y entra por acá—, y por eso el guardia está
+        # aquí y no solo en `recuadrar`.
+        _exigir_deuda_no_trasladada(liquidacion, "recalcular")
         if liquidacion.estado != ESTADO_BORRADOR:
             raise BusinessError(
                 f"Esta liquidación está en '{liquidacion.estado}': solo se puede "
@@ -1746,6 +2238,12 @@ class LiquidacionService(BaseService[Liquidacion]):
         usuario que la tiene que revisar y aprobar otra vez.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
+        # PRIMERO EL GUARDIA DE LA DEUDA TRASLADADA, antes de tocar el estado: si se
+        # dejara para el `recalcular` del final, la liquidación ya habría pasado a
+        # borrador (y quedado en la bitácora) para rebotar un renglón después. Rebota
+        # de una y no escribe nada. El candado de Recepción diaria además lo para más
+        # arriba, con el mismo motivo, para que el usuario lo lea en el día que editó.
+        _exigir_deuda_no_trasladada(liquidacion, "volver a cuadrar")
         if liquidacion.estado == ESTADO_PAGADA:
             raise BusinessError(
                 "Esta liquidación ya está pagada: sus días no se pueden modificar"
@@ -1799,9 +2297,21 @@ class LiquidacionService(BaseService[Liquidacion]):
         se quedaría por fuera y se le pagaría al proveedor plata que ya se le
         había adelantado. Solo aplica sobre el borrador; el anticipo que ya se
         descontó en otra liquidación no vuelve a entrar.
+
+        SALVO QUE SU DEUDA YA SE HAYA COBRADO EN OTRA LIQUIDACIÓN. Ahí sus cifras están
+        congeladas y no se le barre nada: desde que la deuda de un BORRADOR también
+        viaja (ver `deudas_sin_cobrar`), este era el último camino que le movía el total
+        por detrás. Con las cifras: la quincena 1 queda debiendo $120.000 en borrador,
+        la quincena 2 se los cobra, y si al aprobar la 1 se le barriera un anticipo
+        nuevo de $50.000 su deuda pasaría a $170.000 y el comprobante de la 2 —ya
+        emitido— quedaría cobrando $50.000 de menos. El anticipo NO se pierde: sigue
+        suelto y lo recoge la próxima liquidación que se le genere al tercero.
+
+        Aprobar en sí no cambia ninguna cifra, así que se deja pasar: es solo el visto
+        bueno del dueño sobre unas cuentas que ya están en firme.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
-        if liquidacion.estado == ESTADO_BORRADOR:
+        if liquidacion.estado == ESTADO_BORRADOR and not liquidacion.deuda_ya_cobrada:
             self._aplicar_anticipos_pendientes(liquidacion)
         return self._transicionar(entity_id, (ESTADO_BORRADOR,), ESTADO_APROBADA)
 
@@ -1821,6 +2331,23 @@ class LiquidacionService(BaseService[Liquidacion]):
                 "pagar a una liquidación aprobada"
             )
         if Decimal(liquidacion.saldo) <= CERO:
+            # Dos mensajes, porque son dos situaciones distintas: la saldada no tiene
+            # nada pendiente y ya está; en la otra es EL TERCERO el que debe, y lo que
+            # el usuario necesita saber es que esa plata no se pierde —se le cobra en la
+            # próxima— y no que "no hay saldo", que suena a que la cuenta está en ceros.
+            debe = Decimal(liquidacion.le_queda_debiendo or 0)
+            if debe > CERO:
+                raise BusinessError(
+                    f"A esta liquidación no se le puede abonar: el tercero le quedó "
+                    f"debiendo {pesos(debe)}, y ese saldo se le cobra en la próxima "
+                    "liquidación que se le genere"
+                )
+            # Y el tercer caso: el neto cayó JUSTO en cero porque la deuda de la
+            # quincena pasada se llevó lo que faltaba. "No tiene saldo pendiente" es
+            # verdad pero no explica nada; este aviso dice de dónde salió el cero.
+            por_la_deuda = _no_sale_un_peso_por_la_deuda(liquidacion)
+            if por_la_deuda is not None:
+                raise BusinessError(por_la_deuda)
             raise BusinessError("Esta liquidación no tiene saldo pendiente por pagar")
 
     def registrar_pago(self, entity_id: uuid.UUID, payload: Any) -> Liquidacion:
@@ -1907,14 +2434,37 @@ class LiquidacionService(BaseService[Liquidacion]):
         que una liquidación pagada de un solo golpe y otra pagada en tres abonos
         quedan contadas igual y las dos aparecen en el historial.
 
-        El caso raro se respeta: si los anticipos se comieron todo y no queda
-        saldo, no hay pago que registrar y solo se marca pagada, como antes.
+        El caso raro se respeta: si los anticipos se comieron EXACTO todo y el saldo
+        quedó en cero, no hay pago que registrar y solo se marca pagada, como antes.
+        Ahí sí salió plata —el anticipo, entregado en la mano— y la quincena quedó
+        saldada; 'pagada' es la verdad.
+
+        PERO SI EL TERCERO QUEDÓ DEBIENDO, ESTE BOTÓN REBOTA. El porqué completo está
+        en la nota "MARCAR PAGADA UNA LIQUIDACIÓN QUE NADIE PAGÓ", junto a
+        `_estado_pago`: marcarla pagada sin que salga un peso trababa los días de esa
+        quincena para siempre y ponía "PAGADA" al lado de "LE QUEDA DEBIENDO".
+
+        Y REBOTA IGUAL CUANDO EL NETO CAYÓ JUSTO EN CERO PORQUE LA DEUDA ARRASTRADA SE
+        LO COMIÓ, que era el mismo hueco por el borde: ahí `le_queda_debiendo` es cero
+        —el saldo no bajó de cero, cayó exacto en cero— y el guardia de arriba lo dejaba
+        pasar. Ver `_no_sale_un_peso_por_la_deuda`, que trae las cifras.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
         if liquidacion.estado not in (ESTADO_APROBADA, ESTADO_PARCIAL):
             raise BusinessError(
                 f"No se puede pasar de '{liquidacion.estado}' a '{ESTADO_PAGADA}'"
             )
+        debe = Decimal(liquidacion.le_queda_debiendo or 0)
+        if debe > CERO:
+            raise BusinessError(
+                f"Esta liquidación no hay que pagarla: el tercero le quedó debiendo "
+                f"{pesos(debe)}, y ese saldo se le cobra en la próxima liquidación que "
+                f"se le genere. Déjela en '{ESTADO_APROBADA}'; marcarla pagada sin que "
+                "salga un peso trabaría los días de la quincena sin razón"
+            )
+        por_la_deuda = _no_sale_un_peso_por_la_deuda(liquidacion)
+        if por_la_deuda is not None:
+            raise BusinessError(por_la_deuda)
         pendiente = Decimal(liquidacion.saldo)
         if pendiente <= CERO:
             return self._transicionar(
@@ -1931,6 +2481,11 @@ class LiquidacionService(BaseService[Liquidacion]):
 
     def anular(self, entity_id: uuid.UUID) -> Liquidacion:
         liquidacion = self.repo.get_or_fail(entity_id)
+        # No se anula la que DEJÓ una deuda que ya se cobró en otra: su
+        # `le_queda_debiendo` está restado en un segundo comprobante y anularla dejaría
+        # a ese comprobante cobrando una deuda de un documento anulado. El mensaje
+        # nombra cuál anular primero.
+        _exigir_deuda_no_trasladada(liquidacion, "anular")
         if liquidacion.estado == ESTADO_PAGADA:
             raise BusinessError("No se puede anular una liquidación ya pagada")
         # Anular suelta las recepciones y los anticipos para volver a liquidar el
@@ -1941,7 +2496,62 @@ class LiquidacionService(BaseService[Liquidacion]):
                 "No se puede anular una liquidación con pagos registrados: "
                 "elimine primero los pagos"
             )
-        # Liberar recepciones y anticipos para poder re-liquidar
+        self._soltar_lo_apartado(
+            liquidacion, "se anuló la liquidación que se estaba cobrando esta deuda"
+        )
+        # Y LA ANULADA DEJA DE COBRAR LA DEUDA QUE SE ESTABA COBRANDO: `saldo_anterior`
+        # vuelve a cero y el saldo se recuadra.
+        #
+        # LA DECISIÓN, porque hay dos caminos y los dos se defienden: se eligió que la
+        # anulada NO MUESTRE UN COBRO QUE YA NO TIENE, en vez de que conserve la cifra
+        # con una nota histórica. El defecto que cierra: al anular se suelta la marca del
+        # origen (correcto, o esa deuda no la cobra nadie nunca) y `deudas_cobradas`
+        # queda vacío, así que el comprobante seguía imprimiendo "Lo que quedó debiendo
+        # de la quincena pasada  - $120.000" SIN LA NOTA que decía de qué quincena venía:
+        # un descuento huérfano, una cifra que el papel no puede explicar. Y con la
+        # columna en cero el resumen vuelve a cuadrar de arriba abajo —VALOR TOTAL
+        # $250.000 menos $0 de anticipos da el SALDO $250.000 que imprime—, que es la
+        # regla que el dueño verifica a mano.
+        #
+        # No es "borrar la historia": la historia está en la bitácora (queda el renglón
+        # de este mismo cambio) y la deuda sigue viva y libre en su propia liquidación,
+        # lista para que la cobre la próxima. Anular es dejar de cobrar; una liquidación
+        # tachada no le descuenta nada a nadie.
+        arrastraba = Decimal(liquidacion.saldo_anterior or 0)
+        if arrastraba > CERO:
+            liquidacion.saldo_anterior = CERO
+            _refrescar_saldo(liquidacion)
+            self.db.flush()
+            self._audit(
+                "editar",
+                liquidacion.id,
+                {"saldo_anterior": float(arrastraba)},
+                {
+                    "saldo_anterior": 0.0,
+                    "saldo": float(liquidacion.saldo),
+                    "motivo": (
+                        "se anuló la liquidación: deja de cobrar lo que el tercero quedó "
+                        "debiendo de la quincena pasada, y esa deuda vuelve a quedar libre"
+                    ),
+                },
+            )
+        return self._transicionar(entity_id, (ESTADO_BORRADOR, ESTADO_APROBADA), ESTADO_ANULADA)
+
+    def _soltar_lo_apartado(self, liquidacion: Liquidacion, motivo: str) -> None:
+        """Suelta TODO lo que esta liquidación tenía apartado: sus días, sus anticipos y
+        las deudas que se estaba cobrando.
+
+        Está en un solo sitio porque lo usan los DOS caminos que dan de baja una
+        liquidación —anularla y borrarla en suave— y la lista de cosas que hay que
+        soltar tiene que ser la misma en los dos. Antes el borrado soltaba solo las
+        deudas, y de ahí salía un hueco con plata: al borrar la quincena que dejó
+        debiendo $120.000, el anticipo de $300.000 se quedaba pegado a un documento que
+        las consultas ya no devuelven —preso para siempre, porque `pendientes_de` solo
+        recoge los que tienen `liquidacion_id` en nulo—, la deuda desaparecía con el
+        documento y al proveedor le quedaban $120.000 que nadie le iba a cobrar nunca.
+        Soltando el anticipo, la próxima liquidación que se le genere lo vuelve a
+        aplicar y la deuda reaparece igual: no se pierde un peso.
+        """
         campo = (
             RecepcionLeche.liquidacion_id
             if liquidacion.tipo == TIPO_PROVEEDOR
@@ -1962,7 +2572,73 @@ class LiquidacionService(BaseService[Liquidacion]):
         ).all()
         for a in anticipos:
             a.liquidacion_id = None
-        return self._transicionar(entity_id, (ESTADO_BORRADOR, ESTADO_APROBADA), ESTADO_ANULADA)
+            a.updated_by = self.ctx.user_id
+        # Y SE SUELTA LA DEUDA QUE ESTA SE ESTABA COBRANDO. Sin esto el tercero queda
+        # debiendo una plata que nadie va a volver a cobrar: la consulta de deudas
+        # salta a los orígenes marcados, y su marca apuntaba a una liquidación que ya
+        # no vale nada.
+        self._soltar_deudas_cobradas(liquidacion, motivo)
+        self.db.flush()
+
+    # ------------------------------------------------------------------ borrado
+    # OJO, ESTO NO LO CORRE NINGUNA PETICIÓN HOY, y queda escrito a propósito.
+    #
+    # El router de liquidaciones se arma A MANO (no con `build_crud_router`) y no expone
+    # ningún DELETE: `DELETE /api/v1/liquidaciones/{id}` responde 405. O sea que
+    # `validar_eliminar` y `eliminar` son, hoy, código que no se ejecuta por ningún
+    # camino de la API.
+    #
+    # POR QUÉ NO SE BORRAN, que fue la decisión: lo que hay acá no es un guardia de más,
+    # es lo que el borrado TIENE que hacer para no perder plata —soltar los días, los
+    # anticipos y las deudas que la liquidación se estaba cobrando, y rebotar si tiene
+    # pagos o si su deuda ya se cobró en otra—. Si se quitaran, el día que alguien agregue
+    # la ruta DELETE heredaría el `eliminar` de `BaseService`, que solo marca `deleted_at`:
+    # el anticipo de $300.000 quedaría preso de un documento que las consultas ya no
+    # devuelven y los $120.000 de deuda no los cobraría nadie nunca. Es más seguro que la
+    # defensa esté escrita antes que la puerta.
+    #
+    # Y PARA QUE NO SEA UNA DEFENSA QUE NADIE SABE QUE NO CORRE, el hecho de que no haya
+    # ruta está FIJADO POR UNA PRUEBA: el 405 se comprueba en
+    # tests/test_liquidacion_deuda_arrastrada_puertas.py, en
+    # `test_21b_no_hay_forma_de_borrar_una_liquidacion_por_la_api`. El día que se agregue
+    # el DELETE, esa prueba falla y dice, con nombre y apellido, que estos dos métodos
+    # pasaron a estar vivos y que hay que probarlos midiendo la plata.
+    def validar_eliminar(self, obj: Liquidacion) -> None:
+        """Lo que tiene que estar en orden antes de borrar en suave una liquidación.
+
+        · La que DEJÓ una deuda ya cobrada no se borra, por lo mismo que no se anula: el
+          descuento de la quincena siguiente se quedaría apuntando a un documento que
+          las consultas ya no devuelven, y ese comprobante dejaría de poder explicar de
+          dónde salió su resta —el desglose no sumaría—.
+        · Y LA QUE YA TIENE PLATA ENTREGADA TAMPOCO, que faltaba y es el mismo criterio
+          de `anular`: borrar el documento deja el abono colgando de algo que ya no
+          existe, y de paso soltaría sus días y sus anticipos para que otra liquidación
+          se los vuelva a cobrar. Esa plata se contaría dos veces.
+        """
+        _exigir_deuda_no_trasladada(obj, "eliminar")
+        if obj.tiene_pagos:
+            raise BusinessError(
+                "No se puede eliminar una liquidación con pagos registrados: "
+                "elimine primero los pagos"
+            )
+
+    def eliminar(self, entity_id: uuid.UUID) -> None:
+        """Borrado en suave, soltando todo lo que la liquidación tenía apartado.
+
+        Es la misma corrección que en `anular` y por la misma razón: una liquidación
+        borrada no le va a cobrar nada a nadie, así que sus días, sus anticipos y las
+        deudas que se estaba cobrando tienen que quedar libres. Si se quedaran
+        marcados, esos $120.000 no los cobra nunca nadie y el anticipo de $300.000 queda
+        preso de un documento que ya no existe.
+        """
+        liquidacion = self.repo.get_or_fail(entity_id)
+        # Los guardias van ANTES de soltar nada: si el borrado va a rebotar, no puede
+        # quedar a medio hacer.
+        self.validar_eliminar(liquidacion)
+        self._soltar_lo_apartado(
+            liquidacion, "se borró la liquidación que se estaba cobrando esta deuda"
+        )
+        super().eliminar(entity_id)
 
     # ------------------------------------------------------------------ listar
     def listar_filtrado(
@@ -2042,11 +2718,10 @@ class LiquidacionService(BaseService[Liquidacion]):
         # el rótulo dice de quién es la plata y el valor va sin signo, porque un menos
         # pegado a un total destacado es justo lo que se lee mal.
         #
-        # No se agrega ni se mueve ningún renglón —el resumen queda con los mismos, en
-        # el mismo orden—: solo este cambia de rótulo. Y el rótulo va corto a propósito;
-        # la celda es de 6 cm con texto plano (no se envuelve) y meterle el nombre del
-        # tercero lo desbordaría con un "María Fernanda Gutiérrez". El nombre ya está
-        # arriba, en el bloque "Proveedor / Transportador" del encabezado.
+        # No se agrega ni se mueve ningún renglón por este cambio de rótulo. Y el rótulo
+        # va corto a propósito: meterle el nombre del tercero desbordaría la celda con
+        # un "María Fernanda Gutiérrez". El nombre ya está arriba, en el bloque
+        # "Proveedor / Transportador" del encabezado.
         debe = Decimal(liquidacion.le_queda_debiendo or 0)
         saldo_row = (
             ("LE QUEDA DEBIENDO", pesos(debe), True)
@@ -2054,6 +2729,35 @@ class LiquidacionService(BaseService[Liquidacion]):
             else ("SALDO A PAGAR", pesos(liquidacion.saldo), True)
         )
 
+        # EL RENGLÓN DE LA DEUDA QUE SE ARRASTRA, con las palabras del dueño. Solo
+        # aparece cuando de verdad se le está cobrando algo: en el 99% de los
+        # comprobantes esta cifra es cero y un renglón en $0,00 solo hace ruido.
+        saldo_anterior = Decimal(liquidacion.saldo_anterior or 0)
+        deuda_rows = (
+            [
+                (
+                    "Lo que quedó debiendo de la quincena pasada",
+                    f"- {pesos(saldo_anterior)}",
+                    False,
+                )
+            ]
+            if saldo_anterior > CERO
+            else []
+        )
+
+        # EL ORDEN DEL RESUMEN ES UNA RESTA DE ARRIBA ABAJO, y esto lo pidió el dueño
+        # porque no le cuadraba: "Anticipos aplicados" y "Pagado" salían ARRIBA de
+        # VALOR TOTAL, así que quien suma y resta la columna en el orden en que está
+        # impresa nunca llegaba a la cifra grande. Ahora cae exacto:
+        #
+        #     valor bruto + bonificaciones - descuentos            = VALOR TOTAL
+        #     VALOR TOTAL - anticipos - lo que quedó debiendo
+        #                 - pagado                                 = SALDO
+        #
+        # Los renglones que empiezan con + o con - son los que entran en la cuenta;
+        # "Total litros" y "Precio promedio" son el encabezado (cuánto y a cómo), no
+        # sumandos. Está medido renglón por renglón, leyendo el PDF, en
+        # tests/test_liquidacion_saldo_anterior.py.
         if es_proveedor:
             resumen_rows = [
                 ("Total litros", litros(liquidacion.total_litros), False),
@@ -2061,9 +2765,10 @@ class LiquidacionService(BaseService[Liquidacion]):
                 ("Valor bruto", pesos(liquidacion.valor_bruto), False),
                 ("Bonificaciones", f"+ {pesos(liquidacion.bonificaciones)}", False),
                 ("Descuentos", f"- {pesos(liquidacion.descuentos)}", False),
-                ("Anticipos aplicados", f"- {pesos(liquidacion.anticipos)}", False),
-                *pagado_rows,
                 ("VALOR TOTAL", pesos(liquidacion.valor_total), True),
+                ("Anticipos aplicados", f"- {pesos(liquidacion.anticipos)}", False),
+                *deuda_rows,
+                *pagado_rows,
                 saldo_row,
             ]
         else:
@@ -2073,9 +2778,10 @@ class LiquidacionService(BaseService[Liquidacion]):
             resumen_rows = [
                 ("Total litros", litros(liquidacion.total_litros), False),
                 ("Valor transporte", pesos(liquidacion.valor_transporte), False),
-                ("Anticipos aplicados", f"- {pesos(liquidacion.anticipos)}", False),
-                *pagado_rows,
                 ("VALOR TOTAL", pesos(liquidacion.valor_total), True),
+                ("Anticipos aplicados", f"- {pesos(liquidacion.anticipos)}", False),
+                *deuda_rows,
+                *pagado_rows,
                 saldo_row,
             ]
 
@@ -2085,15 +2791,12 @@ class LiquidacionService(BaseService[Liquidacion]):
             for a in anticipos
         ]
 
-        periodo = (
-            f"{liquidacion.periodo_inicio.strftime('%d/%m/%Y')} al "
-            f"{liquidacion.periodo_fin.strftime('%d/%m/%Y')}"
-        )
+        periodo = liquidacion.periodo_texto
         pdf = build_liquidacion_pdf(
             empresa_nombre=nombre_empresa,
             empresa_nit=nit,
             empresa_ubicacion=ubicacion,
-            folio=str(liquidacion.id)[:8].upper(),
+            folio=self._folio(liquidacion),
             estado=liquidacion.estado,
             emitido=datetime.now().strftime("%d/%m/%Y %H:%M"),
             tercero_label="Proveedor" if es_proveedor else "Transportador",
@@ -2105,11 +2808,92 @@ class LiquidacionService(BaseService[Liquidacion]):
             detalle_col_widths=detalle_anchos,
             detalle_wrap_cols=detalle_envuelven,
             resumen_rows=resumen_rows,
+            notas_resumen=self._notas_de_la_deuda(liquidacion),
             anticipos_rows=anticipos_rows,
             observaciones=liquidacion.observaciones,
         )
         filename = f"liquidacion_{tercero}_{liquidacion.periodo_inicio.isoformat()}.pdf".replace(" ", "_")
         return pdf, filename
+
+    @staticmethod
+    def _folio(liquidacion: Liquidacion) -> str:
+        """El N.º con que se nombra un comprobante en el papel: los 8 primeros del id.
+
+        Está en un solo sitio porque ahora un comprobante nombra a OTRO (la liquidación
+        que se cobró su deuda) y los dos papeles tienen que llamarla igual: si el folio
+        se armara de dos formas, el dueño no podría emparejarlos.
+        """
+        return str(liquidacion.id)[:8].upper()
+
+    def _notas_de_la_deuda(self, liquidacion: Liquidacion) -> list[str]:
+        """Las dos puntas de la deuda arrastrada, en letra chica bajo el resumen.
+
+        Sin esto el papel muestra una resta que no se puede explicar: el dueño ve
+        "- $120.000" y no tiene de dónde sacar de qué quincena salió. Y en la que dejó
+        la deuda ve "LE QUEDA DEBIENDO $120.000" sin saber si eso ya se cobró o si
+        todavía tiene que ir a cobrarlo, que es justo lo que necesita saber.
+
+        Las dos notas pueden salir a la vez, y ese es el caso de la cadena: una
+        quincena que se cobró la deuda de la anterior y que volvió a quedar debiendo.
+        """
+        notas: list[str] = []
+        for origen in liquidacion.deudas_cobradas:
+            notas.append(
+                f"El renglón «Lo que quedó debiendo de la quincena pasada» viene de la "
+                f"liquidación del {origen.periodo_texto} (N.º {self._folio(origen)}), "
+                f"donde quedó debiendo {pesos(origen.le_queda_debiendo)}."
+            )
+        otra = liquidacion.deuda_trasladada_a
+        if otra is not None:
+            notas.append(
+                f"Lo que quedó debiendo en esta quincena "
+                f"({pesos(liquidacion.le_queda_debiendo)}) ya se le cobró en la "
+                f"liquidación del {otra.periodo_texto} (N.º {self._folio(otra)}): no hay "
+                f"que volver a cobrarlo."
+            )
+        return notas
+
+    def _aviso_de_la_deuda_que_falta_por_cobrar(self, pre: PreLiquidacionRead) -> list[str]:
+        """El aviso del PAPEL DEL AVANCE: su "SALDO ESTIMADO" todavía no resta la deuda.
+
+        EL PROBLEMA, con las cifras: Henri quedó debiendo $120.000 de la quincena pasada
+        y su avance de la quincena en curso va en $250.000. El papel prometía "SALDO
+        ESTIMADO $250.000" cuando lo que va a salir de la caja son $130.000 —la deuda se
+        cobra al generar—, y este papel SE LE MUESTRA AL PROVEEDOR: es una promesa de
+        $120.000 que el negocio no va a cumplir, escrita y firmada por el sistema.
+
+        El avance sigue SIN descontarla —esa decisión no cambia, y está explicada en
+        `previsualizar_pdf`: este documento no marca ni aparta nada— pero ahora LO DICE.
+        Preferir el aviso a la resta es lo honesto: la resta comprometería una deuda que
+        todavía no tiene dueño, y el aviso no le esconde nada a nadie.
+
+        Sale solo cuando de verdad hay deuda esperando, que es el caso raro; el 99% de
+        los avances salen igual que antes.
+
+        LA CIFRA SALE DE `pre.deuda_pendiente` Y NO DE UNA SEGUNDA CONSULTA, y eso es a
+        propósito: ahora el avance la lleva en su propio campo —la pantalla también la
+        muestra— y dos consultas para el mismo hecho terminan diciendo cifras distintas el
+        día que a una le cambien un filtro. El papel y la pantalla leen la misma.
+        """
+        deuda = Decimal(pre.deuda_pendiente or 0)
+        if deuda <= CERO:
+            return []
+        queda = Decimal(pre.saldo) - deuda
+        if queda >= CERO:
+            remate = (
+                f"así que el saldo de verdad va a quedar en {pesos(queda)} y no en el "
+                "SALDO ESTIMADO de arriba"
+            )
+        else:
+            remate = (
+                "así que no va a quedar saldo por pagarle: le seguiría quedando debiendo "
+                f"{pesos(-queda)}"
+            )
+        return [
+            f"AVISO: este avance TODAVÍA NO DESCUENTA lo que {pre.tercero_nombre} quedó "
+            f"debiendo de quincenas anteriores ({pesos(deuda)}). Ese saldo se le cobra en "
+            f"el momento de generar la liquidación oficial, {remate}."
+        ]
 
     def previsualizar_pdf(
         self, inicio: date, fin: date, tipo: str, tercero_id: uuid.UUID
@@ -2142,6 +2926,24 @@ class LiquidacionService(BaseService[Liquidacion]):
         # leerse igual —el dueño manda el uno mirando la otra—. Cuando se le ponga a la
         # pantalla del avance el mismo "le queda debiendo", este renglón se cambia con
         # ella, no antes.
+        #
+        # Y POR LO MISMO EL AVANCE NO DESCUENTA `saldo_anterior`, aunque el tercero ya
+        # tenga una deuda esperando: este papel dice "cómo va la quincena en curso" y no
+        # marca ni aparta nada. La deuda se cobra EN EL MOMENTO DE GENERAR, y cuál
+        # liquidación se la cobra se decide ahí; prometerlo antes en un papel informativo
+        # sería anunciar un descuento que todavía no tiene dueño. El renglón se agrega
+        # aquí el día que la pantalla del avance lo muestre, no antes.
+        #
+        # PERO SÍ SE ADVIERTE EN EL PAPEL, y eso faltaba: este documento se le muestra al
+        # proveedor, y prometía "SALDO ESTIMADO $250.000" cuando lo que iba a salir eran
+        # $130.000. Ver `_aviso_de_la_deuda_que_falta_por_cobrar`.
+        #
+        # EL ORDEN DEL RESUMEN ES EL MISMO DEL COMPROBANTE OFICIAL: bruto, más
+        # bonificaciones, menos descuentos, VALOR TOTAL, menos anticipos, y de último el
+        # saldo. Estaba al revés —"Anticipos aplicados" ARRIBA de VALOR TOTAL, que es el
+        # defecto exacto que el dueño reclamó— y quedaba además al revés de su propia
+        # pantalla, que sí se reordenó. Quien suma la columna de arriba abajo, como él,
+        # ahora cae exacto en las dos cifras destacadas.
         if es_proveedor:
             resumen_rows = [
                 ("Total litros", litros(pre.total_litros), False),
@@ -2149,16 +2951,16 @@ class LiquidacionService(BaseService[Liquidacion]):
                 ("Valor bruto", pesos(pre.valor_bruto), False),
                 ("Bonificaciones", f"+ {pesos(pre.bonificaciones)}", False),
                 ("Descuentos", f"- {pesos(pre.descuentos)}", False),
-                ("Anticipos aplicados", f"- {pesos(pre.anticipos)}", False),
                 ("VALOR TOTAL", pesos(pre.valor_total), True),
+                ("Anticipos aplicados", f"- {pesos(pre.anticipos)}", False),
                 ("SALDO ESTIMADO", pesos(pre.saldo), True),
             ]
         else:
             resumen_rows = [
                 ("Total litros", litros(pre.total_litros), False),
                 ("Valor transporte", pesos(pre.valor_transporte), False),
-                ("Anticipos aplicados", f"- {pesos(pre.anticipos)}", False),
                 ("VALOR TOTAL", pesos(pre.valor_total), True),
+                ("Anticipos aplicados", f"- {pesos(pre.anticipos)}", False),
                 ("SALDO ESTIMADO", pesos(pre.saldo), True),
             ]
         anticipos_rows = [
@@ -2182,6 +2984,7 @@ class LiquidacionService(BaseService[Liquidacion]):
             detalle_col_widths=detalle_anchos,
             detalle_wrap_cols=detalle_envuelven,
             resumen_rows=resumen_rows,
+            notas_resumen=self._aviso_de_la_deuda_que_falta_por_cobrar(pre),
             anticipos_rows=anticipos_rows,
             observaciones="PRE-LIQUIDACIÓN — documento informativo del avance; no constituye pago.",
         )
@@ -2283,6 +3086,14 @@ class AnticipoService(BaseService[Anticipo]):
         # le pasa por encima. Ver `_bloquear`.
         liquidacion = _bloquear(self.db, liquidacion)
 
+        # Y TAMBIÉN SE TRABA SI LA DEUDA DE ESA LIQUIDACIÓN YA SE COBRÓ EN OTRA. Es el
+        # caso exacto de este arreglo, con las cifras del dueño: $180.000 de quincena
+        # con $300.000 de anticipo dejan al proveedor debiendo $120.000, y esos $120.000
+        # ya están restados en el comprobante de la quincena siguiente. Corregir el
+        # anticipo a $200.000 cambiaría la deuda a $20.000 y ese segundo comprobante
+        # —que puede estar pagado— quedaría cobrando $100.000 que ya nadie debe. Sin
+        # este guardia el recuadre de abajo lo hacía en silencio.
+        _exigir_deuda_no_trasladada(liquidacion, f"{verbo} el anticipo de")
         # Dos mensajes porque son dos situaciones distintas para el usuario: de la
         # pagada no hay nada que hacer por dentro; del abono sí, se puede borrar el
         # pago, corregir el anticipo y volver a abonar.

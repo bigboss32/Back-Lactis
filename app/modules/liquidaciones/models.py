@@ -45,6 +45,43 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
     valor_transporte: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
     anticipos: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
     valor_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
+    # LO QUE EL TERCERO QUEDÓ DEBIENDO DE QUINCENAS PASADAS Y SE LE COBRA EN ESTA.
+    #
+    # Lo pidió el dueño con estas palabras: "en la liquidación, a los que quedaron en
+    # negativo, ese saldo que se queda debiendo —el proveedor a la quesera— se cobre
+    # en la siguiente liquidación". Hasta ahora la deuda se DECÍA (el rótulo "LE QUEDA
+    # DEBIENDO" del comprobante) pero nada la cobraba: quedaba escrita en un papel y
+    # se perdía.
+    #
+    # ES UN DESCUENTO DEL NETO, igual que los anticipos, y por la misma razón: los dos
+    # son plata que ya salió de la caja y que no se le puede volver a entregar. La
+    # diferencia es de dónde viene cada uno —el anticipo se le dio en la mano en ESTA
+    # quincena; esto es el sobrante de anticipos de una quincena ANTERIOR— y por eso
+    # van en renglones separados del comprobante: el dueño tiene que poder ver de
+    # dónde salió cada resta.
+    #
+    # NO SE DEDUCE DE NADA, y de ahí que sea columna y no propiedad (al contrario de
+    # `neto_a_pagar`): no sale de las recepciones ni de los anticipos de este período,
+    # es una plata que se ARRASTRA de otro documento. Por eso tampoco se recalcula
+    # cuando se recalcula la liquidación: ver `recalcular` en el servicio.
+    saldo_anterior: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), default=Decimal("0"), server_default="0"
+    )
+    # LA MARCA QUE HACE IMPOSIBLE COBRAR LA MISMA DEUDA DOS VECES.
+    #
+    # Va en la liquidación que DEJÓ la deuda y apunta a la que SE LA COBRÓ. Es el
+    # mismo idioma que ya usa el proyecto para las recepciones y los anticipos (el
+    # origen se marca con el id del documento que lo consumió: `liquidacion_id`,
+    # `liquidacion_transporte_id`), y la razón es idéntica: mientras la marca esté
+    # puesta, la búsqueda de deudas por cobrar no lo vuelve a encontrar.
+    #
+    # Anulable porque la enorme mayoría de las liquidaciones no dejan ninguna deuda.
+    # Y se SUELTA (vuelve a nulo) cuando la que se la cobró se anula o se borra: si no,
+    # el tercero quedaría debiendo una plata que ya nadie va a cobrar nunca.
+    deuda_trasladada_a_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("liquidaciones.id"), index=True
+    )
+
     # Lo que ya se le entregó al tercero, sumando todos los pagos parciales.
     # Se guarda como columna (en vez de sumar `pagos` cada vez) por lo mismo que
     # `abonado` en reventa: el tablero y la contabilidad suman esta cifra en SQL
@@ -52,7 +89,8 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
     pagado: Mapped[Decimal] = mapped_column(
         Numeric(14, 2), default=Decimal("0"), server_default="0"
     )
-    # Lo que TODAVÍA se le debe = (valor_total - anticipos) - pagado.
+    # Lo que TODAVÍA se le debe = neto_a_pagar - pagado, o sea
+    # (valor_total - anticipos - saldo_anterior) - pagado.
     #
     # OJO con el cambio de sentido: antes de los pagos parciales esta columna era
     # el "neto a pagar" y nunca se movía. Ahora baja con cada pago hasta llegar a
@@ -65,6 +103,34 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
 
     proveedor = relationship("Proveedor", lazy="joined")
     transportador = relationship("Transportador", lazy="joined")
+    # LAS DOS PUNTAS DE LA DEUDA TRASLADADA, para que el dueño vea el hilo completo:
+    # en la liquidación que dejó la deuda, EN CUÁL se le cobró; en la que la cobró, DE
+    # DÓNDE vino ese descuento. Sin las dos puntas el comprobante muestra una resta
+    # que nadie sabe explicar.
+    #
+    # `selectin` y NUNCA `joined`, por lo mismo que se explica en `_bloquear` del
+    # servicio: son FK anulables y un LEFT JOIN de por medio hace que Postgres rechace
+    # el `SELECT ... FOR UPDATE` con un 0A000, que es el candado que evita que dos
+    # pagos simultáneos se pisen. Con selectin son consultas aparte, y en el listado
+    # SQLAlchemy las resuelve en UNA sola por página (no una por fila).
+    deuda_trasladada_a: Mapped["Liquidacion | None"] = relationship(
+        "Liquidacion",
+        remote_side="Liquidacion.id",
+        foreign_keys="Liquidacion.deuda_trasladada_a_id",
+        back_populates="deudas_cobradas",
+        lazy="selectin",
+    )
+    # Las liquidaciones cuya deuda SE COBRÓ en esta. Ordenadas por período (y por id
+    # para desempatar) porque el comprobante las imprime: dos impresiones del mismo
+    # documento no pueden salir con los renglones en distinto orden.
+    deudas_cobradas: Mapped[list["Liquidacion"]] = relationship(
+        "Liquidacion",
+        remote_side="Liquidacion.deuda_trasladada_a_id",
+        foreign_keys="Liquidacion.deuda_trasladada_a_id",
+        back_populates="deuda_trasladada_a",
+        lazy="selectin",
+        order_by="Liquidacion.periodo_inicio, Liquidacion.id",
+    )
     # Se ordena por fecha Y RUTA porque desde que el comprobante del transportador
     # lleva un renglón por (día, ruta) un mismo día puede traer dos renglones, y sin
     # el segundo criterio el orden de esos dos quedaba a lo que devolviera la base:
@@ -88,12 +154,27 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
     def neto_a_pagar(self) -> Decimal:
         """Lo que hay que entregarle al tercero por esta quincena.
 
-        Es la cifra grande contra la que se abona: el valor total menos los
-        anticipos que ya se le habían adelantado. No se guarda porque se deduce
-        de dos columnas que sí están, y dos fuentes para el mismo hecho terminan
-        contradiciéndose.
+        Es la cifra grande contra la que se abona:
+
+            neto_a_pagar = valor_total − anticipos − saldo_anterior
+
+        Las dos restas son plata QUE YA SALIÓ DE LA CAJA y que no se le puede volver a
+        entregar: los anticipos que se le adelantaron en esta quincena, y el sobrante
+        de los anticipos de una quincena anterior (`saldo_anterior`, lo que quedó
+        debiendo). No se guarda porque se deduce de tres columnas que sí están, y dos
+        fuentes para el mismo hecho terminan contradiciéndose.
+
+        SI LA RESTA VUELVE A QUEDAR NEGATIVA, esta liquidación deja SU propio
+        remanente para la siguiente, y ese remanente YA INCLUYE la deuda vieja (está
+        restada acá arriba): por eso la cadena de quincenas no cobra dos veces lo
+        mismo. Está medido en tests/test_liquidacion_saldo_anterior.py con tres
+        quincenas seguidas en negativo.
         """
-        return Decimal(self.valor_total or 0) - Decimal(self.anticipos or 0)
+        return (
+            Decimal(self.valor_total or 0)
+            - Decimal(self.anticipos or 0)
+            - Decimal(self.saldo_anterior or 0)
+        )
 
     @property
     def le_queda_debiendo(self) -> Decimal:
@@ -127,6 +208,70 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
         solo pago hecho, cambiar los litros deja ese pago descuadrado.
         """
         return Decimal(self.pagado or 0) > Decimal("0")
+
+    @property
+    def periodo_texto(self) -> str:
+        """'01/06/2026 al 15/06/2026' — el período como lo lee una persona.
+
+        Vive en el modelo y no en cada pantalla porque lo usan tres cosas que tienen
+        que decir lo mismo: el comprobante, la API y los mensajes de error que nombran
+        a OTRA liquidación ("su deuda ya se le cobró en la del 16/06 al 30/06"). Con la
+        fecha en formato colombiano: el dueño no lee 2026-06-01.
+        """
+        return (
+            f"{self.periodo_inicio.strftime('%d/%m/%Y')} al "
+            f"{self.periodo_fin.strftime('%d/%m/%Y')}"
+        )
+
+    @property
+    def orden_para_volver_a_generar(self) -> str:
+        """El consejo del ORDEN cuando hay que rehacer ESTA quincena y la que le cobró
+        su deuda. Cadena vacía si no hay otra a la que nombrar.
+
+        POR QUÉ HACE FALTA, con las cifras medidas. Cuando el dueño quiere corregirle un
+        día a la quincena que quedó debiendo, el sistema le dice "anule primero esa
+        liquidación y vuelva a intentarlo"... y no le dice EN QUÉ ORDEN volver a
+        generarlas. Si las genera parado en la que acabó de anular —la NUEVA primero— el
+        anticipo viejo se va a la quincena nueva (los anticipos pendientes se recogen por
+        `fecha <= periodo_fin`, y el 01 de junio también es <= 30 de junio), la vieja
+        queda sin anticipo y se le paga completa: de la caja salen $480.000 por $430.000
+        de leche. Generándolas de la más vieja a la más nueva da exacto: $430.000.
+        La plata no se pierde —lo de más queda registrado como deuda— pero sale de la
+        caja una plata que ya se le había adelantado, y si el productor no vuelve a
+        entregar leche no vuelve.
+        Es un hueco de ORDEN, así que el arreglo es DECIR EL ORDEN, con las fechas
+        concretas: "empiece por la del 01/06/2026 al 15/06/2026".
+
+        ESTA es siempre la vieja y `deuda_trasladada_a` la nueva, sin necesidad de
+        compararlas: una deuda solo viaja hacia adelante en el tiempo —el origen tiene
+        que haber terminado antes de que la otra empiece (ver `deudas_sin_cobrar`)—.
+
+        Vive en el modelo, al lado de `periodo_texto` y por lo mismo: lo usan TRES
+        mensajes distintos que tienen que decir lo mismo (anular/recalcular una
+        liquidación, corregir un día en Recepción diaria y borrar ese día). Una sola
+        redacción para una sola regla; con tres copias, mañana dos de ellas dicen otra
+        cosa.
+        """
+        otra = self.deuda_trasladada_a
+        if otra is None:
+            return ""
+        return (
+            "Y si le toca volver a generar las dos, empiece por la más vieja —la del "
+            f"{self.periodo_texto}— y siga con la del {otra.periodo_texto}: al revés, el "
+            "anticipo viejo se va a la quincena nueva y a la vieja se le paga completa"
+        )
+
+    @property
+    def deuda_ya_cobrada(self) -> bool:
+        """Si lo que esta liquidación dejó debiendo YA se le cobró en otra.
+
+        Cuando es True, sus cifras están congeladas y no se pueden mover por ningún
+        lado: cambiarle el valor total le cambiaría la deuda a un segundo comprobante
+        que ya está emitido, y quedarían descuadrados los dos de una. Quien lo hace
+        cumplir es `_exigir_deuda_no_trasladada` en el servicio, y el candado de
+        Recepción diaria por el lado de los días.
+        """
+        return self.deuda_trasladada_a_id is not None
 
 
 class LiquidacionDetalle(AuditMixin, Base):

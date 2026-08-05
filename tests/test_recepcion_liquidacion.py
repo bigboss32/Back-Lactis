@@ -154,7 +154,7 @@ def test_anticipo_transportador_se_descuenta_en_su_liquidacion(client, base_dato
         "/api/v1/liquidaciones/generar",
         json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "ambos"},
         headers=headers,
-    ).json()
+    ).json()["generadas"]
     liq_t = {liq["tipo"]: liq for liq in liqs}["transportador"]
     # valor_transporte = 100 L × $100 = 10.000; anticipo 5.000; saldo 5.000
     assert float(liq_t["valor_total"]) == 100 * 100
@@ -229,7 +229,7 @@ def test_liquidacion_quincena_con_anticipo(client, base_datos):
         headers=headers,
     )
     assert response.status_code == 200, response.text
-    liquidaciones = response.json()
+    liquidaciones = response.json()["generadas"]
     por_tipo = {liq["tipo"]: liq for liq in liquidaciones}
 
     liq_proveedor = por_tipo["proveedor"]
@@ -248,7 +248,7 @@ def test_liquidacion_quincena_con_anticipo(client, base_datos):
         json={"periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "ambos"},
         headers=headers,
     )
-    assert repetido.json() == []
+    assert repetido.json()["generadas"] == []
 
     # Flujo de estados y PDF
     liq_id = liq_proveedor["id"]
