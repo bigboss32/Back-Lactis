@@ -247,11 +247,27 @@ anticipos_router = build_crud_router(
     tags=["Anticipos"],
 )
 
+# Sobrescribimos el listar generado por build_crud_router para soportar desde/hasta
+@anticipos_router.get("", response_model=Page[AnticipoRead], summary="Listar liquidaciones")
+def listar_anticipos(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "consultar")),
+    params: PageParams = Depends(page_params),
+    search: str | None = Query(None, description="Búsqueda por texto"),
+    estado: str | None = Query(None, description="Filtrar por estado"),
+    desde: date | None = Query(None),
+    hasta: date | None = Query(None),
+) -> Any:
+    items, total = AnticipoService(db, ctx).listar(params, search=search, estado=estado, desde=desde, hasta=hasta)
+    return Page.build(items, total, params)
+
 @anticipos_router.get("/totales/suma", response_model=float, summary="Suma total de anticipos con filtros")
 def suma_anticipos(
     db: DbSession,
     ctx: RequestContext = Depends(require_permission("liquidaciones", "consultar")),
     search: str | None = Query(None, description="Búsqueda por texto"),
     estado: str | None = Query(None, description="Filtrar por estado"),
+    desde: date | None = Query(None),
+    hasta: date | None = Query(None),
 ) -> float:
-    return float(AnticipoService(db, ctx).suma_filtrada(search=search, estado=estado))
+    return float(AnticipoService(db, ctx).suma_filtrada(search=search, estado=estado, desde=desde, hasta=hasta))

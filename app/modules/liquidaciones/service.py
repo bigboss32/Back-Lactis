@@ -3163,15 +3163,29 @@ class AnticipoService(BaseService[Anticipo]):
         return anticipo
 
     def listar(self, params: PageParams, **kwargs: Any) -> tuple[list[Anticipo], int]:
+        desde = kwargs.pop("desde", None)
+        hasta = kwargs.pop("hasta", None)
+        extra = []
+        if desde:
+            extra.append(Anticipo.fecha >= desde)
+        if hasta:
+            extra.append(Anticipo.fecha <= hasta)
+        if extra:
+            kwargs["extra_criteria"] = extra
+
         items, total = super().listar(params, **kwargs)
         self._marcar_liquidacion(items)
         return items, total
 
-    def suma_filtrada(self, search: str | None = None, estado: str | None = None) -> Decimal:
+    def suma_filtrada(self, search: str | None = None, estado: str | None = None, desde: date | None = None, hasta: date | None = None) -> Decimal:
         stmt = self.repo.base_query()
         stmt = self.repo.apply_search(stmt, search)
         if estado:
             stmt = stmt.where(self.repo.model.estado == estado)
+        if desde:
+            stmt = stmt.where(Anticipo.fecha >= desde)
+        if hasta:
+            stmt = stmt.where(Anticipo.fecha <= hasta)
         # Sumamos el valor acotado (para anticipos no debería ser negativo, pero por si acaso o simplemente valor)
         # self.repo.model es Anticipo
         from sqlalchemy import select, func
