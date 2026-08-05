@@ -316,6 +316,24 @@ class AnticipoRepository(BaseRepository[Anticipo]):
     model = Anticipo
     default_order_by = "fecha"
 
+    def apply_search(self, stmt: Any, search: str | None) -> Any:
+        if search and search.strip():
+            pattern = f"%{search.strip()}%"
+            from app.modules.proveedores.models import Proveedor
+            from app.modules.transportadores.models import Transportador
+            from app.modules.empleados.models import Empleado
+            stmt = stmt.outerjoin(Anticipo.proveedor).outerjoin(Anticipo.transportador).outerjoin(Anticipo.empleado)
+            stmt = stmt.where(
+                or_(
+                    Proveedor.nombre.ilike(pattern),
+                    Transportador.nombre.ilike(pattern),
+                    Empleado.nombre.ilike(pattern),
+                    Empleado.apellido.ilike(pattern),
+                    Anticipo.observaciones.ilike(pattern),
+                )
+            )
+        return stmt
+
     def pendientes_de(self, proveedor_id: uuid.UUID, hasta: date) -> list[Anticipo]:
         stmt = self.base_query().where(
             Anticipo.proveedor_id == proveedor_id,

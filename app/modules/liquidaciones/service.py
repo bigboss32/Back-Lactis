@@ -3181,15 +3181,15 @@ class AnticipoService(BaseService[Anticipo]):
         stmt = self.repo.base_query()
         stmt = self.repo.apply_search(stmt, search)
         if estado:
-            stmt = stmt.where(self.repo.model.estado == estado)
+            stmt = stmt.where(Anticipo.estado == estado)
         if desde:
             stmt = stmt.where(Anticipo.fecha >= desde)
         if hasta:
             stmt = stmt.where(Anticipo.fecha <= hasta)
-        # Sumamos el valor acotado (para anticipos no debería ser negativo, pero por si acaso o simplemente valor)
-        # self.repo.model es Anticipo
+
         from sqlalchemy import select, func
-        total = self.db.scalar(select(func.coalesce(func.sum(self.repo.model.valor), CERO)).select_from(stmt.subquery()))
+        sub = stmt.subquery()
+        total = self.db.scalar(select(func.coalesce(func.sum(sub.c.valor), CERO)))
         return Decimal(total or CERO)
 
     # ------------------------------------------------------------- correcciones
