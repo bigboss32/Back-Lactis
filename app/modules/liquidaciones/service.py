@@ -3167,6 +3167,17 @@ class AnticipoService(BaseService[Anticipo]):
         self._marcar_liquidacion(items)
         return items, total
 
+    def suma_filtrada(self, search: str | None = None, estado: str | None = None) -> Decimal:
+        stmt = self.repo.base_query()
+        stmt = self.repo.apply_search(stmt, search)
+        if estado:
+            stmt = stmt.where(self.repo.model.estado == estado)
+        # Sumamos el valor acotado (para anticipos no debería ser negativo, pero por si acaso o simplemente valor)
+        # self.repo.model es Anticipo
+        from sqlalchemy import select, func
+        total = self.db.scalar(select(func.coalesce(func.sum(self.repo.model.valor), CERO)).select_from(stmt.subquery()))
+        return Decimal(total or CERO)
+
     # ------------------------------------------------------------- correcciones
     def validar_actualizar(self, obj: Anticipo, data: dict[str, Any]) -> None:
         self._exigir_no_pagado(obj, "modificar")

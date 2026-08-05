@@ -246,3 +246,12 @@ anticipos_router = build_crud_router(
     update_schema=AnticipoUpdate,
     tags=["Anticipos"],
 )
+
+@anticipos_router.get("/totales/suma", response_model=float, summary="Suma total de anticipos con filtros")
+def suma_anticipos(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "consultar")),
+    search: str | None = Query(None, description="Búsqueda por texto"),
+    estado: str | None = Query(None, description="Filtrar por estado"),
+) -> float:
+    return float(AnticipoService(db, ctx).suma_filtrada(search=search, estado=estado))
