@@ -2,7 +2,7 @@ import uuid
 from datetime import date
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.common.crud_router import build_crud_router
 from app.core.context import RequestContext
@@ -239,17 +239,10 @@ def descargar_pdf(
 
 
 # -------------------------------------------------------------------- anticipos
-anticipos_router = build_crud_router(
-    modulo="liquidaciones",
-    service_cls=AnticipoService,
-    read_schema=AnticipoRead,
-    create_schema=AnticipoCreate,
-    update_schema=AnticipoUpdate,
-    tags=["Anticipos"],
-)
+anticipos_router = APIRouter(tags=["Anticipos"])
 
-# Sobrescribimos el listar generado por build_crud_router para soportar desde/hasta
-@anticipos_router.get("", response_model=Page[AnticipoRead], summary="Listar liquidaciones")
+
+@anticipos_router.get("", response_model=Page[AnticipoRead], summary="Listar anticipos")
 def listar_anticipos(
     db: DbSession,
     ctx: RequestContext = Depends(require_permission("liquidaciones", "consultar")),
@@ -262,6 +255,7 @@ def listar_anticipos(
     items, total = AnticipoService(db, ctx).listar(params, search=search, estado=estado, desde=desde, hasta=hasta)
     return Page.build(items, total, params)
 
+
 @anticipos_router.get("/totales/suma", response_model=float, summary="Suma total de anticipos con filtros")
 def suma_anticipos(
     db: DbSession,
@@ -272,3 +266,40 @@ def suma_anticipos(
     hasta: date | None = Query(None),
 ) -> float:
     return float(AnticipoService(db, ctx).suma_filtrada(search=search, estado=estado, desde=desde, hasta=hasta))
+
+
+@anticipos_router.get("/{entity_id}", response_model=AnticipoRead, summary="Obtener anticipo por id")
+def obtener_anticipo(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "consultar")),
+) -> Any:
+    return AnticipoService(db, ctx).obtener(entity_id)
+
+
+@anticipos_router.post("", response_model=AnticipoRead, status_code=status.HTTP_201_CREATED, summary="Crear anticipo")
+def crear_anticipo(
+    payload: AnticipoCreate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "crear")),
+) -> Any:
+    return AnticipoService(db, ctx).crear(payload)
+
+
+@anticipos_router.put("/{entity_id}", response_model=AnticipoRead, summary="Actualizar anticipo")
+def actualizar_anticipo(
+    entity_id: uuid.UUID,
+    payload: AnticipoUpdate,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "editar")),
+) -> Any:
+    return AnticipoService(db, ctx).actualizar(entity_id, payload)
+
+
+@anticipos_router.delete("/{entity_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar anticipo")
+def eliminar_anticipo(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "eliminar")),
+) -> None:
+    AnticipoService(db, ctx).eliminar(entity_id)

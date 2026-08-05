@@ -552,3 +552,27 @@ def test_mover_el_anticipo_a_otra_quincena_lo_suelta_de_la_liquidacion(client, b
     _mostrar("junio 2", junio)
     assert D(junio["anticipos"]) == D(50000)
     assert _cuadra(junio)
+
+
+def test_filtros_fecha_y_busqueda_de_anticipos(client, base_datos):
+    """Verifica que el listado y la suma total de anticipos se filtren correctamente por fecha y por nombre de beneficiario."""
+    h = auth_headers(client, "admin.a")
+    prov, _, _ = _montar(client, h)
+
+    # 1. Crear anticipos en distintas fechas
+    a1 = client.post(ANTICIPOS, json={"tipo": "proveedor", "proveedor_id": prov["id"], "fecha": "2026-07-10", "valor": "200000"}, headers=h).json()
+    a2 = client.post(ANTICIPOS, json={"tipo": "proveedor", "proveedor_id": prov["id"], "fecha": "2026-08-02", "valor": "500000"}, headers=h).json()
+
+    # 2. Filtrar por fecha 2026-08-01 a 2026-08-05
+    res = client.get(ANTICIPOS, params={"desde": "2026-08-01", "hasta": "2026-08-05"}, headers=h).json()
+    ids = [item["id"] for item in res["items"]]
+    assert a2["id"] in ids
+    assert a1["id"] not in ids
+
+    # 3. Suma total filtrada por fecha
+    suma = client.get(f"{ANTICIPOS}/totales/suma", params={"desde": "2026-08-01", "hasta": "2026-08-05"}, headers=h).json()
+    assert D(suma) == D(500000)
+
+    # 4. Búsqueda por texto (nombre del proveedor)
+    search_res = client.get(ANTICIPOS, params={"search": prov["nombre"][:4]}, headers=h).json()
+    assert search_res["total"] >= 2
