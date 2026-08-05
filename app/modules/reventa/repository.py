@@ -11,6 +11,7 @@ from app.modules.reventa.models import (
     TIPO_DOC_COMPRA,
     TIPO_DOC_VENTA,
     TIPO_MOZZARELLA,
+    UNIDAD_UNIDAD,
     AdjuntoReventa,
     CompraQueso,
     ConversionBorona,
@@ -24,25 +25,22 @@ from app.modules.reventa.models import (
 CERO = Decimal("0")
 
 
-def es_mozzarella(columna_tipo):
-    """La fila se mide en BARRAS (mozzarella)."""
-    return columna_tipo == TIPO_MOZZARELLA
+def se_mide_en_unidades(columna_tipo):
+    """La fila se mide en unidades/barras (mozzarella, huevos, etc)."""
+    return func.coalesce(columna_tipo, "").in_(
+        select(ProductoReventa.clave).where(ProductoReventa.unidad == UNIDAD_UNIDAD)
+    )
 
 
 def se_mide_en_kilos(columna_tipo):
     """La fila se mide en KILOS (queso o borona).
 
-    Se escribe con COALESCE y no con un simple `tipo != 'mozzarella'` a propósito.
-    En SQL cualquier comparación contra NULL da NULL —ni verdadero ni falso—, así
-    que una fila vieja con el tipo en blanco quedaría FUERA de los dos lados: sus
-    kilos y su plata desaparecerían del resumen sin que nada lo avise. Con el
-    COALESCE, lo que no es mozzarella son kilos, que es la verdad: la mozzarella
-    es lo nuevo y todo lo que ya existía se compró y se vendió por peso.
-
-    Es el mismo criterio del CHECK de las tablas, que también dice
-    `tipo <> 'mozzarella'` en vez de enumerar queso y borona.
+    A partir de Lote 2, lee de productos_reventa. Todo lo viejo o
+    con tipo en blanco se asume como kilos.
     """
-    return func.coalesce(columna_tipo, "") != TIPO_MOZZARELLA
+    return func.coalesce(columna_tipo, "").notin_(
+        select(ProductoReventa.clave).where(ProductoReventa.unidad == UNIDAD_UNIDAD)
+    )
 
 
 def clave_nombre(columna):
@@ -129,7 +127,7 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                 CompraQueso.deleted_at.is_(None),
                 CompraQueso.estado != "anulada",
                 CompraQueso.fecha.between(desde, hasta),
-                es_mozzarella(CompraQueso.tipo),
+                se_mide_en_unidades(CompraQueso.tipo),
             )
         ).one()
         return Decimal(fila[0]), Decimal(fila[1])
@@ -301,7 +299,7 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                 # forma de que una traiga productores que la otra no.
                 func.coalesce(
                     func.sum(CompraQueso.valor_total).filter(
-                        es_mozzarella(CompraQueso.tipo)
+                        se_mide_en_unidades(CompraQueso.tipo)
                     ),
                     0,
                 ),
@@ -484,7 +482,7 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
                 VentaQueso.deleted_at.is_(None),
                 VentaQueso.estado != "anulada",
                 VentaQueso.fecha.between(desde, hasta),
-                es_mozzarella(VentaQueso.tipo),
+                se_mide_en_unidades(VentaQueso.tipo),
             )
         ).one()
         return Decimal(fila[0]), Decimal(fila[1])
@@ -632,7 +630,7 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
                 VentaQueso.deleted_at.is_(None),
                 VentaQueso.estado != "anulada",
                 VentaQueso.fecha.between(desde, hasta),
-                es_mozzarella(VentaQueso.tipo),
+                se_mide_en_unidades(VentaQueso.tipo),
             )
         )
         return Decimal(total or 0)

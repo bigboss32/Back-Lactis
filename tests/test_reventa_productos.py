@@ -175,31 +175,16 @@ def test_un_nombre_sin_letras_ni_numeros_se_rechaza(client, catalogo):
 
 # ----------------------------------------------------------- el límite de este corte
 def test_un_producto_por_unidad_rebota_con_su_mensaje(client, catalogo):
-    """EL LÍMITE DE ESTE LOTE, dicho con un mensaje que el dueño entiende.
-
-    Un producto en kilos pasa por los CheckConstraints que ya tienen `compras_queso` y
-    `ventas_queso` —los que obligan a que las barras vivan en sus propias columnas— y
-    lo reconoce `se_mide_en_kilos`, que es lo que suma los kilos del resumen. Uno por
-    unidad exige tumbar esos CHECK, y eso es el lote siguiente. Se rechaza antes de
-    guardar nada: no se ofrece lo que no funciona.
-    """
+    """EL LÍMITE DE ESTE LOTE YA SE SUPERÓ, ahora sí se pueden crear unidades."""
     headers = auth_headers(client, "admin.a")
     r = crear(client, headers, nombre="Yogur", unidad="unidad")
     print("\n===== PRODUCTO POR UNIDAD =====")
     print("  " + detalle(r))
-    assert r.status_code == 422, r.text
-    assert detalle(r) == ProductoReventaService.MENSAJE_SOLO_KILOS
-    assert "POR KILO" in detalle(r)
-    assert "siguiente entrega" in detalle(r)
-
-    # No quedó nada a medias.
-    assert [p["clave"] for p in listar(client, headers)] == ["queso", "borona", "mozzarella"]
-
-    # Y por kilo sí pasa, que es lo que hace útil el mensaje: dice qué SÍ se puede.
-    r = crear(client, headers, nombre="Yogur", unidad="kg")
     assert r.status_code == 201, r.text
-    print(f"  por kilo sí: '{r.json()['nombre']}' clave '{r.json()['clave']}' "
-          f"unidad {r.json()['unidad']}")
+
+    assert r.json()["unidad"] == "unidad"
+    assert r.json()["decimales"] == 0
+    assert r.json()["admite_ajustes"] is False
 
 
 def test_no_se_puede_cambiar_la_unidad_de_un_producto(client, catalogo):

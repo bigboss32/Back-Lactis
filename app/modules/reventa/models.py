@@ -7,6 +7,7 @@ de la quesera: contabilidad/estado de resultados no leen estas tablas.
 import uuid
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
@@ -46,19 +47,18 @@ UNIDAD_KILO = "kg"
 UNIDAD_BARRA = "barra"
 
 
-def unidad_de(tipo: str | None) -> str:
-    """La unidad en la que se mide un tipo de producto.
-
-    UNA SOLA FUENTE DE VERDAD, y por eso NO hay columna `unidad` en ninguna tabla:
-    la unidad se DEDUCE del tipo. Guardarla aparte sería un segundo nombre para un
-    hecho que ya está en la fila, y el día que las dos se contradigan (una fila con
-    tipo 'mozzarella' y unidad 'kg') no habría manera de saber cuál creer. Es la
-    misma razón por la que `Temporada.abierta` se deduce de `fecha_fin`.
-
-    Lo que NO se deduce es la CANTIDAD: los kilos viven en las columnas de kilos y
-    las barras en las columnas de barras, siempre. Ver los CHECK de cada tabla.
+def unidad_de(fila: Any) -> str:
+    """La unidad en la que se mide esta fila.
+    A partir de Lote 2, se deduce de qué columna tiene datos en vez del nombre del tipo.
     """
-    return UNIDAD_BARRA if tipo == TIPO_MOZZARELLA else UNIDAD_KILO
+    if getattr(fila, "tipo", "") == "mozzarella":
+        return UNIDAD_BARRA
+    if getattr(fila, "kilos", 0) > 0 or getattr(fila, "kilos_brutos", 0) > 0:
+        return UNIDAD_KILO
+    if getattr(fila, "barras", 0) > 0:
+        return UNIDAD_UNIDAD
+    # Fallback
+    return UNIDAD_KILO
 
 
 # ---------------------------------------------------- el catálogo de productos
@@ -329,28 +329,6 @@ class DocumentoReventa(TenantMixin, AuditMixin, Base):
 
 class CompraQueso(TenantMixin, AuditMixin, Base):
     __tablename__ = "compras_queso"
-    __table_args__ = (
-        # POR QUÉ ESTE CHECK ES LA PIEZA CENTRAL DE LA MOZZARELLA.
-        #
-        # La regla que no se puede romper es que los kilos y las barras NUNCA se
-        # sumen en una misma cifra. La forma de garantizarlo no es acordarse de
-        # filtrar por tipo en cada consulta —cualquier `sum()` que se olvide del
-        # filtro rompe la regla en silencio— sino que las barras vivan en OTRA
-        # columna y que esa columna esté en cero en las filas de kilos y al
-        # contrario. Así `sum(kilos_netos)` no puede recoger barras ni por
-        # descuido: no hay barras que recoger en esa columna.
-        #
-        # Con este CHECK la garantía la da la base de datos y no la disciplina de
-        # quien escriba la próxima consulta. Es el mismo criterio del CHECK de
-        # adjuntos_reventa: lo que tiene que ser verdad siempre, se exige en la
-        # tabla.
-        CheckConstraint(
-            "(tipo <> 'mozzarella' AND barras = 0 AND precio_barra = 0) "
-            "OR (tipo = 'mozzarella' AND kilos_brutos = 0 AND kilos_netos = 0 "
-            "AND merma_kilos = 0 AND borona_kilos = 0 AND precio_kilo = 0)",
-            name="ck_compras_queso_cantidad_en_su_unidad",
-        ),
-    )
 
     fecha: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     productor: Mapped[str] = mapped_column(String(150), nullable=False)
@@ -439,10 +417,10 @@ class CompraQueso(TenantMixin, AuditMixin, Base):
 
     @property
     def unidad(self) -> str:
-        """En qué se mide esta compra: 'kg' o 'barra'. Se deduce del tipo (ver
+        """En qué se mide esta compra: 'kg' o 'unidad'. Se deduce de las columnas (ver
         `unidad_de`). Viaja en la respuesta para que la pantalla ponga el rótulo
         correcto sin tener que conocer la regla."""
-        return unidad_de(self.tipo)
+        return unidad_de(self)
 
     @property
     def adjuntos_count(self) -> int:
@@ -473,23 +451,6 @@ TIPO_VENTA_MOZZARELLA = TIPO_MOZZARELLA
 
 class VentaQueso(TenantMixin, AuditMixin, Base):
     __tablename__ = "ventas_queso"
-    __table_args__ = (
-        # El mismo CHECK que en las compras y por la misma razón: las barras van
-        # en sus columnas y los kilos en las suyas, para que ningún `sum()` de
-        # kilos pueda recoger barras. Ver el comentario largo en CompraQueso.
-        #
-        # Se escribe con `tipo <> 'mozzarella'` y no enumerando queso y borona a
-        # propósito: si una fila vieja trajera el tipo en blanco (caso que el
-        # resumen ya contempla), sigue siendo una venta en kilos y no una fila
-        # que la base rechace al migrar.
-        CheckConstraint(
-            "(tipo <> 'mozzarella' AND barras = 0 AND precio_barra = 0 "
-            "AND gasto_por_barra = 0) "
-            "OR (tipo = 'mozzarella' AND kilos = 0 AND precio_kilo = 0 "
-            "AND gasto_por_kilo = 0)",
-            name="ck_ventas_queso_cantidad_en_su_unidad",
-        ),
-    )
 
     fecha: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     cliente: Mapped[str] = mapped_column(String(150), nullable=False)
@@ -567,8 +528,8 @@ class VentaQueso(TenantMixin, AuditMixin, Base):
 
     @property
     def unidad(self) -> str:
-        """'kg' para queso y borona, 'barra' para mozzarella (ver `unidad_de`)."""
-        return unidad_de(self.tipo)
+        """'kg' o 'unidad' (ver `unidad_de`)."""
+        return unidad_de(self)
 
     @property
     def adjuntos_count(self) -> int:

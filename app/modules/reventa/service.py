@@ -455,16 +455,6 @@ class ProductoReventaService(BaseService[ProductoReventa]):
     repository_cls = ProductoReventaRepository
     modulo = "reventa"
 
-    # El mensaje del rechazo, en un solo sitio, porque lo lee el dueño y lo exige una
-    # prueba: si vive en dos lados, un día dicen cosas distintas.
-    MENSAJE_SOLO_KILOS = (
-        "Por ahora solo se pueden agregar productos que se manejen POR KILO. "
-        "Uno que se cuente por unidad (como la mozzarella, que se compra y se vende "
-        "por barra) necesita primero que las compras y las ventas dejen de guardar "
-        "las unidades en columnas aparte de los kilos, y eso va en la siguiente "
-        "entrega. La mozzarella que ya existe sigue funcionando igual."
-    )
-
     # ---------------------------------------------------------------- deducir
     def _nombre_y_clave(self, data: dict[str, Any]) -> None:
         """Normaliza el nombre y le calcula la clave. Idempotente a propósito: se
@@ -482,8 +472,6 @@ class ProductoReventaService(BaseService[ProductoReventa]):
 
     def _unidad_y_derivados(self, data: dict[str, Any]) -> None:
         unidad = data.get("unidad") or UNIDAD_KILO
-        if unidad != UNIDAD_KILO:
-            raise BusinessError(self.MENSAJE_SOLO_KILOS)
         data["unidad"] = unidad
         # La deducción vive en el modelo, al lado del CHECK que la exige, porque la
         # comparte con la siembra de cada despliegue (ver `derivados_de_unidad`).
@@ -836,8 +824,25 @@ class CompraQuesoService(BaseService[CompraQueso]):
         CHECK de la tabla).
         """
         datos: list[dict[str, Any]] = []
+        
+        # Validar la unidad contra el catálogo de productos_reventa
+        from sqlalchemy import select
+        from app.modules.reventa.models import ProductoReventa
+        claves = {r.tipo if hasattr(r, "tipo") and r.tipo else (r.get("tipo") if isinstance(r, dict) and r.get("tipo") else TIPO_QUESO) for r in renglones}
+        productos = {p.clave: p.unidad for p in self.db.execute(select(ProductoReventa).where(ProductoReventa.clave.in_(claves))).scalars()}
+        
         for orden, renglon in enumerate(renglones):
             data = _campos_del_renglon(renglon, RenglonCompraCreate)
+            tipo = data.get("tipo") or TIPO_QUESO
+            data["tipo"] = tipo
+            unidad = productos.get(tipo, "kg") # Fallback a kg
+            
+            # Revalidar que los campos enviados coincidan con la unidad del catálogo
+            if unidad == "unidad" and (data.get("kilos_brutos") or data.get("precio_kilo")):
+                raise BusinessError(f"Una compra de {tipo} necesita las barras y el precio por barra, no kilos.")
+            if unidad == "kg" and (data.get("barras") or data.get("precio_barra")):
+                raise BusinessError(f"Una compra de {tipo} necesita los kilos y el precio por kilo, no barras.")
+
             data = self._calcular(data)
             data["orden"] = orden
             data["estado"] = ESTADO_PENDIENTE
@@ -1284,11 +1289,26 @@ class VentaQuesoService(BaseService[VentaQueso]):
     def preparar_renglones(self, renglones: list[Any]) -> list[dict[str, Any]]:
         """La plata de cada renglón de venta, SIN escribir ni consultar nada."""
         datos: list[dict[str, Any]] = []
+        
+        # Validar la unidad contra el catálogo de productos_reventa
+        from sqlalchemy import select
+        from app.modules.reventa.models import ProductoReventa
+        claves = {r.tipo if hasattr(r, "tipo") and r.tipo else (r.get("tipo") if isinstance(r, dict) and r.get("tipo") else TIPO_VENTA_QUESO) for r in renglones}
+        productos = {p.clave: p.unidad for p in self.db.execute(select(ProductoReventa).where(ProductoReventa.clave.in_(claves))).scalars()}
+
         for orden, renglon in enumerate(renglones):
             data = _campos_del_renglon(renglon, RenglonVentaCreate)
             tipo = data.get("tipo") or TIPO_VENTA_QUESO
             data["tipo"] = tipo
-            if tipo == TIPO_VENTA_MOZZARELLA:
+            unidad = productos.get(tipo, "kg") # Fallback a kg
+            
+            # Revalidar que los campos enviados coincidan con la unidad del catálogo
+            if unidad == "unidad" and (data.get("kilos") or data.get("precio_kilo")):
+                raise BusinessError(f"Una venta de {tipo} necesita las barras y el precio por barra, no kilos.")
+            if unidad == "kg" and (data.get("barras") or data.get("precio_barra")):
+                raise BusinessError(f"Una venta de {tipo} necesita los kilos y el precio por kilo, no barras.")
+
+            if unidad == "unidad":
                 barras = Decimal(data.get("barras") or CERO)
                 data["valor_total"] = (
                     barras * Decimal(data.get("precio_barra") or CERO)
@@ -3274,7 +3294,7 @@ class ReventaResumenService:
                     fecha=venta.fecha,
                     tipo=tipo,
                     producto=NOMBRE_PRODUCTO.get(tipo, tipo.capitalize()),
-                    unidad=unidad_de(tipo),
+                    unidad=unidad_de(venta),
                     kilos=kilos,
                     precio_kilo=Decimal(venta.precio_kilo),
                     barras=barras,
@@ -3525,7 +3545,7 @@ class ReventaResumenService:
                 EstadoCuentaCompra(
                     fecha=compra.fecha,
                     tipo=tipo,
-                    unidad=unidad_de(tipo),
+                    unidad=unidad_de(compra),
                     kilos=kilos,
                     borona_kilos=Decimal(compra.borona_kilos or CERO),
                     precio_kilo=Decimal(compra.precio_kilo),

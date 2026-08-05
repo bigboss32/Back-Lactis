@@ -12,7 +12,7 @@ from app.core.security import hash_password
 from app.main import app as fastapi_app
 from app.modules.empresas.models import Empresa
 from app.modules.usuarios.models import Usuario
-from app.seeds.seed import seed_permisos, seed_roles
+from app.seeds.seed import ensure_catalogos_empresas, seed_permisos, seed_roles
 
 engine = create_engine(
     "sqlite://",
@@ -61,6 +61,9 @@ def base_datos(db_session):
     empresa_a = Empresa(nombre="Quesera A", nit="900A")
     empresa_b = Empresa(nombre="Quesera B", nit="900B")
     db_session.add_all([empresa_a, empresa_b])
+    db_session.flush()
+
+    ensure_catalogos_empresas(db_session)
     db_session.flush()
 
     def crear_usuario(username, empresa_id, rol):

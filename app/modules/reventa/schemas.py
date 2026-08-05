@@ -150,12 +150,12 @@ class RenglonCompraCreate(BaseSchema):
     informar, y una de queso no tiene barras.
     """
 
-    tipo: Literal["queso", "mozzarella"] = "queso"
-    # --- si tipo = queso (se pesa)
+    tipo: str = "queso"
+    # --- si se pesa
     kilos_brutos: Kilos | None = Field(default=None, gt=0)
     borona_kilos: Kilos = Field(default=Decimal("0"), ge=0)
     precio_kilo: Decimal | None = Field(default=None, gt=0)
-    # --- si tipo = mozzarella (se cuenta)
+    # --- si se cuenta
     barras: Barras | None = Field(default=None, gt=0)
     precio_barra: Decimal | None = Field(default=None, gt=0)
     observaciones: str | None = None
@@ -164,25 +164,22 @@ class RenglonCompraCreate(BaseSchema):
     def _exigir_campos_de_la_unidad(self) -> "RenglonCompraCreate":
         """Exige la cantidad y el precio de LA UNIDAD DEL TIPO, y deja la otra en
         cero. No es solo una validación de formulario: es lo que hace que la fila
-        cumpla el CHECK de la tabla (barras en cero en las compras de kilos y al
-        contrario), o sea que las barras no puedan colarse en un total de kilos.
+        cumpla que las barras no puedan colarse en un total de kilos.
         """
-        if self.tipo == "mozzarella":
-            if not self.barras or not self.precio_barra:
-                raise ValueError(
-                    "Una compra de mozzarella necesita las barras y el precio por barra"
-                )
-            # La mozzarella no trae borona: la borona sale de desmenuzar queso.
+        tiene_barras = getattr(self, "barras", 0) and getattr(self, "barras", 0) > 0 and getattr(self, "precio_barra", 0) and getattr(self, "precio_barra", 0) > 0
+        tiene_kilos = getattr(self, "kilos_brutos", 0) and getattr(self, "kilos_brutos", 0) > 0 and getattr(self, "precio_kilo", 0) and getattr(self, "precio_kilo", 0) > 0
+
+        if tiene_barras and not tiene_kilos:
             self.kilos_brutos = CERO
             self.precio_kilo = CERO
             self.borona_kilos = CERO
-        else:
-            if not self.kilos_brutos or not self.precio_kilo:
-                raise ValueError(
-                    "Una compra de queso necesita los kilos y el precio por kilo"
-                )
+        elif tiene_kilos and not tiene_barras:
             self.barras = CERO
             self.precio_barra = CERO
+        elif tiene_barras and tiene_kilos:
+            raise ValueError("No se pueden mandar kilos y barras en el mismo renglón")
+        else:
+            raise ValueError("El renglón debe tener kilos y precio_kilo, o barras y precio_barra")
         return self
 
 
@@ -229,8 +226,8 @@ class CompraQuesoRead(TenantRead):
     # derrama el abono). En nulo: una compra de las de antes, sin cabecera.
     documento_id: uuid.UUID | None = None
     orden: int = 0
-    tipo: str  # 'queso' (kg) | 'mozzarella' (barras)
-    # En qué se mide: 'kg' o 'barra'. Se deduce del tipo (ver models.unidad_de) y
+    tipo: str
+    # En qué se mide: 'kg' o 'unidad'. Se deduce del tipo (ver models.unidad_de) y
     # viaja aquí para que la pantalla ponga el rótulo correcto sin repetir la regla.
     unidad: str
     kilos_brutos: Decimal
@@ -262,12 +259,12 @@ class RenglonVentaCreate(BaseSchema):
     implementación de "qué necesita un renglón de venta".
     """
 
-    tipo: Literal["queso", "borona", "mozzarella"] = "queso"
-    # --- si tipo = queso o borona (se pesa)
+    tipo: str = "queso"
+    # --- si se pesa
     kilos: Kilos | None = Field(default=None, gt=0)
     precio_kilo: Decimal | None = Field(default=None, gt=0)
     gasto_por_kilo: Decimal = Field(default=Decimal("0"), ge=0)
-    # --- si tipo = mozzarella (se cuenta)
+    # --- si se cuenta
     barras: Barras | None = Field(default=None, gt=0)
     precio_barra: Decimal | None = Field(default=None, gt=0)
     gasto_por_barra: Decimal = Field(default=Decimal("0"), ge=0)
@@ -277,21 +274,22 @@ class RenglonVentaCreate(BaseSchema):
     @model_validator(mode="after")
     def _exigir_campos_de_la_unidad(self) -> "RenglonVentaCreate":
         """Igual que en la compra: la cantidad y el precio de la unidad del tipo,
-        y la otra unidad en cero para que la fila cumpla el CHECK de la tabla."""
-        if self.tipo == "mozzarella":
-            if not self.barras or not self.precio_barra:
-                raise ValueError(
-                    "Una venta de mozzarella necesita las barras y el precio por barra"
-                )
+        y la otra unidad en cero para que la fila cumpla la regla."""
+        tiene_barras = getattr(self, "barras", 0) and getattr(self, "barras", 0) > 0 and getattr(self, "precio_barra", 0) and getattr(self, "precio_barra", 0) > 0
+        tiene_kilos = getattr(self, "kilos", 0) and getattr(self, "kilos", 0) > 0 and getattr(self, "precio_kilo", 0) and getattr(self, "precio_kilo", 0) > 0
+
+        if tiene_barras and not tiene_kilos:
             self.kilos = CERO
             self.precio_kilo = CERO
             self.gasto_por_kilo = CERO
-        else:
-            if not self.kilos or not self.precio_kilo:
-                raise ValueError("Una venta en kilos necesita los kilos y el precio por kilo")
+        elif tiene_kilos and not tiene_barras:
             self.barras = CERO
             self.precio_barra = CERO
             self.gasto_por_barra = CERO
+        elif tiene_barras and tiene_kilos:
+            raise ValueError("No se pueden mandar kilos y barras en el mismo renglón")
+        else:
+            raise ValueError("El renglón debe tener kilos y precio_kilo, o barras y precio_barra")
         return self
 
 
@@ -331,7 +329,7 @@ class VentaQuesoRead(TenantRead):
     # Mismo criterio que en la compra: ver CompraQuesoRead.
     documento_id: uuid.UUID | None = None
     orden: int = 0
-    tipo: str  # 'queso' | 'borona' (kg) | 'mozzarella' (barras)
+    tipo: str
     unidad: str  # 'kg' | 'barra', deducida del tipo
     kilos: Decimal
     precio_kilo: Decimal
