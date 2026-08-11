@@ -2,7 +2,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import case, func, literal, select
+from sqlalchemy import and_, case, func, literal, not_, select
 
 from app.common.repository import BaseRepository
 from app.modules.reventa.models import (
@@ -25,30 +25,191 @@ from app.modules.reventa.models import (
 CERO = Decimal("0")
 
 
-def se_mide_en_unidades(columna_tipo):
-    """La fila se mide en unidades/barras (mozzarella, huevos, etc)."""
-    return func.coalesce(columna_tipo, "").in_(
-        select(ProductoReventa.clave).where(ProductoReventa.unidad == UNIDAD_UNIDAD)
-    )
-
-
-def se_mide_en_kilos(columna_tipo):
-    """La fila se mide en KILOS (queso o borona).
-
-    A partir de Lote 2, lee de productos_reventa. Todo lo viejo o
-    con tipo en blanco se asume como kilos.
-    """
-    return func.coalesce(columna_tipo, "").notin_(
-        select(ProductoReventa.clave).where(ProductoReventa.unidad == UNIDAD_UNIDAD)
-    )
-
-
 def clave_nombre(columna):
     """Clave para agrupar nombres escritos distinto: sin mayúsculas ni espacios
     de sobra. Así "Sebastián Ruiz", "sebastián ruiz" y " Sebastián Ruiz " son el
     mismo productor y no se parten los kilos ni el ranking.
+
+    Va aquí arriba porque además de agrupar, DESEMPATA: las llaves de orden de más
+    abajo comparan los nombres con esta misma clave, así que dos escrituras del
+    mismo señor no pueden quedar en dos puestos distintos del reparto.
     """
     return func.lower(func.trim(columna))
+
+
+def _claves_que_se_cuentan(empresa_id):
+    """Las claves del catálogo DE ESTA EMPRESA que se miden por unidades.
+
+    LOS DOS FILTROS SON LA REGLA DE LA CASA y aquí cada uno tapó un hueco real:
+
+    - `empresa_id`: sin él, esta subconsulta traía las claves de TODAS las
+      queseras. El dueño maneja dos en la misma instalación, y el UNIQUE del
+      catálogo es por (empresa_id, clave): las dos pueden tener su propia
+      'panela'. Si una la registraba POR UNIDAD y la otra POR KILO, los 100 kg de
+      la segunda quedaban clasificados como unidades EN SU PROPIO RESUMEN: sus
+      kilos desaparecían de "kilos comprados" y su plata salía rotulada como
+      mozzarella. Plata mal rotulada por lo que hizo el vecino.
+    - `deleted_at`: una fila borrada en suave sigue ocupando su clave (el UNIQUE
+      tampoco filtra borrados, ver `ProductoReventa`), así que un producto por
+      unidad que YA SE QUITÓ del catálogo de la otra quesera seguía decidiendo la
+      unidad de las filas de esta.
+
+    Un producto solo se puede quitar del catálogo si NO tiene movimientos (lo
+    exige `ProductoReventaService.validar_eliminar`), así que agregar el filtro de
+    borrados no puede reclasificar ninguna fila de plata de su propia empresa: no
+    existen filas que hablen de un producto borrado.
+    """
+    return select(ProductoReventa.clave).where(
+        ProductoReventa.empresa_id == empresa_id,
+        ProductoReventa.deleted_at.is_(None),
+        ProductoReventa.unidad == UNIDAD_UNIDAD,
+    )
+
+
+def se_mide_en_unidades(modelo, empresa_id):
+    """La fila se mide en UNIDADES: barras de mozzarella, huevos, panelas.
+
+    SON DOS CONDICIONES Y LAS DOS HACEN FALTA: que su producto esté en el catálogo
+    de esta empresa marcado por unidad, Y QUE LA FILA TRAIGA UNIDADES.
+
+    Lo segundo se agregó porque sin ello había plata que no cabía en ninguna
+    parte. Una fila con una clave "por unidad" pero con `barras = 0` y kilos > 0
+    —que se puede producir hoy editando una compra, porque el PUT no mira el
+    catálogo— quedaba clasificada como "de unidades": su plata se sumaba al total
+    de la mozzarella, pero como no había ni una barra, el desglose no imprimía las
+    filas de barras (su guardia es "si hubo barras") y esos pesos no aparecían en
+    NINGUNA fila. Encima "precio promedio por barra" salía en $0 con plata al lado,
+    que es la forma amable de decir "dividí entre cero".
+
+    Con esta condición, la unidad de una fila la decide LO QUE LA FILA TRAE, igual
+    que hace `unidad_de` para mostrarla en pantalla: si trae barras se cuenta, y si
+    no, se pesa. De ahí sale la garantía que necesita el desglose: toda la plata de
+    las barras viene acompañada de barras, así que el promedio por barra nunca
+    divide entre cero y las filas de barras siempre se imprimen cuando hay plata de
+    barras que mostrar.
+    """
+    return and_(
+        func.coalesce(modelo.tipo, "").in_(_claves_que_se_cuentan(empresa_id)),
+        modelo.barras > 0,
+    )
+
+
+def se_mide_en_kilos(modelo, empresa_id):
+    """La fila se mide en KILOS (queso, borona, o cualquier producto que se pese).
+
+    Es EXACTAMENTE el complemento de `se_mide_en_unidades`, escrito como tal y no
+    como una segunda condición parecida: así ninguna fila puede quedar en las dos
+    canastas ni fuera de las dos, y la suma de las dos partes es siempre la plata
+    completa del período. Todo lo viejo, lo que tenga el tipo en blanco y lo que
+    hable de un producto que no está en el catálogo cuenta como kilos, que es lo
+    que era antes de que existiera el catálogo.
+    """
+    return not_(se_mide_en_unidades(modelo, empresa_id))
+
+
+# ------------------------------------------------------------ el orden de los hechos
+def llave_cronologica_compra() -> tuple:
+    """El orden en que le entraron las compras al negocio. ES UNA LLAVE DE PLATA.
+
+    De este orden sale el reparto FIFO ("se vende primero lo que se compró
+    primero", ver `lotes.py`), y con él a QUIÉN se le consumen los kilos de una
+    venta, a quién se le carga el costo y cuánta ganancia le queda. Dos órdenes
+    distintos sobre los mismos datos son dos informes distintos, así que el orden
+    tiene que ser TOTAL (que no queden empates), REPRODUCIBLE (el mismo hoy y el
+    mes que viene) e IGUAL EN LOS DOS MOTORES (Postgres en producción, SQLite en
+    las pruebas).
+
+    Se lee así, y en este orden:
+
+    1. `fecha`: el día de la compra. Es LO ÚNICO que el dueño reconoce como el
+       orden del negocio, y es lo que define un lote.
+    2. `created_at`: la hora en que se registró. Cuando dos compras caen el mismo
+       día, la que se registró primero se consume primero: es el orden del cuaderno
+       y el orden en que él las ve listadas en el lote. Que esa hora sirva de
+       verdad para desempatar es el trabajo de `HoraDeRegistroMixin`, que la
+       escribe con microsegundos y estrictamente creciente en vez de dejársela al
+       reloj de la base (que en SQLite solo tiene segundos y en Postgres da la hora
+       de la transacción).
+    3. `orden`: el renglón dentro de la factura. Los renglones de una misma factura
+       pueden compartir la hora (se escriben juntos), y este es el orden en que el
+       dueño los escribió y en que ve caer sus abonos.
+    4. De aquí para abajo, EL DESEMPATE DE ÚLTIMO RECURSO, y hay que ser honesto
+       con lo que significa: para llegar hasta acá dos compras tienen que ser del
+       mismo día, de la misma hora al microsegundo y del mismo renglón. Hoy eso
+       solo pasa con filas cargadas de una migración o de una importación, que
+       quedan todas con el mismo instante. Ya no hay un orden de registro que
+       respetar —esa información no existe en los datos—, así que se escoge uno
+       fijo y explicable: primero el nombre del productor (que es lo que el dueño
+       lee en la pantalla y puede seguir con el dedo), y después la plata de la
+       fila. Lo que importa es que se incluyan TODAS las columnas que el reparto
+       lee: el `id` queda de último, y como es un UUID aleatorio, tiene que ser
+       imposible que decida algo. Y lo es: si dos filas empatan hasta la última
+       columna de negocio, son gemelas —mismo día, mismo productor, mismos kilos,
+       misma borona, mismo precio, misma plata, mismo abono— y consumir una o la
+       otra da EXACTAMENTE las mismas cifras en todos los informes.
+
+    (El único punto donde los dos motores podrían no coincidir es el orden de dos
+    NOMBRES con tildes, porque compararlos depende de la configuración regional de
+    la base. Para que eso decidiera algo tendrían que empatar la fecha, la hora al
+    microsegundo y el renglón, y aun así las cifras del lote y del período serían
+    las mismas: lo único que cambiaría es a cuál de los dos productores se le anota
+    primero.)
+    """
+    return (
+        CompraQueso.fecha,
+        CompraQueso.created_at,
+        CompraQueso.orden,
+        clave_nombre(CompraQueso.productor),
+        CompraQueso.kilos_netos,
+        CompraQueso.borona_kilos,
+        CompraQueso.precio_kilo,
+        CompraQueso.valor_total,
+        CompraQueso.abonado,
+        CompraQueso.id,
+    )
+
+
+def llave_cronologica_venta() -> tuple:
+    """El orden en que salieron las ventas. La hermana de
+    `llave_cronologica_compra`, con el mismo porqué escrito allá.
+
+    Las columnas del final son las que el reparto lee de una venta (cliente, tipo,
+    kilos, precio, plata y gasto): si dos ventas empatan en todas, son la misma
+    venta repetida y da igual cuál se procese primero.
+    """
+    return (
+        VentaQueso.fecha,
+        VentaQueso.created_at,
+        VentaQueso.orden,
+        clave_nombre(VentaQueso.cliente),
+        VentaQueso.tipo,
+        VentaQueso.kilos,
+        VentaQueso.precio_kilo,
+        VentaQueso.valor_total,
+        VentaQueso.gasto_monto,
+        VentaQueso.id,
+    )
+
+
+def llave_cronologica_ajuste() -> tuple:
+    """El orden de los ajustes (lo que se pasó a borona y lo que se perdió como
+    merma). Mismo porqué que en `llave_cronologica_compra`.
+
+    No tiene `orden` porque un ajuste no es renglón de ninguna factura. Cuando dos
+    ajustes del mismo día empatan en la hora, va primero el que pasa queso a
+    borona y después la merma ('borona' < 'merma' alfabéticamente, y así queda
+    dicho): en la bodega primero se separa lo que ya no se vende entero y lo que
+    falta al pesar el despacho es la merma. Después los kilos, y de último el `id`,
+    que solo puede decidir entre dos ajustes gemelos (mismo día, mismo destino,
+    mismos kilos), y esos dan las mismas cifras en cualquier orden.
+    """
+    return (
+        ConversionBorona.fecha,
+        ConversionBorona.created_at,
+        ConversionBorona.destino,
+        ConversionBorona.kilos,
+        ConversionBorona.id,
+    )
 
 
 def saldo_pendiente(valor_total, abonado):
@@ -105,7 +266,7 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                 CompraQueso.deleted_at.is_(None),
                 CompraQueso.estado != "anulada",
                 CompraQueso.fecha.between(desde, hasta),
-                se_mide_en_kilos(CompraQueso.tipo),
+                se_mide_en_kilos(CompraQueso, self.empresa_id),
             )
         ).one()
         return Decimal(fila[0]), Decimal(fila[1])
@@ -127,7 +288,7 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                 CompraQueso.deleted_at.is_(None),
                 CompraQueso.estado != "anulada",
                 CompraQueso.fecha.between(desde, hasta),
-                se_mide_en_unidades(CompraQueso.tipo),
+                se_mide_en_unidades(CompraQueso, self.empresa_id),
             )
         ).one()
         return Decimal(fila[0]), Decimal(fila[1])
@@ -196,14 +357,9 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                     CompraQueso.empresa_id == self.empresa_id,
                     CompraQueso.deleted_at.is_(None),
                     CompraQueso.estado != "anulada",
-                    se_mide_en_kilos(CompraQueso.tipo),
+                    se_mide_en_kilos(CompraQueso, self.empresa_id),
                 )
-                .order_by(
-                    CompraQueso.fecha,
-                    CompraQueso.created_at,
-                    CompraQueso.orden,
-                    CompraQueso.id,
-                )
+                .order_by(*llave_cronologica_compra())
             ).all()
         )
 
@@ -299,7 +455,7 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                 # forma de que una traiga productores que la otra no.
                 func.coalesce(
                     func.sum(CompraQueso.valor_total).filter(
-                        se_mide_en_unidades(CompraQueso.tipo)
+                        se_mide_en_unidades(CompraQueso, self.empresa_id)
                     ),
                     0,
                 ),
@@ -411,11 +567,15 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
             criterios.append(CompraQueso.fecha >= desde)
         if hasta:
             criterios.append(CompraQueso.fecha <= hasta)
+        # La MISMA llave de orden del reparto FIFO (ver `llave_cronologica_compra`),
+        # y no un `(fecha, created_at)` suelto como tenía: ese orden empataba entre
+        # dos compras del mismo día registradas juntas, y ahí la base devolvía las
+        # filas en el orden que quisiera. El estado de cuenta que se le imprime al
+        # productor cambiaba de orden entre una consulta y la siguiente sin que
+        # nada hubiera cambiado, y él lo compara contra el que ya recibió.
         return list(
             self.db.scalars(
-                select(CompraQueso)
-                .where(*criterios)
-                .order_by(CompraQueso.fecha, CompraQueso.created_at)
+                select(CompraQueso).where(*criterios).order_by(*llave_cronologica_compra())
             ).all()
         )
 
@@ -459,7 +619,7 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
             VentaQueso.deleted_at.is_(None),
             VentaQueso.estado != "anulada",
             VentaQueso.fecha.between(desde, hasta),
-            se_mide_en_kilos(VentaQueso.tipo),
+            se_mide_en_kilos(VentaQueso, self.empresa_id),
         ]
         if tipo:
             criterios.append(VentaQueso.tipo == tipo)
@@ -482,7 +642,7 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
                 VentaQueso.deleted_at.is_(None),
                 VentaQueso.estado != "anulada",
                 VentaQueso.fecha.between(desde, hasta),
-                se_mide_en_unidades(VentaQueso.tipo),
+                se_mide_en_unidades(VentaQueso, self.empresa_id),
             )
         ).one()
         return Decimal(fila[0]), Decimal(fila[1])
@@ -583,14 +743,9 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
                     VentaQueso.empresa_id == self.empresa_id,
                     VentaQueso.deleted_at.is_(None),
                     VentaQueso.estado != "anulada",
-                    se_mide_en_kilos(VentaQueso.tipo),
+                    se_mide_en_kilos(VentaQueso, self.empresa_id),
                 )
-                .order_by(
-                    VentaQueso.fecha,
-                    VentaQueso.created_at,
-                    VentaQueso.orden,
-                    VentaQueso.id,
-                )
+                .order_by(*llave_cronologica_venta())
             ).all()
         )
 
@@ -608,7 +763,7 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
             VentaQueso.deleted_at.is_(None),
             VentaQueso.estado != "anulada",
             VentaQueso.fecha.between(desde, hasta),
-            se_mide_en_kilos(VentaQueso.tipo),
+            se_mide_en_kilos(VentaQueso, self.empresa_id),
         ]
         if tipo:
             criterios.append(VentaQueso.tipo == tipo)
@@ -630,7 +785,7 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
                 VentaQueso.deleted_at.is_(None),
                 VentaQueso.estado != "anulada",
                 VentaQueso.fecha.between(desde, hasta),
-                se_mide_en_unidades(VentaQueso.tipo),
+                se_mide_en_unidades(VentaQueso, self.empresa_id),
             )
         )
         return Decimal(total or 0)
@@ -667,11 +822,12 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
             criterios.append(VentaQueso.fecha >= desde)
         if hasta:
             criterios.append(VentaQueso.fecha <= hasta)
+        # Mismo orden total que en `CompraQuesoRepository.del_productor`, y por lo
+        # mismo: el estado de cuenta del cliente no puede cambiar de orden entre
+        # dos consultas iguales.
         return list(
             self.db.scalars(
-                select(VentaQueso)
-                .where(*criterios)
-                .order_by(VentaQueso.fecha, VentaQueso.created_at)
+                select(VentaQueso).where(*criterios).order_by(*llave_cronologica_venta())
             ).all()
         )
 
@@ -738,6 +894,40 @@ class ProductoReventaRepository(BaseRepository[ProductoReventa]):
         if not incluir_borrados:
             stmt = stmt.where(ProductoReventa.deleted_at.is_(None))
         return self.db.execute(stmt).unique().scalars().first()
+
+    def unidades_por_clave(self, claves) -> dict[str, str]:
+        """{clave: unidad} de los productos VIVOS DE ESTA EMPRESA que se piden.
+
+        Es la contraparte de escritura de `se_mide_en_unidades`: la lectura decide
+        en qué unidad está una fila que ya está guardada, y esto decide si la fila
+        que va a entrar trae los campos de su unidad. Las dos preguntas tienen que
+        responderse con el MISMO conjunto de productos, y por eso las dos filtran
+        empresa y borrados.
+
+        Lo que había antes recorría los productos de TODAS las empresas y armaba el
+        diccionario con `{p.clave: p.unidad}`: dos claves iguales de queseras
+        distintas se pisaban, y cuál quedaba de última lo decidía el orden en que la
+        base devolviera las filas. La misma compra podía aceptarse o rechazarse en
+        dos intentos idénticos, y el mensaje de error hablaba de una unidad que en
+        el catálogo del dueño no existe.
+
+        Una clave que no está en el catálogo de esta empresa NO aparece en el
+        diccionario, y quien pregunta la trata como kilos. Eso es a propósito y es
+        lo mismo que hace la lectura (`se_mide_en_kilos` cuenta como kilos todo lo
+        que no reconoce), así que una fila no puede entrar validada como una unidad
+        y quedar leída como la otra.
+        """
+        claves = [c for c in claves if c]
+        if not claves:
+            return {}
+        filas = self.db.execute(
+            select(ProductoReventa.clave, ProductoReventa.unidad).where(
+                ProductoReventa.empresa_id == self.empresa_id,
+                ProductoReventa.deleted_at.is_(None),
+                ProductoReventa.clave.in_(claves),
+            )
+        ).all()
+        return {fila[0]: fila[1] for fila in filas}
 
     def siguiente_orden(self) -> int:
         """El puesto que le toca a un producto nuevo: al final de la lista.
@@ -1011,11 +1201,24 @@ class SaldoAnteriorRepository(BaseRepository[SaldoAnterior]):
             criterios.append(SaldoAnterior.fecha >= desde)
         if hasta:
             criterios.append(SaldoAnterior.fecha <= hasta)
+        # Orden TOTAL, igual que en las compras y las ventas: dos saldos del mismo
+        # día cargados en la misma sesión empataban en (fecha, created_at) y la base
+        # los devolvía en cualquier orden. Aquí el desempate no necesita columnas de
+        # negocio —el saldo del estado de cuenta es una SUMA y no depende del orden
+        # de las filas—: basta con que el orden sea siempre el mismo, y para eso el
+        # `id` alcanza. El concepto va antes que él para que lo que el tercero lee
+        # quede en un orden que significa algo y no en el del UUID.
         return list(
             self.db.scalars(
                 select(SaldoAnterior)
                 .where(*criterios)
-                .order_by(SaldoAnterior.fecha, SaldoAnterior.created_at)
+                .order_by(
+                    SaldoAnterior.fecha,
+                    SaldoAnterior.created_at,
+                    clave_nombre(SaldoAnterior.concepto),
+                    SaldoAnterior.valor_total,
+                    SaldoAnterior.id,
+                )
             ).all()
         )
 
@@ -1096,7 +1299,7 @@ class ConversionBoronaRepository(BaseRepository[ConversionBorona]):
                     ConversionBorona.deleted_at.is_(None),
                     ConversionBorona.estado == "activo",
                 )
-                .order_by(ConversionBorona.fecha, ConversionBorona.created_at, ConversionBorona.id)
+                .order_by(*llave_cronologica_ajuste())
             ).all()
         )
 

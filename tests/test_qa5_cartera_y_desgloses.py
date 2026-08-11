@@ -104,6 +104,25 @@ def test_2_venta_sobrepagada_no_rebaja_la_cartera(client, base_datos):
     """Rebajarle el precio a una venta ya pagada sigue permitido (deja saldo a
     favor del cliente), pero lo que un cliente pagó de MÁS no reduce lo que
     deben los otros: los agregados suman el saldo de cada fila acotado en cero.
+
+    LA EXPECTATIVA DE LA FILA CAMBIÓ, Y LA NUEVA ES LA CORRECTA. Esta prueba
+    exigía `saldo == -550.000` en la venta editada, de cuando el `saldo` del
+    modelo era la resta cruda `valor_total - abonado`. Hoy son DOS hechos con dos
+    nombres: `saldo` es lo que FALTA COBRAR y se acota en cero, y `saldo_a_favor`
+    es lo que el cliente pagó de más. Se exige lo nuevo por tres razones:
+
+    - Un "saldo de -$550.000" no significa nada para el dueño; lo que él necesita
+      leer es "de esta venta no falta cobrar nada y hay $550.000 a favor del
+      cliente", que es justo lo que dicen los dos campos.
+    - La fila y los agregados cuentan ahora con EL MISMO criterio (ver
+      `saldo_pendiente` en el repositorio, que acota fila por fila antes de sumar).
+      Mientras la fila mostrara el negativo crudo y la tarjeta lo acotara, la
+      columna del detalle no sumaba la tarjeta y él lo notaba con la calculadora:
+      esa contradicción es lo que se cerró.
+    - El saldo a favor NO SE ESCONDE, que es lo único que habría que defenderle a
+      la expectativa vieja: sigue completo en su propio campo aquí y con su signo
+      en el estado de cuenta del cliente, y las dos cosas se exigen más abajo en
+      esta misma prueba.
     """
     h = auth_headers(client, "admin.a")
     compra(client, h, fecha="2026-07-01", productor="Sebastián Ruiz",
@@ -119,8 +138,12 @@ def test_2_venta_sobrepagada_no_rebaja_la_cartera(client, base_datos):
     editada = r.json()
     print("\n--- 2. venta pagada de contado y rebajada ---")
     print(f"    total={editada['valor_total']} abonado={editada['abonado']} "
-          f"saldo={editada['saldo']}")
-    assert D(editada["saldo"]) == D("-550000")
+          f"saldo={editada['saldo']} saldo_a_favor={editada['saldo_a_favor']}")
+    # De esta venta no falta cobrar nada...
+    assert D(editada["saldo"]) == 0
+    # ...y los $550.000 que pagó de más están dichos, no perdidos
+    assert D(editada["saldo_a_favor"]) == D("550000")
+    assert D(editada["abonado"]) - D(editada["valor_total"]) == D("550000")
 
     datos = resumen(client, h)
     print(f"    suma cruda de saldos (lo que daba antes) = "

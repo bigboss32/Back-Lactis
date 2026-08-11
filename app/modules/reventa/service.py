@@ -37,6 +37,7 @@ from app.modules.reventa.models import (
     TIPO_DOC_COMPRA,
     TIPO_DOC_VENTA,
     TIPO_MOZZARELLA,
+    TIPO_QUESO,
     TIPO_SALDO_COBRAR,
     TIPO_SALDO_PAGAR,
     TIPO_VENTA_BORONA,
@@ -44,6 +45,7 @@ from app.modules.reventa.models import (
     TIPO_VENTA_QUESO,
     UNIDAD_BARRA,
     UNIDAD_KILO,
+    UNIDAD_UNIDAD,
     AbonoCompraQueso,
     AbonoSaldoAnterior,
     AbonoVentaQueso,
@@ -133,6 +135,10 @@ ETIQUETAS_PRODUCTO = {
     # es neutro a propósito: afirmar una venta sería la misma mentira que se
     # arregló con la merma.
     "anterior": "Salió de inventario anterior",
+    # La fila de la red de seguridad (ver `_cuadrar_desglose`). El texto no acusa a
+    # nadie ni inventa una explicación: dice qué es —plata que no quedó en ninguna
+    # de las filas de arriba— y deja al dueño con algo que preguntar.
+    "sin_producto": "Sin producto (plata sin clasificar)",
     # Los dos de la mozzarella dicen BARRAS en la etiqueta misma, no solo en la
     # unidad: el dueño lee el renglón de un vistazo y tiene que ver ahí que esa
     # cantidad no son kilos, sin tener que cruzarla con otra columna.
@@ -149,6 +155,7 @@ NOTAS_PRODUCTO = {
     "mozzarella": "se compra y se vende por barra completa",
     "mozzarella_pendiente": "barras compradas y todavía sin vender",
     "mozzarella_anterior": "barras compradas en un período anterior",
+    "sin_producto": "revise el producto de esos movimientos: no quedó en ninguna unidad",
 }
 # Los renglones que se miden en BARRAS. Se listan en un solo sitio para que
 # ninguna parte del código tenga que acordarse de la regla por su cuenta.
@@ -315,6 +322,24 @@ def _campos_del_renglon(renglon: Any, esquema: type) -> dict[str, Any]:
     if isinstance(renglon, dict):
         return {k: v for k, v in renglon.items() if k in campos}
     return renglon.model_dump(include=campos)
+
+
+def _tipos_de_los_renglones(renglones: list[Any], esquema: type, por_defecto: str) -> set[str]:
+    """Las claves de producto que trae una factura, para preguntarle al catálogo
+    por sus unidades DE UN SOLO VIAJE (una consulta por factura, no una por
+    renglón).
+
+    Lee cada renglón con el MISMO `_campos_del_renglon` con el que después se le
+    calcula la plata, y no hurgando el objeto con `hasattr`/`get` por su cuenta: así
+    es imposible que el tipo se lea de una forma para validar la unidad y de otra
+    para guardar la fila. Al renglón que llega sin tipo se le pone el de
+    `por_defecto`, que es exactamente el que el ciclo de abajo le va a guardar.
+    """
+    tipos: set[str] = set()
+    for renglon in renglones:
+        data = _campos_del_renglon(renglon, esquema)
+        tipos.add(data.get("tipo") or por_defecto)
+    return tipos
 
 
 def _borrar_cabecera_vacia(servicio: Any, documento_id: uuid.UUID | None) -> None:
@@ -732,6 +757,14 @@ class CompraQuesoService(BaseService[CompraQueso]):
     repository_cls = CompraQuesoRepository
     modulo = "reventa"
 
+    @property
+    def productos(self) -> ProductoReventaRepository:
+        """El catálogo DE ESTA EMPRESA. Se arma con `self.ctx.empresa_id` y por eso
+        ninguna consulta suya puede ver los productos de la otra quesera: es la
+        única puerta por la que el módulo pregunta en qué unidad está un producto.
+        """
+        return ProductoReventaRepository(self.db, self.ctx.empresa_id)
+
     @staticmethod
     def _calcular(data: dict[str, Any], actual: CompraQueso | None = None) -> dict[str, Any]:
         """Deja la fila con la cantidad y el precio de SU unidad, y la otra unidad
@@ -817,31 +850,40 @@ class CompraQuesoService(BaseService[CompraQueso]):
     # entonces se escribe. Si estuvieran juntas, un documento de tres renglones
     # podría dejar el primero escrito y reventar en el tercero.
     def preparar_renglones(self, renglones: list[Any]) -> list[dict[str, Any]]:
-        """La plata de cada renglón, SIN escribir nada y SIN consultar nada.
+        """La plata de cada renglón, SIN escribir nada.
 
         Cada renglón pasa por el mismo `_calcular` de siempre, que es el que deja
         la cantidad en la columna de SU unidad y la otra en cero (lo que exige el
         CHECK de la tabla).
+
+        LA UNIDAD SE VALIDA CONTRA EL CATÁLOGO DE ESTA EMPRESA (ver
+        `ProductoReventaRepository.unidades_por_clave`, donde está el porqué largo
+        de los dos filtros). Antes se recorrían los productos de TODAS las queseras
+        y dos claves iguales se pisaban entre sí, así que la unidad de la compra la
+        podía estar poniendo el catálogo del vecino.
         """
         datos: list[dict[str, Any]] = []
-        
-        # Validar la unidad contra el catálogo de productos_reventa
-        from sqlalchemy import select
-        from app.modules.reventa.models import ProductoReventa
-        claves = {r.tipo if hasattr(r, "tipo") and r.tipo else (r.get("tipo") if isinstance(r, dict) and r.get("tipo") else TIPO_QUESO) for r in renglones}
-        productos = {p.clave: p.unidad for p in self.db.execute(select(ProductoReventa).where(ProductoReventa.clave.in_(claves))).scalars()}
-        
+        unidades = self.productos.unidades_por_clave(
+            _tipos_de_los_renglones(renglones, RenglonCompraCreate, TIPO_QUESO)
+        )
+
         for orden, renglon in enumerate(renglones):
             data = _campos_del_renglon(renglon, RenglonCompraCreate)
             tipo = data.get("tipo") or TIPO_QUESO
             data["tipo"] = tipo
-            unidad = productos.get(tipo, "kg") # Fallback a kg
-            
+            # Lo que no está en el catálogo de esta empresa se pesa, que es como lo
+            # lee el resumen (ver `se_mide_en_kilos`).
+            unidad = unidades.get(tipo, UNIDAD_KILO)
+
             # Revalidar que los campos enviados coincidan con la unidad del catálogo
-            if unidad == "unidad" and (data.get("kilos_brutos") or data.get("precio_kilo")):
-                raise BusinessError(f"Una compra de {tipo} necesita las barras y el precio por barra, no kilos.")
-            if unidad == "kg" and (data.get("barras") or data.get("precio_barra")):
-                raise BusinessError(f"Una compra de {tipo} necesita los kilos y el precio por kilo, no barras.")
+            if unidad == UNIDAD_UNIDAD and (data.get("kilos_brutos") or data.get("precio_kilo")):
+                raise BusinessError(
+                    f"Una compra de {tipo} necesita las barras y el precio por barra, no kilos."
+                )
+            if unidad == UNIDAD_KILO and (data.get("barras") or data.get("precio_barra")):
+                raise BusinessError(
+                    f"Una compra de {tipo} necesita los kilos y el precio por kilo, no barras."
+                )
 
             data = self._calcular(data)
             data["orden"] = orden
@@ -1127,6 +1169,12 @@ class VentaQuesoService(BaseService[VentaQueso]):
     repository_cls = VentaQuesoRepository
     modulo = "reventa"
 
+    @property
+    def productos(self) -> ProductoReventaRepository:
+        """El catálogo DE ESTA EMPRESA (mismo porqué que en
+        `CompraQuesoService.productos`)."""
+        return ProductoReventaRepository(self.db, self.ctx.empresa_id)
+
     def _nombres_para_canonizar(self) -> list[str]:
         """Contra qué lista se canoniza el nombre del cliente: los que ya usan
         las ventas MÁS los terceros del libro anterior de tipo 'cobrar'.
@@ -1287,28 +1335,35 @@ class VentaQuesoService(BaseService[VentaQueso]):
     # Mismas tres piezas que en las compras y por las mismas razones: calcular
     # todo, validar el conjunto completo, y solo entonces escribir.
     def preparar_renglones(self, renglones: list[Any]) -> list[dict[str, Any]]:
-        """La plata de cada renglón de venta, SIN escribir ni consultar nada."""
+        """La plata de cada renglón de venta, SIN escribir nada.
+
+        La unidad se valida contra el catálogo DE ESTA EMPRESA, igual que en las
+        compras y por lo mismo (ver `CompraQuesoService.preparar_renglones`). Aquí
+        pesa todavía más: la unidad no solo valida, también decide CÓMO se calcula
+        la plata del renglón (barras × precio por barra, o kilos × precio por kilo).
+        """
         datos: list[dict[str, Any]] = []
-        
-        # Validar la unidad contra el catálogo de productos_reventa
-        from sqlalchemy import select
-        from app.modules.reventa.models import ProductoReventa
-        claves = {r.tipo if hasattr(r, "tipo") and r.tipo else (r.get("tipo") if isinstance(r, dict) and r.get("tipo") else TIPO_VENTA_QUESO) for r in renglones}
-        productos = {p.clave: p.unidad for p in self.db.execute(select(ProductoReventa).where(ProductoReventa.clave.in_(claves))).scalars()}
+        unidades = self.productos.unidades_por_clave(
+            _tipos_de_los_renglones(renglones, RenglonVentaCreate, TIPO_VENTA_QUESO)
+        )
 
         for orden, renglon in enumerate(renglones):
             data = _campos_del_renglon(renglon, RenglonVentaCreate)
             tipo = data.get("tipo") or TIPO_VENTA_QUESO
             data["tipo"] = tipo
-            unidad = productos.get(tipo, "kg") # Fallback a kg
-            
-            # Revalidar que los campos enviados coincidan con la unidad del catálogo
-            if unidad == "unidad" and (data.get("kilos") or data.get("precio_kilo")):
-                raise BusinessError(f"Una venta de {tipo} necesita las barras y el precio por barra, no kilos.")
-            if unidad == "kg" and (data.get("barras") or data.get("precio_barra")):
-                raise BusinessError(f"Una venta de {tipo} necesita los kilos y el precio por kilo, no barras.")
+            unidad = unidades.get(tipo, UNIDAD_KILO)
 
-            if unidad == "unidad":
+            # Revalidar que los campos enviados coincidan con la unidad del catálogo
+            if unidad == UNIDAD_UNIDAD and (data.get("kilos") or data.get("precio_kilo")):
+                raise BusinessError(
+                    f"Una venta de {tipo} necesita las barras y el precio por barra, no kilos."
+                )
+            if unidad == UNIDAD_KILO and (data.get("barras") or data.get("precio_barra")):
+                raise BusinessError(
+                    f"Una venta de {tipo} necesita los kilos y el precio por kilo, no barras."
+                )
+
+            if unidad == UNIDAD_UNIDAD:
                 barras = Decimal(data.get("barras") or CERO)
                 data["valor_total"] = (
                     barras * Decimal(data.get("precio_barra") or CERO)
@@ -2741,6 +2796,15 @@ class ReventaResumenService:
         # Solo si hubo movimiento de barras en el período. Sin esta guarda, todos
         # los períodos del cliente —que hoy son de puro queso— estrenarían dos
         # filas en ceros que solo estorban en una pantalla que ya está apretada.
+        #
+        # ESTA GUARDA FUE LA QUE SE TRAGÓ $200.000 una vez: había plata de barras
+        # sin barras que la acompañaran, así que estas dos filas no se imprimían y
+        # esos pesos no quedaban en ninguna. Hoy no puede volver a pasar porque la
+        # clasificación cuenta como plata de barras solo la de las filas que TRAEN
+        # barras (ver `se_mide_en_unidades`): si `compras_mozzarella` trae un peso,
+        # `barras_compradas` trae por lo menos una barra y la guarda abre. Y si
+        # alguna vez volviera a no cumplirse, `_cuadrar_desglose` saca esa plata en
+        # su propia fila en vez de perderla.
         if barras_compradas or barras_vendidas:
             costo_barra = (
                 (compras_mozzarella / barras_compradas).quantize(DOS_DECIMALES)
@@ -2782,6 +2846,53 @@ class ReventaResumenService:
                     barras_vendidas=CERO,
                 )
             )
+        return filas
+
+    @classmethod
+    def _cuadrar_desglose(
+        cls,
+        filas: list[GananciaProducto],
+        *,
+        total_compras: Decimal,
+        total_ventas: Decimal,
+        total_gastos: Decimal,
+    ) -> list[GananciaProducto]:
+        """LA REGLA DE ORO, EXIGIDA AQUÍ Y NO CONFIADA A LAS RAMAS DE ARRIBA: la
+        suma de las filas del desglose es EXACTAMENTE el encabezado.
+
+        Las tres cifras que entran son las del encabezado, las mismas que el dueño
+        ve en las tarjetas. Si lo que quedó repartido en las filas no da esa cifra,
+        la diferencia sale en SU PROPIA FILA en vez de desaparecer.
+
+        POR QUÉ HACE FALTA UNA RED SI ARRIBA YA CUADRA POR CONSTRUCCIÓN. Porque ya
+        no cuadró una vez, y por eso mismo: las filas de kilos suman su plata porque
+        el residuo se lleva la diferencia, y las de barras porque el residuo de
+        barras hace lo mismo... pero las de barras solo se IMPRIMEN si hubo barras.
+        El día que una compra quedó clasificada "de unidades" con cero barras (por
+        la fuga entre empresas, o editándola por PUT), su plata se sumó al total de
+        la mozzarella y no cayó en ninguna fila: el encabezado decía $200.000 y el
+        desglose sumaba $0. El dueño suma esa columna a mano con calculadora, así que
+        eso no es un detalle de presentación: es la cifra en la que él confía.
+
+        Hoy esa fuga está cerrada de dos maneras (la clasificación filtra por empresa
+        y exige que la fila traiga unidades, ver `se_mide_en_unidades`), así que esta
+        fila NO PUEDE APARECER con los datos que el sistema sabe escribir. Se queda
+        igual, porque "no puede aparecer" es exactamente lo que se creía la vez
+        pasada: mientras esto esté aquí, un desglose que no suma el encabezado es
+        IMPOSIBLE y no solo improbable, venga la plata de donde venga.
+
+        La fila va SIN cantidad (ni kilos ni barras): su asunto son los pesos, y
+        ponerle una cantidad inventada sería el error que se está tapando. Va de
+        última en la lista, que es donde la pantalla la muestra.
+        """
+        costo = total_compras - sum((f.costo for f in filas), CERO)
+        ingreso = total_ventas - sum((f.ingreso for f in filas), CERO)
+        gastos = total_gastos - sum((f.gastos for f in filas), CERO)
+        if costo or ingreso or gastos:
+            filas = [
+                *filas,
+                cls._fila_producto("sin_producto", CERO, ingreso, costo, gastos, CERO),
+            ]
         return filas
 
     def _filas_por_productor(
@@ -3151,29 +3262,39 @@ class ReventaResumenService:
             kilos_a_borona=kilos_a_borona,
             kilos_merma=kilos_merma,
             kilos_pendientes=kilos_pendientes,
-            por_producto=self._filas_por_producto(
-                kilos_comprados=kilos_comprados,
-                # LA PLATA DE LOS KILOS, no `total_compras`: el desglose reparte
-                # este costo entre los DESTINOS DE LOS KILOS (vendido, borona,
-                # merma, inventario), y meterle lo que costaron unas barras le
-                # cargaría a esos destinos una plata que no es suya.
-                total_compras=compras_kilos,
-                costo_kilo=precio_prom_compra,
-                kilos_queso=kilos_queso,
-                ventas_queso=ventas_queso,
-                gastos_queso=gastos_queso,
-                kilos_a_borona=kilos_a_borona,
-                kilos_borona_vendidos=kilos_borona,
-                ventas_borona=ventas_borona,
-                gastos_borona=gastos_borona,
-                kilos_merma=kilos_merma,
-                kilos_pendientes=kilos_pendientes,
-                # La mozzarella con su plata y sus barras, para sus dos renglones.
-                barras_compradas=barras_compradas,
-                compras_mozzarella=compras_mozzarella,
-                barras_vendidas=barras_vendidas,
-                ventas_mozzarella=ventas_mozzarella,
-                gastos_mozzarella=gastos_mozzarella,
+            # El desglose sale por la red que exige la regla de oro: lo que las
+            # filas no alcancen a explicar del encabezado sale en su propia fila
+            # (ver `_cuadrar_desglose`). Las tres cifras que se le pasan son las
+            # MISMAS variables que viajan en el encabezado de esta respuesta, no un
+            # recálculo: así no pueden desincronizarse de lo que el dueño ve arriba.
+            por_producto=self._cuadrar_desglose(
+                self._filas_por_producto(
+                    kilos_comprados=kilos_comprados,
+                    # LA PLATA DE LOS KILOS, no `total_compras`: el desglose reparte
+                    # este costo entre los DESTINOS DE LOS KILOS (vendido, borona,
+                    # merma, inventario), y meterle lo que costaron unas barras le
+                    # cargaría a esos destinos una plata que no es suya.
+                    total_compras=compras_kilos,
+                    costo_kilo=precio_prom_compra,
+                    kilos_queso=kilos_queso,
+                    ventas_queso=ventas_queso,
+                    gastos_queso=gastos_queso,
+                    kilos_a_borona=kilos_a_borona,
+                    kilos_borona_vendidos=kilos_borona,
+                    ventas_borona=ventas_borona,
+                    gastos_borona=gastos_borona,
+                    kilos_merma=kilos_merma,
+                    kilos_pendientes=kilos_pendientes,
+                    # La mozzarella con su plata y sus barras, para sus dos renglones.
+                    barras_compradas=barras_compradas,
+                    compras_mozzarella=compras_mozzarella,
+                    barras_vendidas=barras_vendidas,
+                    ventas_mozzarella=ventas_mozzarella,
+                    gastos_mozzarella=gastos_mozzarella,
+                ),
+                total_compras=total_compras,
+                total_ventas=total_ventas,
+                total_gastos=total_gastos,
             ),
             por_productor=self._filas_por_productor(
                 desde,
