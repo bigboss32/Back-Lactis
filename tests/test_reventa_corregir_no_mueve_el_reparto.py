@@ -108,23 +108,22 @@ def test_corregir_solo_la_nota_no_mueve_el_reparto(client, h):
     )
 
 
-@pytest.mark.xfail(strict=True, reason="DEFECTO: rehacer los renglones de una "
-                                       "factura la manda al final del orden del "
-                                       "día y le mueve la ganancia a otro productor")
-def test_rehacer_los_renglones_con_los_mismos_datos_mueve_la_ganancia(client, h):
-    """SE LE CORRIGE UN DATO Y LA PLATA CAMBIA DE DUEÑO.
+def test_rehacer_los_renglones_con_los_mismos_datos_no_mueve_la_ganancia(client, h):
+    """CORREGIRLE UN DATO A LA FACTURA NO LE CAMBIA EL DUEÑO A LA PLATA.
 
     Se manda el PUT con los renglones EXACTAMENTE IGUALES (mismos kilos, mismo
-    precio): lo único que cambia es que la fila se rehace, así que nace con la hora
-    de hoy y se va detrás de la compra de Sebastián.
+    precio). Rehacerlos BORRA las filas y las CREA de nuevo, así que antes nacían con
+    la hora de hoy y la factura se iba al final del orden de su día: la venta de 150 kg
+    dejaba de tomar los 100 kg baratos de Patricia primero y empezaba por los 100 kg
+    caros de Sebastián. La ganancia cambiaba de productor, y los 50 kg que quedan en
+    bodega pasaban de ser de uno a ser del otro —o sea que el costo del inventario y
+    los dos estados de cuenta cambiaban también— sin que ninguna cifra del negocio se
+    hubiera movido.
 
-    Consecuencia: la venta de 150 kg deja de tomar los 100 kg baratos de Patricia
-    primero y empieza por los 100 kg caros de Sebastián. La ganancia se mueve de un
-    productor al otro sin que ninguna cifra del negocio haya cambiado.
-
-    Y ojo con lo que esto significa para el DUEÑO: los 50 kg que quedan en bodega
-    pasan de ser de Sebastián a ser de Patricia, o sea que el costo del inventario
-    cambia, y el estado de cuenta de los dos también.
+    Lo que lo cierra: el puesto en el reparto es DE LA FACTURA, así que los renglones
+    rehechos heredan su hora de registro (ver `_hora_de_la_factura`). En Postgres esto
+    era seguro que pasara, porque `now()` es la hora de la transacción y la fila
+    rehecha quedaba de última siempre.
     """
     factura = montar(client, h)
     antes = ganancias_por_productor(client, h)

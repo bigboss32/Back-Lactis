@@ -11,6 +11,7 @@ from typing import Any, NamedTuple, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session, lazyload
 
+from app.common.dinero import repartir_al_resto_mayor
 from app.common.service import BaseService, serialize_entity
 from app.core.exceptions import BusinessError, NotFoundError
 from app.core.pagination import PageParams
@@ -250,49 +251,6 @@ def _renglones_de_ultimo_recurso(
     ]
 
 
-def _repartir_al_resto_mayor(
-    exactos: list[tuple[Any, Decimal]], total: Decimal
-) -> dict[Any, Decimal]:
-    """Reparte `total` en centavos entre unas partes cuyo valor EXACTO ya se conoce.
-
-    Es el reparto por RESTO MAYOR: a cada parte se le da su valor truncado al
-    centavo y los centavos que faltan para llegar a `total` se entregan de a uno,
-    empezando por la parte cuya fracción de centavo quedó más grande. Así ninguna
-    parte se desvía más de un centavo de lo que le corresponde y la suma da EXACTO
-    la cifra grande, que es la regla de la casa.
-
-    Se prefirió al reparto de `reventa/lotes.py::_repartir_plata` —que le carga todo
-    el residuo al último— porque acá las partes son PLATA YA CALCULADA de cada día:
-    cargarle dos o tres centavos al último proveedor de la lista dejaría su foto sin
-    poderse reproducir con su propia multiplicación, y el dueño también revisa día
-    por día. Con el resto mayor cada foto queda a lo sumo un centavo de su cuenta.
-
-    El desempate (fracción igual) va por el valor más grande y después por la clave,
-    para que el mismo comprobante generado dos veces reparta los centavos igual: si
-    dependiera del orden en que la base devolvió las filas, el papel podría salir
-    distinto en cada impresión.
-    """
-    if not exactos:
-        return {}
-    pisos = {clave: exacto.quantize(CENTAVOS, rounding=ROUND_DOWN) for clave, exacto in exactos}
-    faltan = int((total - sum(pisos.values())) / CENTAVOS)
-    orden = sorted(
-        exactos,
-        key=lambda par: (-(par[1] - pisos[par[0]]), -par[1], str(par[0])),
-    )
-    asignado = dict(pisos)
-    for clave, _ in orden[: max(faltan, 0)]:
-        asignado[clave] += CENTAVOS
-    # Cinturón: si por lo que sea la cuenta de centavos no cerró (una parte con
-    # valor negativo, un total que no viene de estas mismas partes), el residuo se
-    # le carga a la parte más grande. La suma tiene que dar `total` SIEMPRE; es la
-    # única cosa que no se negocia.
-    residuo = total - sum(asignado.values())
-    if residuo != CERO:
-        asignado[max(exactos, key=lambda par: par[1])[0]] += residuo
-    return asignado
-
-
 def _un_renglon_y_su_reparto(
     fecha: date,
     ruta_id: uuid.UUID | None,
@@ -319,7 +277,7 @@ def _un_renglon_y_su_reparto(
     # El valor EXACTO de cada día (sin redondear) es la base del reparto: es lo que
     # hace que los centavos caigan donde de verdad se generaron.
     exactos = [(r.id, _litros_de(r) * tarifa) for r in del_grupo]
-    asignado = _repartir_al_resto_mayor(exactos, valor)
+    asignado = repartir_al_resto_mayor(exactos, valor)
 
     fotos: dict[uuid.UUID, Decimal] = {}
     for recepcion in del_grupo:
@@ -1696,7 +1654,7 @@ class LiquidacionService(BaseService[Liquidacion]):
         renglón. Sin esto el comprobante diría una cifra y sus recepciones otra.
 
         Mueve centavos, nunca pesos: cada foto queda a lo sumo a un centavo de su
-        propia multiplicación (ver `_repartir_al_resto_mayor`). Por eso no se abre una
+        propia multiplicación (ver `repartir_al_resto_mayor`). Por eso no se abre una
         entrada de auditoría por recepción —serían decenas por quincena para tapar el
         libro con centavos—: el movimiento queda en la auditoría de la liquidación,
         que es donde el dueño lo va a buscar.

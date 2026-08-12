@@ -38,6 +38,13 @@ La borona tiene DOS orígenes y se costea distinto según cuál:
   y se le carga a la MISMA compra de la que salió ese queso. Si no, pasar queso a
   borona haría desaparecer plata.
 
+Y HAY UN TERCER ORIGEN desde que se puede comprar un subproducto directamente: los
+kilos que ese producto PAGÓ. Cuando un mismo producto tiene kilos de los dos tipos
+en la bodega, LO QUE NO SE PAGÓ SALE PRIMERO. Esa regla vive en una sola función
+(`kilos_que_salen_de_lo_pagado`, aquí abajo) y la usan las dos pantallas que el
+dueño cruza a mano —este panel y el desglose del resumen—, porque cuando cada una
+ordenaba a su manera decían costos distintos de la misma venta.
+
 LA CUENTA QUE TIENE QUE CUADRAR
 -------------------------------
 Cada peso pagado por una compra termina en exactamente uno de cuatro sitios:
@@ -63,9 +70,22 @@ TIPO_BORONA = "borona"
 
 
 # --------------------------------------------------------------------- entrada
+# CADA PRODUCTO TIENE SU COLA, Y ESO ES PLATA. Los tres eventos de abajo traen la
+# CLAVE de su producto, y el reparto mantiene una cola de inventario por cada una.
+#
+# QUÉ PASABA CON UNA SOLA COLA PARA TODO LO QUE SE PESA. La venta de un producto
+# consumía las compras de OTRO. Con 100 kg de queso a $20.000 y 100 kg de costeño a
+# $5.000 comprados el mismo día, los 100 kg vendidos de costeño se servían de la compra
+# de QUESO —que estaba primero en la cola— y se les cargaba $20.000 el kilo: el lote
+# del queso aparecía con una pérdida enorme, la ganancia del costeño se iba para arriba,
+# y el costo del inventario que quedaba en bodega era el del producto equivocado. Todo
+# eso lo lee el dueño en el panel de ganancia por lote y en la ganancia por día.
+#
+# El producto por defecto es 'queso' en los tres, que es lo que era todo antes de que
+# existiera el catálogo.
 @dataclass(frozen=True)
 class CompraEvento:
-    """Una compra de queso a un productor."""
+    """Una compra de un producto a un productor."""
 
     fecha: date
     orden: int  # para desempatar dentro del mismo día (created_at)
@@ -75,6 +95,15 @@ class CompraEvento:
     precio_kilo: Decimal
     valor_total: Decimal
     saldo: Decimal  # lo que falta pagarle por esta compra
+    # La clave del producto que se compró.
+    producto: str = TIPO_QUESO
+    # A qué producto le entra lo que llegó GRATIS con esta compra (`borona_kilos`).
+    # LO DICE LA FILA DE LA COMPRA y no el catálogo: así reordenar la lista de
+    # productos no le puede mover esos kilos a otro (ver `CompraQueso.subproducto_tipo`).
+    # En nulo = no hay subproducto que lo reciba, y entonces esos kilos no entran a
+    # ninguna cola: no se pueden vender, que es mejor que venderlos desde la cola de
+    # otro producto.
+    subproducto: str | None = TIPO_BORONA
 
 
 @dataclass(frozen=True)
@@ -82,21 +111,36 @@ class VentaEvento:
     fecha: date
     orden: int
     cliente: str
-    tipo: str  # 'queso' | 'borona'
+    tipo: str  # la clave del producto vendido
     kilos: Decimal
     precio_kilo: Decimal
     valor_total: Decimal
     gasto_monto: Decimal
+    # Si lo vendido es un SUBPRODUCTO según el catálogo. Lo único que decide es en cuál
+    # de los dos contadores de "esto no salió de ningún lote" cae lo que no se pudo
+    # cubrir (`borona_sin_lote` o `kilos_sin_lote`), para que el aviso hable de la
+    # mercancía que es. Antes se preguntaba si el tipo era literalmente 'borona'.
+    #
+    # NO DECIDE EN QUÉ COLUMNAS SE ANOTA LA VENTA: eso lo dice el TROZO de inventario
+    # que la sirvió (ver `_Trozo.propio`), porque un mismo producto puede tener kilos
+    # pagados y kilos que llegaron gratis en la misma cola.
+    es_subproducto: bool = False
 
 
 @dataclass(frozen=True)
 class AjusteEvento:
-    """Queso que sale del inventario sin venderse: a borona o a merma."""
+    """Kilos que salen del inventario sin venderse: a subproducto o a merma."""
 
     fecha: date
     orden: int
     kilos: Decimal
     destino: str  # 'borona' | 'merma'
+    # De qué producto salen estos kilos, y a cuál le entran si el destino es el
+    # subproducto. LOS DOS VIENEN DE LA FILA DEL AJUSTE, que los nombra desde la
+    # migración `c5d9e3a7b1f4`. Antes los adivinaba el catálogo con su orden de
+    # presentación, y reordenar la lista movía plata ya registrada.
+    producto: str = TIPO_QUESO
+    subproducto: str | None = TIPO_BORONA
 
 
 # ---------------------------------------------------------------------- salida
@@ -331,10 +375,61 @@ class _Trozo:
     compra: CompraDelLote
     kilos: Decimal
     costo_kilo: Decimal
+    # SI ESTOS KILOS SON DE LOS QUE SE PAGARON EN ESTA COMPRA (`propio = True`) O DE
+    # LOS QUE LLEGARON SIN PAGARSE / SALIERON DE CONVERTIR OTRO (`propio = False`).
+    #
+    # DECIDE EN QUÉ PAR DE COLUMNAS SE ANOTA LO QUE PASE CON ELLOS: los propios van a
+    # `kilos_vendidos` / `kilos_sin_vender`, los otros a `borona_vendida` /
+    # `borona_sin_vender`. Antes lo decidía si el PRODUCTO era subproducto en el
+    # catálogo, y ahí se rompía la cuenta que el dueño verifica: comprar borona
+    # directamente dejaba una compra con `kilos = 50` cuyos cuatro destinos sumaban
+    # cero, porque esos 50 kilos pagados se anotaban en las columnas de lo que llega
+    # gratis. Con esta marca, los cuatro destinos SIEMPRE suman los kilos comprados.
+    propio: bool = True
 
 
 def _q(valor: Decimal, paso: Decimal = CENTAVOS) -> Decimal:
     return valor.quantize(paso)
+
+
+def kilos_que_salen_de_lo_pagado(vendido: Decimal, sin_pagar: Decimal) -> Decimal:
+    """De `vendido` kilos que salieron de un producto, cuántos salieron de LO QUE ÉL
+    PAGÓ (y no de lo que le llegó gratis o convertido).
+
+    ESTA FUNCIÓN ES LA ÚNICA CUENTA DEL COSTO DE UNA VENTA EN TODO EL MÓDULO, y por eso
+    está aquí sola y con nombre propio. La llaman las dos pantallas que el dueño cruza
+    a mano:
+
+      · el PANEL DE LOTES, para servir la venta de la cola de inventario del producto
+        (aquí abajo, en `repartir_lotes`);
+      · el DESGLOSE DEL RESUMEN, para saber cuántos de los kilos vendidos consumen el
+        pozo de las compras de ese producto (`consumo_de_lo_vendido`, en el servicio).
+
+    QUÉ PASABA CON DOS CUENTAS. Cada pantalla ordenaba a su manera. Con 20 kg de borona
+    que llegaron gratis el 1, 50 kg de borona COMPRADA el 2, 10 kg convertidos del queso
+    el 3 y 55 kg vendidos el 11, el desglose decía que esa venta costó $225.000 y el
+    panel de lotes decía $35.000 por la misma venta: $190.000 de diferencia entre dos
+    pantallas del mismo sistema para el mismo despacho. Dos cifras del mismo hecho es lo
+    que este proyecto no permite.
+
+    LA REGLA, Y ES UNA SOLA: LO QUE NO SE PAGÓ SALE PRIMERO. Los kilos que llegaron
+    gratis con el lote y los que salieron de convertir el padre ya están en la bodega de
+    este producto y ya tienen su costo resuelto (cero los primeros, el del padre los
+    segundos); lo que se le compró a él directamente es lo que queda. Y se acota en
+    cero: si vendió menos de lo que le llegó sin pagar, su propia compra sigue entera en
+    bodega.
+
+    HASTA DÓNDE LLEGA ESTA IGUALDAD, DICHO DE FRENTE PARA QUE NADIE LA BUSQUE DONDE NO
+    ESTÁ. Las dos pantallas coinciden en el COSTO DE LO VENDIDO, que es lo que las dos
+    afirman. Lo que sigue siendo distinto es CUÁNDO se cobra lo que se CONVIRTIÓ: el
+    desglose es un informe de período y le carga al renglón del subproducto los kilos
+    convertidos el día que se convierten; el panel de lotes es un libro FIFO y se los
+    cobra el día que se venden. Mientras quede convertido en bodega, el desglose va
+    adelantado por esa diferencia. Eso NO es una cuenta doble del mismo hecho —es la
+    diferencia entre un informe de período y un libro— y cerrarla movería el desglose
+    del cliente, que está fijado cifra por cifra en `test_reventa_no_movimiento.py`.
+    """
+    return max(CERO, vendido - sin_pagar)
 
 
 def _consumir(
@@ -397,8 +492,13 @@ def repartir_lotes(
     """
     reparto = RepartoLotes()
     por_fecha: dict[date, LoteCalculado] = {}
-    cola_queso: list[_Trozo] = []
-    cola_borona: list[_Trozo] = []
+    # UNA COLA DE INVENTARIO POR PRODUCTO. Antes eran exactamente dos —la del queso y
+    # la de la borona— y todo lo que se pesara caía en una de las dos según su nombre.
+    colas: dict[str, list[_Trozo]] = {}
+
+    def cola_de(producto: str) -> list[_Trozo]:
+        return colas.setdefault(producto or TIPO_QUESO, [])
+
     # Filas de venta ya abiertas, para no partir una venta en varias filas del
     # mismo lote cuando se lleva kilos de dos compras suyas: el usuario piensa en
     # ventas, no en trozos de inventario.
@@ -434,7 +534,7 @@ def repartir_lotes(
             )
             lote.detalle_compras.append(registro)
             if compra.kilos > CERO:
-                cola_queso.append(
+                cola_de(compra.producto).append(
                     _Trozo(
                         lote=lote,
                         compra=registro,
@@ -442,32 +542,36 @@ def repartir_lotes(
                         costo_kilo=compra.valor_total / compra.kilos,
                     )
                 )
-            if compra.borona_kilos > CERO:
-                # Costo cero: la borona llega con el lote y no se paga
-                cola_borona.append(
+            if compra.borona_kilos > CERO and compra.subproducto:
+                # Costo cero: el subproducto llega con el lote y no se paga. Y NO ES
+                # PROPIO: estos kilos no están adentro de `compra.kilos`, así que su
+                # destino se anota en las columnas de lo que llegó gratis.
+                cola_de(compra.subproducto).append(
                     _Trozo(
                         lote=lote, compra=registro, kilos=compra.borona_kilos,
-                        costo_kilo=CERO,
+                        costo_kilo=CERO, propio=False,
                     )
                 )
 
         elif clase == "ajuste":
             ajuste: AjusteEvento = evento  # type: ignore[assignment]
-            asignados, faltante = _consumir(cola_queso, ajuste.kilos)
+            asignados, faltante = _consumir(cola_de(ajuste.producto), ajuste.kilos)
             for trozo, kilos in asignados:
                 costo = _q(kilos * trozo.costo_kilo)
-                if ajuste.destino == DESTINO_MERMA:
+                if ajuste.destino == DESTINO_MERMA or not ajuste.subproducto:
                     trozo.compra.kilos_merma += kilos
                     trozo.compra.costo_merma += costo
                 else:
                     trozo.compra.kilos_a_borona += kilos
-                    # La borona que sale de queso ARRASTRA el costo de ese queso y
-                    # se le anota a la MISMA compra: si entrara con costo cero, la
-                    # plata de esa compra desaparecería.
-                    cola_borona.append(
+                    # Lo que sale del producto ARRASTRA su costo y se le anota a la
+                    # MISMA compra: si entrara con costo cero, la plata de esa compra
+                    # desaparecería. Deja de ser PROPIO porque estos kilos ya se
+                    # contaron en `kilos_a_borona`: volverlos a contar como vendidos
+                    # los sumaría dos veces contra los kilos comprados.
+                    cola_de(ajuste.subproducto).append(
                         _Trozo(
                             lote=trozo.lote, compra=trozo.compra, kilos=kilos,
-                            costo_kilo=trozo.costo_kilo,
+                            costo_kilo=trozo.costo_kilo, propio=False,
                         )
                     )
             if faltante > CERO:
@@ -475,8 +579,28 @@ def repartir_lotes(
 
         else:
             venta: VentaEvento = evento  # type: ignore[assignment]
-            cola = cola_borona if venta.tipo == TIPO_BORONA else cola_queso
-            asignados, faltante = _consumir(cola, venta.kilos)
+            # DE DÓNDE SE SIRVE LA VENTA: primero de lo que este producto NO pagó y
+            # después de lo que sí, que es la regla de `kilos_que_salen_de_lo_pagado`
+            # —la misma que usa el desglose del resumen—. Dentro de cada clase sigue
+            # mandando el FIFO de siempre: lo más viejo primero.
+            #
+            # Solo cambia algo cuando un producto tiene las dos clases de kilos en la
+            # cola al mismo tiempo, o sea cuando se le COMPRÓ directamente y además
+            # recibió gratis o convertido. Para el queso, para la mozzarella y para la
+            # borona que solo llega con el lote, las dos listas son la misma cola y el
+            # reparto sale idéntico al de siempre.
+            cola = cola_de(venta.tipo)
+            sin_pagar = [t for t in cola if not t.propio]
+            pagados = [t for t in cola if t.propio]
+            de_lo_pagado = kilos_que_salen_de_lo_pagado(
+                venta.kilos, sum((t.kilos for t in sin_pagar if t.kilos > CERO), CERO)
+            )
+            # Lo que sale de lo no pagado cabe entero por definición (es el mínimo
+            # entre lo pedido y lo que hay), así que el único faltante posible es el
+            # de la segunda vuelta: no hay que sumar dos faltantes.
+            de_lo_gratis, _ = _consumir(sin_pagar, venta.kilos - de_lo_pagado)
+            del_pozo, faltante = _consumir(pagados, de_lo_pagado)
+            asignados = de_lo_gratis + del_pozo
             kilos_cubiertos = venta.kilos - faltante
             # Si parte de la venta no tuvo lote, esa parte de la plata tampoco es
             # de ningún lote: se reparte solo lo que corresponde a lo cubierto.
@@ -485,7 +609,7 @@ def repartir_lotes(
                 valor_reparto = _q(venta.valor_total * proporcion)
                 gasto_reparto = _q(venta.gasto_monto * proporcion)
                 reparto.ingreso_sin_lote += venta.valor_total - valor_reparto
-                if venta.tipo == TIPO_BORONA:
+                if venta.es_subproducto:
                     reparto.borona_sin_lote += faltante
                 else:
                     reparto.kilos_sin_lote += faltante
@@ -502,14 +626,20 @@ def repartir_lotes(
                 costo = _q(kilos * trozo.costo_kilo)
                 registro = trozo.compra
                 registro.gastos += gasto
-                if venta.tipo == TIPO_BORONA:
-                    registro.borona_vendida += kilos
-                    registro.ingreso_borona += ingreso
-                    registro.costo_borona_vendida += costo
-                else:
+                # EN QUÉ COLUMNAS CAE ESTA VENTA LO DICE EL TROZO Y NO EL PRODUCTO: si
+                # los kilos son de los que esta compra pagó van con lo vendido, y si
+                # llegaron gratis o salieron de convertir, con lo del subproducto. Un
+                # producto que el catálogo marca como subproducto pero que se COMPRÓ
+                # directamente cae en el primer par, que es lo que es: mercancía
+                # pagada que se vendió.
+                if trozo.propio:
                     registro.kilos_vendidos += kilos
                     registro.ingreso_queso += ingreso
                     registro.costo_vendido += costo
+                else:
+                    registro.borona_vendida += kilos
+                    registro.ingreso_borona += ingreso
+                    registro.costo_borona_vendida += costo
 
                 # La fila de la venta, a nivel de LOTE: si la venta se llevó kilos
                 # de dos compras del mismo lote, es UNA fila con los kilos sumados.
@@ -530,14 +660,20 @@ def repartir_lotes(
                 fila.gasto += gasto
                 fila.costo += costo
 
-    # Lo que quedó en las colas es inventario sin vender, con su costo
-    for trozo in cola_queso:
-        if trozo.kilos > CERO:
-            trozo.compra.kilos_sin_vender += trozo.kilos
-            trozo.compra.costo_sin_vender += _q(trozo.kilos * trozo.costo_kilo)
-    for trozo in cola_borona:
-        if trozo.kilos > CERO:
-            trozo.compra.borona_sin_vender += trozo.kilos
+    # Lo que quedó en las colas es inventario sin vender, con su costo. Se recorren
+    # TODAS las colas —una por producto— y cada trozo se anota en la columna de su
+    # clase: lo que llegó gratis o salió de convertir va en `borona_sin_vender` y lo
+    # que esta compra pagó, en `kilos_sin_vender`. La clase la dice el TROZO y no el
+    # producto: así los cuatro destinos siempre suman los kilos comprados, incluso
+    # cuando lo comprado es un producto que el catálogo marca como subproducto.
+    for cola in colas.values():
+        for trozo in cola:
+            if trozo.kilos <= CERO:
+                continue
+            if trozo.propio:
+                trozo.compra.kilos_sin_vender += trozo.kilos
+            else:
+                trozo.compra.borona_sin_vender += trozo.kilos
             trozo.compra.costo_sin_vender += _q(trozo.kilos * trozo.costo_kilo)
 
     # Cuadre peso a peso, POR COMPRA: los cuatro destinos del costo tienen que

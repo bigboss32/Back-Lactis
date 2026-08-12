@@ -136,7 +136,10 @@ def test_cada_inventario_se_mira_con_el_suyo(client, h):
     print("\n===== BARRAS SIN HABER COMPRADO MOZZARELLA =====")
     print(f"  {r.status_code}: {r.json()}")
     assert r.status_code == 422
-    assert "mozzarella" in r.json()["error"]["detail"]
+    # El mensaje tiene que nombrar EL PRODUCTO que no alcanza —con el nombre que el
+    # dueño le puso en el catálogo— y no el inventario contra el que se comparó: antes
+    # decía "queso" mientras él estaba despachando mozzarella.
+    assert "mozzarella" in r.json()["error"]["detail"].lower()
 
 
 def test_la_borona_de_la_factura_tambien_tiene_su_guardia(client, h):
@@ -148,7 +151,7 @@ def test_la_borona_de_la_factura_tambien_tiene_su_guardia(client, h):
     print("\n===== 6 kg DE BORONA CONTRA 5 DISPONIBLES =====")
     print(f"  {r.status_code}: {r.json()}")
     assert r.status_code == 422
-    assert "borona" in r.json()["error"]["detail"]
+    assert "borona" in r.json()["error"]["detail"].lower()
 
 
 # ---------------------------------------------------------------------------

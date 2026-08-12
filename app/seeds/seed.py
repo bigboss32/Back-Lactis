@@ -25,6 +25,7 @@ from app.modules.reventa.models import (
     ProductoReventa,
     derivados_de_unidad,
 )
+from app.modules.reventa.repository import ProductoReventaRepository
 from app.modules.rutas.models import Ruta
 from app.modules.sucursales.models import Sucursal
 from app.modules.transportadores.models import Transportador, TransportadorRuta
@@ -368,6 +369,19 @@ def seed_empresa_demo(db: Session, roles: dict[str, Rol]) -> None:
 TIPOS_QUESO_DEFECTO = ["Queso Costeño", "Queso Criollo", "Queso Doble Crema", "Queso Campesino"]
 
 
+def _ya_tiene_plata_anotada(db: Session, empresa_id, clave: str) -> bool:
+    """Si esa clave ya tiene compras, ventas, ajustes o kilos que le llegaron gratis.
+
+    Es exactamente la misma pregunta que le hace el catálogo a una persona antes de
+    dejarla colgar un producto de otro (`ProductoReventaRepository.movimientos` y
+    `.ajustes`), y se hace con el mismo repositorio para que no haya dos definiciones
+    de "este producto ya tiene historia": el día que una crezca, la otra crece sola.
+    """
+    repo = ProductoReventaRepository(db, empresa_id)
+    compras, ventas, recibidas = repo.movimientos(clave)
+    return bool(compras or ventas or recibidas or repo.ajustes(clave))
+
+
 def sembrar_productos_reventa(db: Session, empresa_id) -> list[ProductoReventa]:
     """El catálogo de productos de reventa de UNA empresa: queso, borona y mozzarella.
 
@@ -393,6 +407,15 @@ def sembrar_productos_reventa(db: Session, empresa_id) -> list[ProductoReventa]:
     despliegue no deshace decisiones de personas en silencio. Si lo quiere de vuelta,
     lo agrega él y le vuelve la MISMA fila (ver `ProductoReventaService.crear`).
 
+    Y LA SEGUNDA REGLA, POR LA MISMA RAZÓN: LA SIEMBRA NO RECOSTEA PLATA YA ANOTADA.
+    Una empresa creada ENTRE DOS DESPLIEGUES trabaja con el catálogo vacío, así que
+    sus kilos de borona quedan anotados con la clave de siempre y se leen como los de
+    un producto RAÍZ. Sembrar la borona colgada del queso le cambiaría el grupo de
+    costeo a esas compras y ventas —el reparto de la ganancia entre productores se
+    rehace— sin que nadie haya tocado un documento. Cuando la clave ya tiene
+    movimientos, el producto se siembra igual pero SUELTO: el dueño tiene su lista y
+    ninguna cifra se mueve.
+
     Devuelve los productos que dejó creados, para el log del despliegue.
     """
     # TODAS las filas de la empresa, borradas incluidas (ver el docstring).
@@ -411,6 +434,27 @@ def sembrar_productos_reventa(db: Session, empresa_id) -> list[ProductoReventa]:
         # que se acabó de crear: el queso va antes que la borona en la lista, así que
         # cuando le toca a la borona su padre ya tiene id.
         padre = existentes.get(clave_padre) if clave_padre else None
+        if padre is not None and _ya_tiene_plata_anotada(db, empresa_id, clave):
+            # LA SIEMBRA NO PUEDE MOVER PLATA YA REGISTRADA, y este es el único caso en
+            # que podría: una empresa creada ENTRE DOS DESPLIEGUES trabaja con el
+            # catálogo vacío —crear la empresa no lo siembra—, así que sus kilos de
+            # borona quedaron anotados con la clave de siempre y se leyeron como los de
+            # un producto RAÍZ, con su pozo y su fila propios. Sembrarla ahora colgada
+            # del queso le cambiaría el grupo de costeo a esas compras y ventas, y el
+            # reparto de la ganancia entre productores se rehace solo, en el
+            # despliegue, sin que nadie toque un documento.
+            #
+            # Se siembra igual, pero SUELTA: así el dueño la tiene en su lista (que es
+            # para lo que existe esta siembra) y ninguna cifra se mueve. Es la misma
+            # regla que el catálogo le exige a una persona en
+            # `ProductoReventaService._exigir_que_todavia_pueda_tener_padre`.
+            logger.warning(
+                "'%s' ya tiene movimientos en la empresa %s: se siembra como producto "
+                "independiente para no recostear plata ya registrada",
+                clave,
+                empresa_id,
+            )
+            padre = None
         producto = ProductoReventa(
             empresa_id=empresa_id,
             nombre=nombre,

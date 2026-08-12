@@ -3,11 +3,52 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import BeforeValidator, Field, model_validator
+from pydantic import BeforeValidator, Field, PlainSerializer, field_serializer, model_validator
 
 from app.common.schemas import BaseSchema, TenantRead, a_dos_decimales
 
 CERO = Decimal("0")
+DOS_DECIMALES = Decimal("0.01")
+SIN_DECIMALES = Decimal("1")
+
+
+# --------------------------------------------- cómo se escribe una cifra en la salida
+# EL CERO TENÍA DOS CARAS EN LA MISMA RESPUESTA, y aunque no movía un peso, había que
+# cerrarlo. Una cifra que sale de una suma de SQL llega con la escala de su columna
+# ('0.00') y una que sale de sumar en Python llega pelada ('0'), así que en un mismo
+# resumen la fila del queso decía `kilos: "0"` y la de la borona `kilos: "0.00"`, y
+# `ingreso: "0"` convivía con `costo: "0.00"`. Nadie pierde plata con eso, pero sí
+# cuesta: quien compara dos respuestas para verificar un despliegue tiene que decidir
+# cada vez si esa diferencia importa, y una alarma que hay que interpretar es una
+# alarma que se deja de mirar.
+#
+# LA REGLA DE AHORA, Y ES UNA SOLA: la escala la decide LA CLASE DE CIFRA y no de dónde
+# salió la suma. La plata y los kilos van con dos decimales SIEMPRE, y lo que se cuenta
+# por unidades enteras va sin decimales SIEMPRE. Es solo la forma de escribirla: el
+# valor no se toca, no se redondea nada que no estuviera ya en centavos, y la prueba de
+# no movimiento (que compara como NÚMERO) sigue dando exactamente lo mismo.
+def _con_dos_decimales(valor: Decimal | None) -> str | None:
+    if valor is None:
+        return None
+    return str(Decimal(valor).quantize(DOS_DECIMALES))
+
+
+def _sin_decimales(valor: Decimal | None) -> str | None:
+    """Lo que se cuenta por piezas completas. Se cuantiza solo si de verdad es
+    entero: una fila rara con media unidad tiene que verse, no redondearse en
+    silencio (es el mismo criterio de `_barras_enteras` al entrar)."""
+    if valor is None:
+        return None
+    numero = Decimal(valor)
+    if numero != numero.to_integral_value():
+        return str(numero)
+    return str(numero.quantize(SIN_DECIMALES))
+
+
+# La plata y los kilos: dos decimales. Las unidades: ninguno.
+Plata = Annotated[Decimal, PlainSerializer(_con_dos_decimales, return_type=str, when_used="json")]
+EnKilos = Annotated[Decimal, PlainSerializer(_con_dos_decimales, return_type=str, when_used="json")]
+EnUnidades = Annotated[Decimal, PlainSerializer(_sin_decimales, return_type=str, when_used="json")]
 
 
 # Kilos: siempre dos decimales, los mismos que caben en la base (las columnas de
@@ -118,7 +159,7 @@ class ProductoReventaRead(TenantRead):
 class AbonoRead(BaseSchema):
     id: uuid.UUID
     fecha: date
-    valor: Decimal
+    valor: Plata
     observaciones: str | None
 
 
@@ -154,6 +195,12 @@ class RenglonCompraCreate(BaseSchema):
     # --- si se pesa
     kilos_brutos: Kilos | None = Field(default=None, gt=0)
     borona_kilos: Kilos = Field(default=Decimal("0"), ge=0)
+    # A QUÉ PRODUCTO LE ENTRAN ESOS KILOS QUE LLEGARON GRATIS (su clave). Opcional: la
+    # pantalla de hoy no lo manda y el servicio lo resuelve con el catálogo sin mirar
+    # el orden (ver `CatalogoReventa._quien_recibe`): el único subproducto que se pese,
+    # y si no, la clave de siempre. La compra NUNCA se queda sin poder registrarse por
+    # un problema de la lista de productos.
+    subproducto_tipo: str | None = None
     precio_kilo: Decimal | None = Field(default=None, gt=0)
     # --- si se cuenta
     barras: Barras | None = Field(default=None, gt=0)
@@ -173,6 +220,9 @@ class RenglonCompraCreate(BaseSchema):
             self.kilos_brutos = CERO
             self.precio_kilo = CERO
             self.borona_kilos = CERO
+            # Sin kilos gratis no hay a quién nombrar: lo que se cuenta por unidades
+            # no trae nada encima.
+            self.subproducto_tipo = None
         elif tiene_kilos and not tiene_barras:
             self.barras = CERO
             self.precio_barra = CERO
@@ -230,18 +280,20 @@ class CompraQuesoRead(TenantRead):
     # En qué se mide: 'kg' o 'unidad'. Se deduce del tipo (ver models.unidad_de) y
     # viaja aquí para que la pantalla ponga el rótulo correcto sin repetir la regla.
     unidad: str
-    kilos_brutos: Decimal
-    borona_kilos: Decimal
-    kilos_netos: Decimal
-    precio_kilo: Decimal
+    kilos_brutos: EnKilos
+    borona_kilos: EnKilos
+    # A qué producto le entraron esos kilos gratis. En nulo cuando no llegó nada.
+    subproducto_tipo: str | None = None
+    kilos_netos: EnKilos
+    precio_kilo: Plata
     # Barras y precio por barra. En una compra de kilos van en CERO: nunca hay que
     # elegir "el que no sea cero", el `tipo` dice cuál de los dos mirar.
-    barras: Decimal
-    precio_barra: Decimal
-    valor_total: Decimal
-    abonado: Decimal
-    saldo: Decimal
-    saldo_a_favor: Decimal = Decimal("0")
+    barras: EnUnidades
+    precio_barra: Plata
+    valor_total: Plata
+    abonado: Plata
+    saldo: Plata
+    saldo_a_favor: Plata = Decimal("0")
     observaciones: str | None
     abonos: list[AbonoRead] = []
     # Cuántos soportes de pago tiene. Solo el número: los adjuntos con sus
@@ -331,19 +383,19 @@ class VentaQuesoRead(TenantRead):
     orden: int = 0
     tipo: str
     unidad: str  # 'kg' | 'barra', deducida del tipo
-    kilos: Decimal
-    precio_kilo: Decimal
+    kilos: EnKilos
+    precio_kilo: Plata
     # En una venta de kilos van en cero, y al contrario (ver el CHECK de la tabla).
-    barras: Decimal
-    precio_barra: Decimal
-    valor_total: Decimal
+    barras: EnUnidades
+    precio_barra: Plata
+    valor_total: Plata
     gasto_concepto: str | None
-    gasto_por_kilo: Decimal
-    gasto_por_barra: Decimal
-    gasto_monto: Decimal  # el gasto en PESOS, ya sea por kilo o por barra
-    abonado: Decimal
-    saldo: Decimal
-    saldo_a_favor: Decimal = Decimal("0")
+    gasto_por_kilo: Plata
+    gasto_por_barra: Plata
+    gasto_monto: Plata  # el gasto en PESOS, ya sea por kilo o por barra
+    abonado: Plata
+    saldo: Plata
+    saldo_a_favor: Plata = Decimal("0")
     observaciones: str | None
     abonos: list[AbonoRead] = []
     # Mismo criterio que en la compra: solo el número (ver CompraQuesoRead).
@@ -476,14 +528,14 @@ class DocumentoReventaRead(TenantRead):
     observaciones: str | None
     # ------------------------------------------------------------ lo calculado
     # Suma del valor_total de los renglones QUE CUENTAN (los no anulados).
-    total: Decimal
+    total: Plata
     # Suma de lo abonado en esos mismos renglones (la suma de sus abonos, exacta:
     # el derrame no divide nada, así que no hay redondeo que la desvíe).
-    abonado: Decimal
-    saldo: Decimal
-    saldo_a_favor: Decimal = Decimal("0")
+    abonado: Plata
+    saldo: Plata
+    saldo_a_favor: Plata = Decimal("0")
     # La plata de los renglones ANULADOS, aparte. Ver la igualdad del docstring.
-    total_anulado: Decimal
+    total_anulado: Plata
     # DERIVADO de los renglones, no una columna: 'pendiente' si ninguno tiene
     # abonos, 'pagada' si todos están pagados, 'parcial' en el medio y 'anulada'
     # si no queda ni un renglón vivo sin anular.
@@ -530,10 +582,10 @@ class SaldoAnteriorRead(TenantRead):
     tercero: str
     fecha: date
     concepto: str
-    valor_total: Decimal
-    abonado: Decimal
-    saldo: Decimal
-    saldo_a_favor: Decimal = Decimal("0")
+    valor_total: Plata
+    abonado: Plata
+    saldo: Plata
+    saldo_a_favor: Plata = Decimal("0")
     observaciones: str | None
     abonos: list[AbonoRead] = []
 
@@ -596,18 +648,44 @@ class EnlaceCompartido(BaseSchema):
 
 # ------------------------------------------------------------ conversiones
 class ConversionCreate(BaseSchema):
+    """Un ajuste: kilos que salen del inventario de un producto.
+
+    LOS DOS PRODUCTOS SON OPCIONALES EN LA ENTRADA Y OBLIGATORIOS EN LA FILA. La
+    pantalla de hoy no los manda —el ajuste era "queso a borona" y nada más—, así que
+    exigirlos aquí dejaría al dueño sin poder registrar un ajuste hasta que el
+    frontend cambie. El servicio los resuelve y los GUARDA (ver
+    `ConversionBoronaService.crear`): el origen es el producto de siempre y el destino
+    lo contesta el catálogo sin mirar el orden —el único subproducto que se pese, y si
+    no, la clave de siempre—. Lo que nunca vuelve a pasar es que los adivine cada
+    lectura, y lo que nunca pasa es que un problema de la lista de productos deje al
+    dueño sin poder registrar el ajuste del día.
+
+    Se mandan por CLAVE y no por id porque la clave es la identidad del producto en
+    todo este módulo: es la misma cadena que va en `tipo` de compras y ventas.
+    """
+
     fecha: date
     kilos: Kilos = Field(gt=0)
     destino: Literal["borona", "merma"] = "borona"
+    # De qué producto salen los kilos (su clave en el catálogo).
+    producto_origen: str | None = None
+    # A cuál le entran. Se ignora cuando el destino es la merma: ahí no le entran a
+    # nadie, y el servicio lo deja en nulo.
+    producto_destino: str | None = None
     precio_kilo: Decimal = Field(default=Decimal("0"), ge=0)
     observaciones: str | None = None
 
 
 class ConversionRead(TenantRead):
     fecha: date
-    kilos: Decimal
+    kilos: EnKilos
     destino: str
-    precio_kilo: Decimal
+    # Los dos productos VIAJAN EN LA RESPUESTA para que la pantalla pueda mostrar de
+    # qué a qué fue el ajuste. Hasta ahora decía "queso -> borona" porque era lo único
+    # que podía ser; ahora lo dice la fila.
+    producto_origen: str
+    producto_destino: str | None = None
+    precio_kilo: Plata
     observaciones: str | None
 
 
@@ -635,26 +713,26 @@ class GananciaProducto(BaseSchema):
     # Kilos DEL LOTE COMPRADO que fueron a este destino (siempre >= 0). Los cuatro
     # destinos en kilos suman exactamente kilos_comprados. En los renglones de
     # mozzarella va 0.
-    kilos: Decimal
+    kilos: EnKilos
     # Kilos realmente VENDIDOS de este producto. En el queso es igual a `kilos`;
     # en la borona puede diferir (se puede vender borona convertida en otro
     # período, o la que llegó gratis con el lote). En merma/residuo es 0.
-    kilos_vendidos: Decimal
+    kilos_vendidos: EnKilos
     # Barras compradas que fueron a este destino, y barras vendidas. Solo tienen
     # valor en los renglones de mozzarella; en los de kilos van en 0.
-    barras: Decimal = Decimal("0")
-    barras_vendidas: Decimal = Decimal("0")
-    ingreso: Decimal
-    costo: Decimal  # negativo solo en la fila 'anterior' (se pagó en otro período)
-    gastos: Decimal
-    ganancia: Decimal  # ingreso - costo - gastos
-    precio_venta_kilo: Decimal  # ingreso / kilos_vendidos (0 si no se vendió)
-    costo_kilo: Decimal  # precio promedio de compra del período, por kilo
+    barras: EnUnidades = Decimal("0")
+    barras_vendidas: EnUnidades = Decimal("0")
+    ingreso: Plata
+    costo: Plata  # negativo solo en la fila 'anterior' (se pagó en otro período)
+    gastos: Plata
+    ganancia: Plata  # ingreso - costo - gastos
+    precio_venta_kilo: Plata  # ingreso / kilos_vendidos (0 si no se vendió)
+    costo_kilo: Plata  # precio promedio de compra del período, por kilo
     # Los mismos dos precios pero POR BARRA. Van en campos aparte y no
     # reutilizando los de arriba porque un precio por barra guardado en un campo
     # que se llama "por kilo" es la confusión que hay que evitar.
-    precio_venta_barra: Decimal = Decimal("0")
-    costo_barra: Decimal = Decimal("0")
+    precio_venta_barra: Plata = Decimal("0")
+    costo_barra: Plata = Decimal("0")
 
 
 class GananciaProductor(BaseSchema):
@@ -673,18 +751,58 @@ class GananciaProductor(BaseSchema):
 
     productor: str
     compras: int  # cuántas compras en el período
-    kilos: Decimal
-    barras: Decimal = Decimal("0")
-    total_comprado: Decimal  # valor de TODAS sus compras (NO es lo que se le ha pagado)
+    kilos: EnKilos
+    barras: EnUnidades = Decimal("0")
+    total_comprado: Plata  # valor de TODAS sus compras (NO es lo que se le ha pagado)
     # De ese total, lo que corresponde a las compras de mozzarella. Va aparte para
     # poder verificar a mano que precio_promedio_barra = esto / barras.
-    total_comprado_barras: Decimal = Decimal("0")
-    precio_promedio: Decimal  # (total comprado en kilos) / kilos
-    precio_promedio_barra: Decimal = Decimal("0")  # total_comprado_barras / barras
-    por_pagar: Decimal  # saldo pendiente con ese productor (histórico)
-    margen_por_kilo: Decimal  # valor realizado por kilo - su precio promedio por kilo
-    margen_por_barra: Decimal = Decimal("0")  # el mismo margen, por barra
-    ganancia_estimada: Decimal  # la de kilos MÁS la de barras (pesos con pesos)
+    total_comprado_barras: Plata = Decimal("0")
+    precio_promedio: Plata  # (total comprado en kilos) / kilos
+    precio_promedio_barra: Plata = Decimal("0")  # total_comprado_barras / barras
+    por_pagar: Plata  # saldo pendiente con ese productor (histórico)
+    margen_por_kilo: Plata  # valor realizado por kilo - su precio promedio por kilo
+    margen_por_barra: Plata = Decimal("0")  # el mismo margen, por barra
+    ganancia_estimada: Plata  # la de kilos MÁS la de barras (pesos con pesos)
+
+
+class ExistenciaProducto(BaseSchema):
+    """LO QUE HAY EN BODEGA DE UN PRODUCTO, en su unidad.
+
+    POR QUÉ ESTA LISTA EXISTE. El resumen traía tres cifras de inventario con el
+    nombre del producto pegado en el campo: `kilos_disponibles` (el queso),
+    `borona_disponible` y `barras_disponibles` (la mozzarella). Eran los únicos tres
+    productos que el módulo entendía, y cualquier producto que el dueño agregara al
+    catálogo no tenía dónde salir: su mercancía no aparecía en ninguna pantalla y se
+    podía despachar sin límite.
+
+    Esta lista trae UNA FILA POR PRODUCTO del catálogo, siempre —aunque esté en cero,
+    porque "no hay" es una respuesta que el dueño necesita ver— y es de donde la
+    pantalla tiene que leer el inventario de aquí en adelante. Los tres campos de
+    siempre siguen viajando en el resumen y siguen diciendo exactamente lo que
+    decían, para no romper la pantalla que ya los lee.
+
+    `disponible` está en la unidad de SU producto y no se suma con la de otro: kilos
+    con kilos y unidades con unidades, y solo del mismo producto.
+    """
+
+    # La clave del producto (la misma que llevan las filas de compra y de venta).
+    producto: str
+    # El nombre que el dueño le puso en el catálogo, listo para mostrar.
+    etiqueta: str
+    unidad: str  # 'kg' (se pesa) o 'unidad' (se cuenta)
+    disponible: Decimal
+
+    @field_serializer("disponible", when_used="json")
+    def _escribir_disponible(self, valor: Decimal) -> str:
+        """Con dos decimales si se pesa y sin ninguno si se cuenta.
+
+        Es el único campo del módulo cuya escala depende de OTRO campo de la misma
+        fila, y por eso lleva serializador propio en vez de una anotación: "0,00
+        huevos" no se lee, y "3 kg" de un producto que se pesa oculta los gramos.
+        """
+        if self.unidad == UNIDAD_KILO:
+            return _con_dos_decimales(valor)
+        return _sin_decimales(valor)
 
 
 class ResumenReventa(BaseSchema):
@@ -696,70 +814,103 @@ class ResumenReventa(BaseSchema):
     queso y 8 barras de mozzarella no son 28 de nada.
 
     LA PLATA SÍ SE SUMA. `total_compras`, `total_ventas`, `total_gastos` y
-    `ganancia_estimada` incluyen las dos unidades, porque los pesos son pesos.
-    Enseguida de cada uno va el pedazo de mozzarella por separado, para que el
-    desglose se pueda cuadrar a mano:
-        total_compras = (compras en kilos) + total_compras_mozzarella
-        total_ventas  = ventas de queso + ventas de borona + total_ventas_mozzarella
+    `ganancia_estimada` incluyen TODOS los productos y las dos unidades, porque los
+    pesos son pesos.
+
+    QUÉ ES `por_producto` Y POR QUÉ ES LA CIFRA QUE MANDA. Es el desglose de la
+    ganancia con UNA FILA POR PRODUCTO, armado solo a partir del catálogo, y cumple la
+    regla de la casa por construcción:
+
+        Σ costo de por_producto    = total_compras
+        Σ ingreso de por_producto  = total_ventas
+        Σ gastos de por_producto   = total_gastos
+        Σ ganancia de por_producto = ganancia_estimada
+
+    Esas cuatro igualdades son EXACTAS, sin un centavo de diferencia, y son las que el
+    dueño verifica con la calculadora. Si algún peso no cupiera en ninguna fila de
+    producto, sale en una fila propia llamada 'sin_producto' en vez de desaparecer.
+
+    QUÉ SIGNIFICAN LOS CAMPOS `barras_*` Y `*_mozzarella`: el producto por unidad DE
+    SIEMPRE, o sea LA MOZZARELLA, nombrada por su clave y no por su puesto en la
+    lista (agregar una panela por unidad y ponerla de primera le cambiaba a estas
+    tarjetas las barras compradas, las vendidas y su ganancia). NO son la
+    suma de todos los productos por unidad, y es a propósito: sumar panelas con barras
+    de mozzarella daría una cantidad que no significa nada y un "precio promedio por
+    barra" que promedia $3.000 con $12.000. La plata de los demás productos por unidad
+    sí entra en los totales de arriba y cada uno tiene su fila en `por_producto`.
+
+    Los campos en kilos (`kilos_comprados`, `kilos_vendidos`, `kilos_pendientes`) SÍ
+    suman todos los productos que se pesan, porque los kilos son kilos. Lo que se
+    vendió de cada uno sale en su fila de `por_producto`.
     """
 
     desde: date
     hasta: date
     # Del período (queso)
-    kilos_comprados: Decimal
-    total_compras: Decimal  # TODA la plata comprada: kilos + barras
-    kilos_vendidos: Decimal  # solo ventas tipo queso
-    total_ventas: Decimal  # queso + borona + mozzarella (pesos con pesos)
-    precio_promedio_compra: Decimal  # por KILO: (compras en kilos) / kilos_comprados
-    precio_promedio_venta: Decimal  # solo queso
-    total_gastos: Decimal  # gastos de venta del período (transporte, etc.)
-    ganancia_estimada: Decimal  # ventas totales - compras del período - gastos
+    kilos_comprados: EnKilos
+    total_compras: Plata  # TODA la plata comprada: kilos + barras
+    kilos_vendidos: EnKilos  # solo ventas tipo queso
+    total_ventas: Plata  # queso + borona + mozzarella (pesos con pesos)
+    precio_promedio_compra: Plata  # por KILO: (compras en kilos) / kilos_comprados
+    precio_promedio_venta: Plata  # solo queso
+    total_gastos: Plata  # gastos de venta del período (transporte, etc.)
+    ganancia_estimada: Plata  # ventas totales - compras del período - gastos
     # Ganancia neta por kilo vendido (queso + borona). Solo mira la plata de las
     # ventas en KILOS: meterle la de la mozzarella daría pesos por kilo inflados
     # con plata que no salió de ningún kilo.
-    margen_por_kilo: Decimal
+    margen_por_kilo: Plata
     # Lo neto que dejó cada kilo comprado en el período: (ventas en kilos - gastos
     # de esas ventas) / kilos comprados. Es la base para repartir la ganancia de
     # los kilos entre los productores.
-    valor_realizado_kilo: Decimal
+    valor_realizado_kilo: Plata
     # Del período (borona)
-    kilos_borona_vendidos: Decimal
-    total_ventas_borona: Decimal
+    kilos_borona_vendidos: EnKilos
+    total_ventas_borona: Plata
     # Del período (MOZZARELLA, en barras: su propio renglón de punta a punta)
-    barras_compradas: Decimal = Decimal("0")
-    total_compras_mozzarella: Decimal = Decimal("0")
-    barras_vendidas: Decimal = Decimal("0")
-    total_ventas_mozzarella: Decimal = Decimal("0")
-    total_gastos_mozzarella: Decimal = Decimal("0")
-    precio_promedio_compra_barra: Decimal = Decimal("0")
-    precio_promedio_venta_barra: Decimal = Decimal("0")
-    margen_por_barra: Decimal = Decimal("0")  # ganancia de la mozzarella / barras vendidas
-    valor_realizado_barra: Decimal = Decimal("0")
+    barras_compradas: EnUnidades = Decimal("0")
+    total_compras_mozzarella: Plata = Decimal("0")
+    barras_vendidas: EnUnidades = Decimal("0")
+    total_ventas_mozzarella: Plata = Decimal("0")
+    total_gastos_mozzarella: Plata = Decimal("0")
+    precio_promedio_compra_barra: Plata = Decimal("0")
+    precio_promedio_venta_barra: Plata = Decimal("0")
+    margen_por_barra: Plata = Decimal("0")  # ganancia de la mozzarella / barras vendidas
+    valor_realizado_barra: Plata = Decimal("0")
     # Residuo CON SIGNO de las barras: compradas - vendidas en el período.
-    barras_pendientes: Decimal = Decimal("0")
+    barras_pendientes: EnUnidades = Decimal("0")
     # Del período (ajustes del inventario de queso; la mozzarella no participa)
-    kilos_a_borona: Decimal  # queso pasado a borona
-    kilos_merma: Decimal  # LA MERMA REAL: ajustes con destino merma
+    kilos_a_borona: EnKilos  # queso pasado a borona
+    kilos_merma: EnKilos  # LA MERMA REAL: ajustes con destino merma
     # Residuo CON SIGNO del lote comprado: comprado - vendido como queso -
     # pasado a borona - merma. Negativo = se movió queso de otra temporada.
-    kilos_pendientes: Decimal
+    kilos_pendientes: EnKilos
     # Desgloses de la ganancia del período
     por_producto: list[GananciaProducto] = []
     por_productor: list[GananciaProductor] = []
     # Acumulados (histórico, sin filtro de fechas)
-    kilos_disponibles: Decimal  # queso: comprados netos - vendidos - ajustados
-    borona_disponible: Decimal  # de compras + conversiones - vendida
-    # Barras de mozzarella disponibles: compradas - vendidas. Su propio renglón,
-    # con su propia unidad, jamás sumada con las dos de arriba.
-    barras_disponibles: Decimal = Decimal("0")
+    # LOS TRES DE SIEMPRE, cada uno el inventario de SU producto y nombrado por su
+    # CLAVE ('queso', 'borona', 'mozzarella'), que es como se llaman estos tres campos.
+    # No son "el primero del catálogo que se pesa" ni "el primero que se cuenta": eso
+    # dependía del ORDEN, que es presentación, y agregar un producto y ponerlo de
+    # primero le cambiaba a estas tarjetas lo que dicen. Siguen aquí porque la pantalla
+    # los lee. El inventario de CUALQUIER producto sale en `existencias`.
+    kilos_disponibles: EnKilos  # queso: comprados netos - vendidos - ajustados
+    borona_disponible: EnKilos  # de compras + conversiones - vendida
+    # Unidades disponibles del producto por unidad de siempre: compradas - vendidas.
+    # Su propio renglón, con su propia unidad, jamás sumada con las dos de arriba.
+    barras_disponibles: EnUnidades = Decimal("0")
+    # EL INVENTARIO POR PRODUCTO, uno por fila y en la unidad de cada uno. Es de aquí
+    # de donde la pantalla tiene que leer las existencias: los tres campos de arriba
+    # solo hablan de los tres productos con los que nació el módulo.
+    existencias: list[ExistenciaProducto] = []
     # Las dos cifras de cartera INCLUYEN los saldos de la cuenta anterior: es lo
     # que de verdad se debe cobrar y pagar hoy. Los dos campos de abajo son ese
     # pedazo por separado, para poder mostrar el desglose y que se vea de dónde
     # sale la suma. Ojo: los saldos anteriores NO tocan kilos ni ganancia.
-    por_pagar_productores: Decimal
-    por_cobrar_clientes: Decimal
-    por_cobrar_libro_anterior: Decimal = Decimal("0")
-    por_pagar_libro_anterior: Decimal = Decimal("0")
+    por_pagar_productores: Plata
+    por_cobrar_clientes: Plata
+    por_cobrar_libro_anterior: Plata = Decimal("0")
+    por_pagar_libro_anterior: Plata = Decimal("0")
 
 
 class SugerenciasReventa(BaseSchema):
@@ -788,14 +939,14 @@ class EstadoCuentaVenta(BaseSchema):
     tipo: str  # 'queso' | 'borona' | 'mozzarella'
     producto: str  # 'Queso' | 'Borona' | 'Mozzarella' (listo para mostrar)
     unidad: str  # 'kg' | 'barra'
-    kilos: Decimal
-    precio_kilo: Decimal
-    barras: Decimal = Decimal("0")
-    precio_barra: Decimal = Decimal("0")
-    valor_total: Decimal
-    abonado: Decimal
-    saldo: Decimal
-    saldo_a_favor: Decimal = Decimal("0")
+    kilos: EnKilos
+    precio_kilo: Plata
+    barras: EnUnidades = Decimal("0")
+    precio_barra: Plata = Decimal("0")
+    valor_total: Plata
+    abonado: Plata
+    saldo: Plata
+    saldo_a_favor: Plata = Decimal("0")
     estado: str  # pendiente | parcial | pagada
 
 
@@ -812,7 +963,7 @@ class EstadoCuentaPago(BaseSchema):
     """
 
     fecha: date
-    valor: Decimal
+    valor: Plata
 
 
 class EstadoCuentaSaldoAnterior(BaseSchema):
@@ -826,10 +977,10 @@ class EstadoCuentaSaldoAnterior(BaseSchema):
 
     fecha: date
     concepto: str
-    valor_total: Decimal
-    abonado: Decimal
-    saldo: Decimal
-    saldo_a_favor: Decimal = Decimal("0")
+    valor_total: Plata
+    abonado: Plata
+    saldo: Plata
+    saldo_a_favor: Plata = Decimal("0")
 
 
 class EstadoCuentaCliente(BaseSchema):
@@ -842,23 +993,23 @@ class EstadoCuentaCliente(BaseSchema):
     # cliente compró 40 kg de queso y 8 barras, "48" no es nada. `total_kilos` NO
     # incluye barras y `total_barras` no incluye kilos, así el cliente reconoce en
     # el documento exactamente lo que le despacharon.
-    total_kilos: Decimal
-    total_barras: Decimal = Decimal("0")
+    total_kilos: EnKilos
+    total_barras: EnUnidades = Decimal("0")
     # `total_facturado` y `total_abonado` son SOLO del sistema; lo que venía del
     # libro anterior va aparte en los tres campos libro_anterior_*.
-    total_facturado: Decimal
-    total_abonado: Decimal
+    total_facturado: Plata
+    total_abonado: Plata
     # TODO lo que el cliente debe hoy, que es la única cifra que le importa:
     #   (total_facturado - total_abonado) + libro_anterior_saldo = saldo
-    saldo: Decimal
-    saldo_a_favor: Decimal = Decimal("0")
+    saldo: Plata
+    saldo_a_favor: Plata = Decimal("0")
     ventas: list[EstadoCuentaVenta] = []
     pagos: list[EstadoCuentaPago] = []
     # Lo que traía debiendo del sistema anterior (vacío para casi todos)
     saldos_anteriores: list[EstadoCuentaSaldoAnterior] = []
-    libro_anterior_total: Decimal = Decimal("0")
-    libro_anterior_abonado: Decimal = Decimal("0")
-    libro_anterior_saldo: Decimal = Decimal("0")
+    libro_anterior_total: Plata = Decimal("0")
+    libro_anterior_abonado: Plata = Decimal("0")
+    libro_anterior_saldo: Plata = Decimal("0")
 
 
 # --------------------------------------- estado de cuenta DEL PRODUCTOR
@@ -888,16 +1039,16 @@ class EstadoCuentaCompra(BaseSchema):
     fecha: date
     tipo: str = "queso"  # 'queso' (kg) | 'mozzarella' (barras)
     unidad: str = "kg"  # 'kg' | 'barra'
-    kilos: Decimal  # kilos_netos: los que se le pagan
-    borona_kilos: Decimal  # la borona que vino con el lote (no se paga); 0 si no hubo
-    precio_kilo: Decimal
+    kilos: EnKilos  # kilos_netos: los que se le pagan
+    borona_kilos: EnKilos  # la borona que vino con el lote (no se paga); 0 si no hubo
+    precio_kilo: Plata
     # En una compra de kilos van en CERO (lo exige el CHECK de la tabla).
-    barras: Decimal = Decimal("0")
-    precio_barra: Decimal = Decimal("0")
-    valor_total: Decimal
-    abonado: Decimal
-    saldo: Decimal
-    saldo_a_favor: Decimal = Decimal("0")
+    barras: EnUnidades = Decimal("0")
+    precio_barra: Plata = Decimal("0")
+    valor_total: Plata
+    abonado: Plata
+    saldo: Plata
+    saldo_a_favor: Plata = Decimal("0")
     estado: str  # pendiente | parcial | pagada
 
 
@@ -911,7 +1062,7 @@ class EstadoCuentaPagoProductor(BaseSchema):
     """
 
     fecha: date
-    valor: Decimal
+    valor: Plata
 
 
 class EstadoCuentaProductor(BaseSchema):
@@ -920,22 +1071,22 @@ class EstadoCuentaProductor(BaseSchema):
     hasta: date | None
     emitido: date  # fecha de generación
     compras: int  # cuántas compras se le hicieron (las del sistema, no las del libro)
-    total_kilos: Decimal  # kilos netos, los que se le pagan (NO incluye barras)
-    total_barras: Decimal = Decimal("0")  # barras de mozzarella, su propio total
+    total_kilos: EnKilos  # kilos netos, los que se le pagan (NO incluye barras)
+    total_barras: EnUnidades = Decimal("0")  # barras de mozzarella, su propio total
     # `total_comprado` y `total_pagado` son SOLO del sistema; lo que venía del
     # libro anterior va aparte en los tres campos libro_anterior_*.
-    total_comprado: Decimal  # lo que valen sus compras
-    total_pagado: Decimal  # lo que se le ha abonado
+    total_comprado: Plata  # lo que valen sus compras
+    total_pagado: Plata  # lo que se le ha abonado
     # Lo que traía a medio pagar del sistema anterior: SOLO los saldos de tipo
     # 'pagar' (los de tipo 'cobrar' son deudas de clientes y no entran aquí).
     saldos_anteriores: list[EstadoCuentaSaldoAnterior] = []
-    libro_anterior_total: Decimal = Decimal("0")
-    libro_anterior_abonado: Decimal = Decimal("0")
-    libro_anterior_saldo: Decimal = Decimal("0")
+    libro_anterior_total: Plata = Decimal("0")
+    libro_anterior_abonado: Plata = Decimal("0")
+    libro_anterior_saldo: Plata = Decimal("0")
     # TODO lo que se le debe hoy, que es la única cifra que le importa a él:
     #   (total_comprado - total_pagado) + libro_anterior_saldo = saldo
-    saldo: Decimal
-    saldo_a_favor: Decimal = Decimal("0")
+    saldo: Plata
+    saldo_a_favor: Plata = Decimal("0")
     compras_detalle: list[EstadoCuentaCompra] = []
     pagos: list[EstadoCuentaPagoProductor] = []
 
@@ -997,30 +1148,30 @@ class TemporadaResumen(BaseSchema):
     dias: int
     notas: str | None
     # Kilos
-    kilos_comprados: Decimal
-    kilos_vendidos: Decimal
-    kilos_borona_vendidos: Decimal
-    kilos_a_borona: Decimal
-    kilos_merma: Decimal
-    kilos_pendientes: Decimal
+    kilos_comprados: EnKilos
+    kilos_vendidos: EnKilos
+    kilos_borona_vendidos: EnKilos
+    kilos_a_borona: EnKilos
+    kilos_merma: EnKilos
+    kilos_pendientes: EnKilos
     # Barras (mozzarella): su propio renglón, nunca sumado con los kilos de arriba
-    barras_compradas: Decimal = Decimal("0")
-    barras_vendidas: Decimal = Decimal("0")
-    barras_pendientes: Decimal = Decimal("0")
+    barras_compradas: EnUnidades = Decimal("0")
+    barras_vendidas: EnUnidades = Decimal("0")
+    barras_pendientes: EnUnidades = Decimal("0")
     # Plata (incluye las dos unidades: los pesos son pesos)
-    total_compras: Decimal
-    total_ventas: Decimal
-    total_gastos: Decimal
-    ganancia: Decimal
-    margen_por_kilo: Decimal
-    precio_promedio_compra: Decimal
-    precio_promedio_venta: Decimal
+    total_compras: Plata
+    total_ventas: Plata
+    total_gastos: Plata
+    ganancia: Plata
+    margen_por_kilo: Plata
+    precio_promedio_compra: Plata
+    precio_promedio_venta: Plata
     # Los precios promedio de la mozzarella, por BARRA
-    precio_promedio_compra_barra: Decimal = Decimal("0")
-    precio_promedio_venta_barra: Decimal = Decimal("0")
+    precio_promedio_compra_barra: Plata = Decimal("0")
+    precio_promedio_venta_barra: Plata = Decimal("0")
     # Lo que falta de ESTA temporada
-    por_cobrar: Decimal
-    por_pagar: Decimal
+    por_cobrar: Plata
+    por_pagar: Plata
     # Si ya no falta nada: sin queso pendiente, sin cobrar y sin pagar
     cerrada_de_verdad: bool
 
@@ -1036,10 +1187,10 @@ class TemporadasPanel(BaseSchema):
 
     temporadas: list[TemporadaResumen] = []
     # Suma de las temporadas de la lista
-    total_ganancia: Decimal
-    total_kilos_comprados: Decimal
-    total_ventas: Decimal
-    total_compras: Decimal
+    total_ganancia: Plata
+    total_kilos_comprados: EnKilos
+    total_ventas: Plata
+    total_compras: Plata
     # La mejor y la peor por ganancia (null si no hay ninguna temporada)
     mejor: str | None = None
     peor: str | None = None
@@ -1060,37 +1211,37 @@ class CompraDelLoteRead(BaseSchema):
     """
 
     productor: str
-    kilos: Decimal
-    borona_recibida: Decimal
-    precio_kilo: Decimal
-    valor_total: Decimal
-    saldo: Decimal
-    saldo_a_favor: Decimal = Decimal("0")  # lo que falta pagarle por esta compra
+    kilos: EnKilos
+    borona_recibida: EnKilos
+    precio_kilo: Plata
+    valor_total: Plata
+    saldo: Plata
+    saldo_a_favor: Plata = Decimal("0")  # lo que falta pagarle por esta compra
     # A dónde fueron SUS kilos (los cuatro suman `kilos`)
-    kilos_vendidos: Decimal
-    kilos_a_borona: Decimal
-    kilos_merma: Decimal
-    kilos_sin_vender: Decimal
-    borona_vendida: Decimal
-    borona_sin_vender: Decimal
+    kilos_vendidos: EnKilos
+    kilos_a_borona: EnKilos
+    kilos_merma: EnKilos
+    kilos_sin_vender: EnKilos
+    borona_vendida: EnKilos
+    borona_sin_vender: EnKilos
     # Plata
-    ingresos: Decimal
-    gastos: Decimal
-    costo_realizado: Decimal  # lo que costó lo que ya salió (vendido + merma)
-    costo_sin_vender: Decimal
-    ganancia: Decimal
-    margen_kilo: Decimal
+    ingresos: Plata
+    gastos: Plata
+    costo_realizado: Plata  # lo que costó lo que ya salió (vendido + merma)
+    costo_sin_vender: Plata
+    ganancia: Plata
+    margen_kilo: Plata
 
 
 class GananciaDia(BaseSchema):
     """Lo que dejó un día concreto: lo vendido ese día menos lo que costó."""
 
     fecha: date
-    kilos: Decimal
-    ingresos: Decimal
-    costo: Decimal  # lo que había costado ESE queso (reparto FIFO, no promedio)
-    gastos: Decimal  # fletes de los despachos de ese día
-    ganancia: Decimal
+    kilos: EnKilos
+    ingresos: Plata
+    costo: Plata  # lo que había costado ESE queso (reparto FIFO, no promedio)
+    gastos: Plata  # fletes de los despachos de ese día
+    ganancia: Plata
 
 
 class GananciaPorDia(BaseSchema):
@@ -1106,11 +1257,11 @@ class GananciaPorDia(BaseSchema):
     desde: date
     hasta: date
     dias: list[GananciaDia] = []
-    kilos: Decimal
-    ingresos: Decimal
-    costo: Decimal
-    gastos: Decimal
-    ganancia: Decimal
+    kilos: EnKilos
+    ingresos: Plata
+    costo: Plata
+    gastos: Plata
+    ganancia: Plata
 
 
 class VentaDelLoteRead(BaseSchema):
@@ -1124,13 +1275,13 @@ class VentaDelLoteRead(BaseSchema):
     fecha: date
     cliente: str
     tipo: str  # 'queso' | 'borona'
-    kilos: Decimal
-    kilos_venta: Decimal
-    precio_kilo: Decimal
-    ingreso: Decimal  # la parte de la venta que le corresponde a este lote
-    gasto: Decimal
-    costo: Decimal
-    ganancia: Decimal
+    kilos: EnKilos
+    kilos_venta: EnKilos
+    precio_kilo: Plata
+    ingreso: Plata  # la parte de la venta que le corresponde a este lote
+    gasto: Plata
+    costo: Plata
+    ganancia: Plata
     partida: bool  # la venta se repartió con otros lotes
 
 
@@ -1156,31 +1307,31 @@ class LoteResumen(BaseSchema):
     productores: list[str] = []
     compras: int
     # Lo comprado
-    kilos_comprados: Decimal
-    costo_total: Decimal
-    costo_kilo: Decimal  # costo_total / kilos_comprados
-    por_pagar: Decimal  # lo que falta pagarles a los productores de ESTE lote
-    borona_recibida: Decimal  # la que llegó con el lote y no se paga
+    kilos_comprados: EnKilos
+    costo_total: Plata
+    costo_kilo: Plata  # costo_total / kilos_comprados
+    por_pagar: Plata  # lo que falta pagarles a los productores de ESTE lote
+    borona_recibida: EnKilos  # la que llegó con el lote y no se paga
     # A dónde fue el queso del lote (los cuatro suman kilos_comprados)
-    kilos_vendidos: Decimal
-    kilos_a_borona: Decimal
-    kilos_merma: Decimal
-    kilos_sin_vender: Decimal
+    kilos_vendidos: EnKilos
+    kilos_a_borona: EnKilos
+    kilos_merma: EnKilos
+    kilos_sin_vender: EnKilos
     # Borona del lote: la recibida gratis más la que salió de su propio queso
-    borona_vendida: Decimal
-    borona_sin_vender: Decimal
+    borona_vendida: EnKilos
+    borona_sin_vender: EnKilos
     # Plata
-    ingreso_queso: Decimal
-    ingreso_borona: Decimal
-    ingresos: Decimal  # queso + borona
-    gastos: Decimal
-    costo_vendido: Decimal
-    costo_borona_vendida: Decimal  # solo la borona que venía de queso (la gratis cuesta 0)
-    costo_merma: Decimal
-    costo_sin_vender: Decimal
-    ganancia: Decimal  # ingresos - costo_vendido - costo_borona_vendida - costo_merma - gastos
-    margen_kilo: Decimal  # ganancia / kilos vendidos (queso + borona)
-    precio_venta_kilo: Decimal  # ingreso_queso / kilos_vendidos
+    ingreso_queso: Plata
+    ingreso_borona: Plata
+    ingresos: Plata  # queso + borona
+    gastos: Plata
+    costo_vendido: Plata
+    costo_borona_vendida: Plata  # solo la borona que venía de queso (la gratis cuesta 0)
+    costo_merma: Plata
+    costo_sin_vender: Plata
+    ganancia: Plata  # ingresos - costo_vendido - costo_borona_vendida - costo_merma - gastos
+    margen_kilo: Plata  # ganancia / kilos vendidos (queso + borona)
+    precio_venta_kilo: Plata  # ingreso_queso / kilos_vendidos
     # Si ya no queda nada del lote por vender
     cerrado: bool
     # El detalle: quién aportó qué y a quién se le vendió. Van en la misma
@@ -1209,20 +1360,20 @@ class LotesPanel(BaseSchema):
     """
 
     lotes: list[LoteResumen] = []
-    total_ganancia: Decimal
-    total_kilos_comprados: Decimal
-    total_costo: Decimal
-    total_ingresos: Decimal
-    total_por_pagar: Decimal
+    total_ganancia: Plata
+    total_kilos_comprados: EnKilos
+    total_costo: Plata
+    total_ingresos: Plata
+    total_por_pagar: Plata
     # Todavía sin vender, de todos los lotes juntos
-    total_kilos_sin_vender: Decimal
-    total_costo_sin_vender: Decimal
+    total_kilos_sin_vender: EnKilos
+    total_costo_sin_vender: Plata
     mejor: date | None = None
     peor: date | None = None
     # Kilos vendidos o ajustados sin lote de origen (falta cargar una compra)
-    kilos_sin_lote: Decimal
-    borona_sin_lote: Decimal
-    ingreso_sin_lote: Decimal
+    kilos_sin_lote: EnKilos
+    borona_sin_lote: EnKilos
+    ingreso_sin_lote: Plata
     # Barras compradas (histórico) que NO están contadas en este panel. No es un
     # error como `kilos_sin_lote`: es un aviso de alcance. Ver el docstring.
-    barras_fuera_del_reparto: Decimal = Decimal("0")
+    barras_fuera_del_reparto: EnUnidades = Decimal("0")

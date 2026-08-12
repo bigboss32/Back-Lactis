@@ -137,10 +137,16 @@ def test_la_panela_de_la_otra_quesera_no_mueve_la_plata(client, ha, hb):
         desglose: 4 filas en ceros, suma $0 contra un encabezado de -$200.000
 
     LO QUE PASA AHORA: los 100 kg son kilos, la plata es de kilos, el promedio de
-    compra es $2.000 y la fila "Aún en inventario" del desglose se lleva los
-    $200.000. La cifra nueva es la correcta porque la unidad de un producto es un
+    compra es $2.000 y los $200.000 están en la fila DE LA PANELA que quedó en
+    inventario. La cifra nueva es la correcta porque la unidad de un producto es un
     dato del catálogo DE SU EMPRESA: lo que la quesera A llame 'panela' no puede
     cambiar en qué se miden los kilos que compró la B.
+
+    Y LA PLATA ESTÁ EN LA FILA DE LA PANELA, no en la del queso, que es la segunda
+    mitad del arreglo: cada producto tiene su propio pozo de costo. Antes, cuando la
+    clasificación por fin dejó estos kilos del lado de los kilos, su costo caía en
+    "Aún en inventario" del QUESO —la única fila de residuo que existía—, así que el
+    dueño veía queso en bodega que nunca compró. Ahora la panela tiene su fila.
     """
     crear_producto(client, ha, "Panela", unidad="unidad")
     crear_producto(client, hb, "Panela")  # por kilo, que es el defecto
@@ -161,11 +167,18 @@ def test_la_panela_de_la_otra_quesera_no_mueve_la_plata(client, ha, hb):
     assert D(res["barras_compradas"]) == CERO
     assert D(res["total_compras_mozzarella"]) == CERO
     assert D(res["precio_promedio_compra_barra"]) == CERO
-    # Los 100 kg están en inventario y su plata está en ESA fila
+    # Los 100 kg están en inventario y su plata está en LA FILA DE LA PANELA
     assert D(res["kilos_pendientes"]) == D("100.00")
-    pendiente = next(f for f in res["por_producto"] if f["producto"] == "pendiente")
+    pendiente = next(
+        f for f in res["por_producto"] if f["producto"] == "panela_pendiente"
+    )
     assert D(pendiente["kilos"]) == D("100.00")
     assert D(pendiente["costo"]) == D("200000.00")
+    # Y el queso, que no se compró, no carga ni un peso de esa panela.
+    del_queso = next(f for f in res["por_producto"] if f["producto"] == "pendiente")
+    assert D(del_queso["kilos"]) == CERO and D(del_queso["costo"]) == CERO, (
+        f"la panela le dejó costo al queso: {del_queso}"
+    )
     # No hace falta ninguna fila de rescate: la plata cayó donde le corresponde
     assert "sin_producto" not in [f["producto"] for f in res["por_producto"]]
     exigir_la_regla_de_oro(res, "quesera B con su panela por kilo")
@@ -291,7 +304,9 @@ def test_la_validacion_de_la_unidad_mira_solo_el_catalogo_propio(client, ha, hb)
                 tipo="panela", kilos_brutos="10", precio_kilo="2000")
     print("A intenta comprar su panela en KILOS ->", r.status_code, detalle(r))
     assert r.status_code in (400, 422)
-    assert "barras" in detalle(r)
+    # El mensaje nombra EL PRODUCTO —con el nombre que el dueño le puso— y la unidad
+    # en que se mide, que es lo que le dice qué corregir.
+    assert "unidades" in detalle(r) and "Panela" in detalle(r)
     r = comprar(client, hb, fecha="2026-03-02", productor="Pedro Perez",
                 tipo="panela", barras="10", precio_barra="2000")
     print("B intenta comprar su panela en BARRAS ->", r.status_code, detalle(r))
@@ -304,10 +319,11 @@ def test_un_tipo_que_no_esta_en_el_catalogo_propio_se_pesa(client, ha, hb):
     y eso tiene que ser IGUAL al escribir y al leer.
 
     Es la regla que hace que una fila no pueda entrar validada como una unidad y
-    quedar leída como la otra: `unidades_por_clave` no la encuentra y quien pregunta
-    la pesa; `se_mide_en_kilos` tampoco la reconoce y también la pesa. (Que se
-    acepte un tipo que no está en el catálogo es otro asunto, medido aparte en la
-    auditoría adversarial.)
+    quedar leída como la otra: al escribir, `CatalogoReventa` no la encuentra y quien
+    pregunta la pesa; al leer, `se_mide_en_kilos` tampoco la reconoce y también la
+    pesa. (Que se acepte un tipo que no está en el catálogo es otro asunto: su plata
+    sale en su propia fila del desglose, medido en
+    tests/test_reventa_el_catalogo_manda.py.)
     """
     crear_producto(client, hb, "Panela", unidad="unidad")
     r = comprar(client, ha, fecha="2026-03-01", productor="Pedro Perez",
@@ -405,20 +421,21 @@ def test_la_red_del_desglose_saca_una_fila_propia_en_vez_de_perder_la_plata():
     ) == []
 
 
-def test_el_promedio_por_barra_no_divide_plata_entre_cero_barras(client, ha):
-    """Una fila con una clave "por unidad" pero SIN unidades: su plata no puede
-    contarse como plata de barras.
+def test_el_put_ya_no_le_puede_meter_kilos_a_una_compra_por_unidad(client, ha):
+    """LA PUERTA QUE PRODUCÍA LA FILA MESTIZA, CERRADA.
 
-    Se llega por el PUT de la compra, que no mira el catálogo (defecto aparte, ya
-    medido en la auditoría): a una compra de 'panela' por unidad se le meten kilos.
-    La fila queda con 50 kg, 0 barras y $200.000, y antes eso significaba
-    $200.000 de "compras de mozzarella" con cero barras: el promedio por barra
-    salía en $0 —dividir $200.000 entre 0 barras— y el desglose no imprimía
-    ninguna fila de barras donde poner esa plata.
+    El PUT de la compra era el único camino del módulo que no miraba el catálogo, así
+    que a una compra de 'panela' POR UNIDAD se le podían meter kilos: la fila quedaba
+    con 50 kg, 0 barras y $200.000. Eso era plata que no cabía en ninguna parte: la
+    clave decía "por unidad", así que sus $200.000 se sumaban a las "compras de
+    mozzarella" con CERO barras al lado —el promedio por barra salía en $0, que es la
+    forma amable de decir "dividí entre cero"— y el desglose no imprimía ninguna fila
+    de barras donde poner esa plata.
 
-    Ahora la unidad de la fila la decide LO QUE LA FILA TRAE: sin barras, se pesa.
-    Los $200.000 son de kilos, el promedio por kilo es real ($4.000) y el de barras
-    no tiene ni plata ni barras que dividir.
+    Ahora la unidad del renglón la manda el catálogo también por esta puerta, así que
+    la edición se rechaza con un mensaje entendible y la fila mestiza no se puede
+    escribir. Y como la tabla ya NO tiene el CHECK que la habría rechazado (se quitó
+    al abrir el catálogo), esta validación es lo único que impide que exista.
     """
     crear_producto(client, ha, "Panela", unidad="unidad")
     r = comprar(client, ha, fecha="2026-03-01", productor="Pedro Perez",
@@ -427,18 +444,34 @@ def test_el_promedio_por_barra_no_divide_plata_entre_cero_barras(client, ha):
     compra_id = r.json()["id"]
     r = client.put(f"{API}/compras/{compra_id}",
                    json={"kilos_brutos": "50", "precio_kilo": "4000"}, headers=ha)
-    assert r.status_code == 200, detalle(r)
-    fila = r.json()
-    print(f"\ncompra editada: tipo={fila['tipo']} kilos_netos={fila['kilos_netos']} "
-          f"barras={fila['barras']} valor_total={fila['valor_total']}")
-    assert D(fila["kilos_netos"]) == D("50.00") and D(fila["barras"]) == CERO
+    print("\nPUT metiendole KILOS a una compra por unidad ->", r.status_code, detalle(r))
+    assert r.status_code in (400, 422), (
+        "el PUT dejo meterle kilos a una compra que se cuenta por unidades"
+    )
+    assert "unidades" in detalle(r) and "Panela" in detalle(r)
+
+    # Y la compra quedó como estaba: 30 unidades a $4.000, sin un kilo encima.
+    fila = client.get(f"{API}/compras", headers=ha).json()["items"][0]
+    print(f"la compra sigue en: barras={fila['barras']} kilos_netos={fila['kilos_netos']} "
+          f"valor_total={fila['valor_total']}")
+    assert D(fila["barras"]) == D("30") and D(fila["kilos_netos"]) == CERO
+    assert D(fila["valor_total"]) == D("120000.00")
 
     res = resumen(client, ha)
-    imprimir_desglose("COMPRA CON CLAVE 'POR UNIDAD' Y CERO BARRAS", res)
-    assert D(res["kilos_comprados"]) == D("50.00")
-    assert D(res["precio_promedio_compra"]) == D("4000.00")
-    # Ni un peso rotulado como barras, y por lo tanto nada que dividir entre cero
+    imprimir_desglose("LA COMPRA POR UNIDAD, INTACTA", res)
+    # NI UN KILO, y la plata completa en el encabezado.
+    assert D(res["kilos_comprados"]) == CERO
+    assert D(res["total_compras"]) == D("120000.00")
+    # Y su plata está en LA FILA DE LA PANELA, con sus 30 unidades al lado y su precio
+    # por unidad. Los campos `*_mozzarella` del encabezado hablan de la mozzarella y de
+    # nadie más, así que se quedan en cero: por eso mismo el promedio por barra ya no
+    # tiene plata que dividir entre cero unidades, que era el defecto que esta prueba
+    # nació midiendo.
+    fila = next(f for f in res["por_producto"] if f["producto"] == "panela_pendiente")
+    assert D(fila["barras"]) == D("30")
+    assert D(fila["costo"]) == D("120000.00")
+    assert D(fila["costo_barra"]) == D("4000.00")
     assert D(res["barras_compradas"]) == CERO
     assert D(res["total_compras_mozzarella"]) == CERO
     assert D(res["precio_promedio_compra_barra"]) == CERO
-    exigir_la_regla_de_oro(res, "clave por unidad con cero barras")
+    exigir_la_regla_de_oro(res, "compra por unidad intacta")

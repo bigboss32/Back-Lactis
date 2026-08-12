@@ -5,7 +5,8 @@ import os
 import re
 import unicodedata
 import uuid
-from datetime import date, timedelta
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -34,6 +35,7 @@ from app.modules.reventa.models import (
     ESTADO_PAGADA,
     ESTADO_PARCIAL,
     ESTADO_PENDIENTE,
+    TIPO_BORONA,
     TIPO_DOC_COMPRA,
     TIPO_DOC_VENTA,
     TIPO_MOZZARELLA,
@@ -60,11 +62,19 @@ from app.modules.reventa.models import (
     derivados_de_unidad,
     unidad_de,
 )
+from app.common.dinero import repartir_al_resto_mayor
+from app.modules.reventa.catalogo import (
+    CLAVE_SIN_IDENTIFICAR,
+    CatalogoReventa,
+    GrupoDeCosteo,
+)
+from app.modules.reventa.existencias import ExistenciasReventa
 from app.modules.reventa.lotes import (
     AjusteEvento,
     CompraEvento,
     LoteCalculado,
     VentaEvento,
+    kilos_que_salen_de_lo_pagado,
     repartir_lotes,
 )
 from app.modules.reventa.repository import (
@@ -85,6 +95,7 @@ from app.modules.reventa.schemas import (
     DocumentoReventaRead,
     DocumentoVentaCreate,
     EnlaceCompartido,
+    ExistenciaProducto,
     RenglonCompraCreate,
     RenglonVentaCreate,
     VentaQuesoRead,
@@ -116,6 +127,34 @@ from app.utils.export import (
 
 CERO = Decimal("0")
 DOS_DECIMALES = Decimal("0.01")
+
+
+@dataclass(frozen=True)
+class _MovimientoDeProducto:
+    """Lo que se compró y se vendió DE UN PRODUCTO en el período, en su unidad.
+
+    Es el ladrillo del desglose: una de estas por producto y por unidad, y el resumen
+    entero se arma sumándolas y repartiendo su plata. Va congelado (`frozen`) porque
+    estas cifras salen de la base y de ahí en adelante solo se leen: una que se pudiera
+    modificar a mitad del cálculo dejaría dos filas del desglose contando distinto.
+
+    `comprado` y `vendido` son kilos en un movimiento que se pesa y unidades en uno que
+    se cuenta, y NUNCA las dos cosas: las dos clases viajan en diccionarios separados
+    (ver `_movimientos_del_periodo`), que es lo que impide que "20 kg + 8 barras"
+    llegue a ser un número.
+    """
+
+    comprado: Decimal = CERO
+    comprado_plata: Decimal = CERO
+    # Lo que llegó GRATIS ENCIMA de las compras DE ESTE producto (la columna
+    # `borona_kilos`). No suma al pozo del costo —no se pagó— y no dice a quién le
+    # entró: eso lo dice cada compra en `subproducto_tipo`, y quien lo necesita lo
+    # pide agrupado por DESTINATARIO (`gratis_periodo_por_subproducto`). Este campo se
+    # queda por si alguna pantalla quiere mostrar "cuánto llegó gratis con el queso".
+    gratis: Decimal = CERO
+    vendido: Decimal = CERO
+    vendido_plata: Decimal = CERO
+    gastos: Decimal = CERO
 
 
 def _dinero(valor: Decimal) -> Decimal:
@@ -157,21 +196,228 @@ NOTAS_PRODUCTO = {
     "mozzarella_anterior": "barras compradas en un período anterior",
     "sin_producto": "revise el producto de esos movimientos: no quedó en ninguna unidad",
 }
-# Los renglones que se miden en BARRAS. Se listan en un solo sitio para que
-# ninguna parte del código tenga que acordarse de la regla por su cuenta.
-PRODUCTOS_EN_BARRAS = frozenset(
-    {"mozzarella", "mozzarella_pendiente", "mozzarella_anterior"}
-)
 # Cuando unos kilos no tienen costo porque la compra cayó fuera del período, no
 # se puede hablar de pérdida en pesos: se dice de dónde vienen.
 NOTA_SIN_COSTO = "se compró en un período anterior: aquí no lleva costo"
 
-# Nombre del producto listo para mostrarle al cliente en su estado de cuenta
+# ---------------------------------------------------------- los nombres YA IMPRESOS
+# LA CLAVE DE LA FILA DEL RESIDUO de cada grupo de costeo. El desglose ahora se arma
+# solo, producto por producto, y la regla general para nombrar la fila del residuo de
+# un grupo es "{clave del grupo}_pendiente". Pero los dos grupos que el cliente ya
+# tiene llevan meses saliendo con OTROS nombres —'pendiente' y 'mozzarella_pendiente'—
+# y esos nombres no son decoración: son el campo `producto` que la pantalla usa para
+# decidir cómo pintar cada renglón, y el rótulo que está impreso en los comprobantes
+# que el dueño ya archivó.
+#
+# ESTO ES UNA TABLA DE NOMBRES, NO UNA REGLA DE PLATA, y ahí está toda la diferencia
+# con lo que había antes. Ninguna cifra se decide aquí: el costo, el ingreso y la
+# cantidad de esas filas salen del catálogo igual que los de cualquier otro producto.
+# Lo único que esta tabla conserva es CÓMO SE LLAMA la fila, para no renombrarle al
+# dueño dos renglones que ya conoce.
+CLAVES_DE_RESIDUO_HISTORICAS: dict[str, tuple[str, str]] = {
+    TIPO_QUESO: ("pendiente", "anterior"),
+    TIPO_MOZZARELLA: ("mozzarella_pendiente", "mozzarella_anterior"),
+}
+# Lo mismo para la fila de la MERMA. La regla general es "{clave del producto}_merma",
+# pero la merma del queso lleva meses saliendo con la clave pelada 'merma'.
+CLAVES_DE_MERMA_HISTORICAS: dict[str, str] = {TIPO_QUESO: "merma"}
+
+
+# ------------------------------------- las claves que el desglose se reserva
+# EL PROBLEMA, Y LO ENCONTRÓ UNA REVISIÓN ADVERSARIAL: el desglose tiene filas que NO
+# son de un producto —la merma, lo que quedó en inventario, lo que salió de inventario
+# anterior, la plata sin clasificar— y cada una viaja con su propia clave en el campo
+# `producto`, que es con lo que la pantalla decide cómo pintar el renglón. Si el dueño
+# creaba un producto llamado "Merma", su clave era 'merma': su renglón salía rotulado
+# "Merma (pérdida real)" con una VENTA de $200.000 adentro, y además había DOS filas
+# con la clave 'merma' en la misma respuesta.
+#
+# LA REGLA, Y ES UNA SOLA: ninguna clave de producto puede ser una de las calculadas ni
+# terminar como terminan las calculadas. Se exige al CREAR el producto (ver
+# `clave_sin_chocar_con_el_desglose`), así que el catálogo no puede llegar a tener una,
+# y se vuelve a aplicar al armar la fila para atajar una que hubiera quedado guardada
+# de antes. El dueño no se entera: le pone al producto el nombre que quiera y lo que
+# cambia es la clave interna, que él nunca ve.
+CLAVES_CALCULADAS_DEL_DESGLOSE = frozenset(
+    {"merma", "pendiente", "anterior", "sin_producto", CLAVE_SIN_IDENTIFICAR}
+)
+# Y los tres sufijos con los que se arman las calculadas de los demás grupos. Reservar
+# el sufijo entero —y no cada clave concreta— es lo que hace que esto sea hermético:
+# la fila calculada de CUALQUIER producto futuro tiene la forma "{clave}_pendiente", y
+# si ninguna clave puede terminar así, ninguna puede chocar con ella.
+SUFIJOS_CALCULADOS_DEL_DESGLOSE = ("_pendiente", "_anterior", "_merma")
+# Lo que se le agrega a una clave que chocaba. Va al final para que la clave se siga
+# leyendo ('merma_producto' se entiende), y no puede volver a chocar porque no es
+# ninguno de los tres sufijos reservados.
+SUFIJO_PARA_NO_CHOCAR = "_producto"
+
+
+def choca_con_una_fila_calculada(clave: str) -> bool:
+    """Si esta clave le quitaría el renglón a una fila calculada del desglose."""
+    return clave in CLAVES_CALCULADAS_DEL_DESGLOSE or clave.endswith(
+        SUFIJOS_CALCULADOS_DEL_DESGLOSE
+    )
+
+
+def clave_sin_chocar_con_el_desglose(clave: str) -> str:
+    """La clave de un producto, corrida si chocaba con una fila calculada."""
+    return f"{clave}{SUFIJO_PARA_NO_CHOCAR}" if choca_con_una_fila_calculada(clave) else clave
+
+
+def _clave_de_fila(clave: str) -> str:
+    """La clave con la que sale la fila de un producto en la respuesta.
+
+    Es la del producto, con dos atajos:
+
+    · CUANDO EL `tipo` DE LAS FILAS ESTÁ EN BLANCO la respuesta llevaría una cadena
+      vacía en el campo con el que la pantalla decide cómo pintar el renglón, que no
+      le dice nada a nadie. Se le pone un nombre.
+    · CUANDO LA CLAVE CHOCA con una de las filas calculadas se corre, para que las dos
+      puedan salir en la misma respuesta sin pisarse (ver arriba).
+    """
+    if not clave:
+        return CLAVE_SIN_IDENTIFICAR
+    return clave_sin_chocar_con_el_desglose(clave)
+
+
+def _claves_de_residuo(clave_del_grupo: str) -> tuple[str, str]:
+    """(clave si sobró, clave si faltó) de la fila del residuo de un pozo."""
+    if clave_del_grupo in CLAVES_DE_RESIDUO_HISTORICAS:
+        return CLAVES_DE_RESIDUO_HISTORICAS[clave_del_grupo]
+    base = _clave_de_fila(clave_del_grupo)
+    return f"{base}_pendiente", f"{base}_anterior"
+
+
+def _clave_de_merma(clave_del_producto: str) -> str:
+    """La clave de la fila donde se reporta la merma DE ESE PRODUCTO.
+
+    Es una fila por producto de origen y no una sola del período: un ajuste dice de
+    qué producto salieron los kilos (ver `ConversionBorona`), y juntarlos todos en un
+    renglón obligaría a repartir después una plata que ya se sabe de quién es.
+    """
+    if clave_del_producto in CLAVES_DE_MERMA_HISTORICAS:
+        return CLAVES_DE_MERMA_HISTORICAS[clave_del_producto]
+    return f"{_clave_de_fila(clave_del_producto)}_merma"
+
+
+def _etiqueta_y_nota(
+    clave_fila: str, nombre: str, *, papel: str, se_pesa: bool
+) -> tuple[str, str]:
+    """El rótulo y el sub-texto de una fila del desglose, LISTOS PARA LA PANTALLA.
+
+    Primero se busca en las tablas de textos de siempre: si la fila es una de las que
+    el dueño ya conoce, sale con el texto exacto con el que siempre salió. Si es de un
+    producto que él agregó, el texto se arma con SU NOMBRE —el que le puso en el
+    catálogo, no la clave interna—, siguiendo el mismo patrón de las de siempre.
+
+    `papel` dice qué es la fila: 'vendido' (lo que salió vendido de este producto),
+    'merma' (lo que se perdió de él), 'pendiente' (lo que quedó en bodega) o
+    'anterior' (lo que salió de un inventario de antes del período).
+
+    EL `papel` MANDA SOBRE LA TABLA DE TEXTOS y por eso se pregunta primero: un
+    producto que el dueño llame "Merma" tiene una fila de VENTAS, y sacarla con el
+    rótulo "Merma (pérdida real)" —solo porque su clave se parece— le mostraría una
+    pérdida donde hubo una venta. La tabla de textos solo contesta por las filas que
+    de verdad son las de siempre.
+    """
+    if papel == "merma":
+        if clave_fila in ETIQUETAS_PRODUCTO:
+            return ETIQUETAS_PRODUCTO[clave_fila], NOTAS_PRODUCTO[clave_fila]
+        return f"Merma de {nombre} (pérdida real)", NOTAS_PRODUCTO["merma"]
+    if clave_fila in ETIQUETAS_PRODUCTO:
+        return ETIQUETAS_PRODUCTO[clave_fila], NOTAS_PRODUCTO[clave_fila]
+    if papel == "pendiente":
+        return (
+            f"{nombre} aún en inventario" + ("" if se_pesa else " (unidades)"),
+            "plata invertida, aún sin vender",
+        )
+    if papel == "anterior":
+        return (
+            f"{nombre} salido de inventario anterior"
+            + ("" if se_pesa else " (unidades)"),
+            "se compró en un período anterior",
+        )
+    if se_pesa:
+        return f"Vendido como {nombre}", "producto del catálogo, vendido por kilo"
+    return f"{nombre} vendido (unidades)", "producto del catálogo, vendido por unidad"
+
+# Nombre del producto listo para mostrarle al cliente en su estado de cuenta, para
+# cuando la clave NO ESTÁ en el catálogo (una fila vieja, una importada). Con el
+# producto en el catálogo manda SU NOMBRE, que es el que el dueño le puso.
+#
+# POR QUÉ IMPORTA QUE MANDE EL DEL CATÁLOGO: este documento SE LE ENTREGA AL CLIENTE.
+# Antes el rótulo salía de `clave.capitalize()`, así que un producto llamado "Queso
+# costeño artesanal" llegaba al cliente como 'Queso_costeno_artesanal' —con guiones
+# bajos y sin tilde— y renombrarlo no cambiaba nada de lo que él leía. Los tres de
+# siempre se llaman igual en el catálogo que aquí, así que para el cliente actual el
+# documento sale idéntico.
 NOMBRE_PRODUCTO = {
     TIPO_VENTA_QUESO: "Queso",
     TIPO_VENTA_BORONA: "Borona",
     TIPO_VENTA_MOZZARELLA: "Mozzarella",
 }
+
+
+def _nombre_para_el_cliente(catalogo: CatalogoReventa, clave: str) -> str:
+    """Cómo se le nombra el producto al cliente en su estado de cuenta."""
+    producto = catalogo.de(clave)
+    if producto.del_catalogo:
+        return producto.nombre
+    return NOMBRE_PRODUCTO.get(clave, clave.capitalize())
+
+
+def _exigir_destino(
+    destino: str | None,
+    catalogo: CatalogoReventa,
+    clave_padre: str,
+    propuesto: str | None,
+    *,
+    de_donde: str,
+) -> str:
+    """Devuelve el destinatario ya resuelto, o revienta con un mensaje que dice QUÉ
+    HACER.
+
+    El mensaje es el trabajo de esta función. Un rechazo que solo dice "no se puede"
+    deja al dueño mirando la pantalla sin saber qué le falta.
+
+    Y AQUÍ LLEGAN POCOS CASOS, A PROPÓSITO: el catálogo ya resuelve todo lo que se
+    puede resolver sin adivinar (ver `CatalogoReventa._quien_recibe`, la regla de
+    "registrar siempre gana"), así que un destinatario en nulo significa que de verdad
+    hace falta que una persona decida. Son dos situaciones y cada una tiene su salida:
+    nombró un producto que no puede recibir kilos, o el producto de siempre existe pero
+    se cuenta por unidades.
+
+    `de_donde` es cómo se llaman esos kilos en el texto ("esos kilos que llegaron
+    gratis" / "estos kilos"): el mensaje tiene que hablar de lo que él acaba de
+    escribir.
+    """
+    if destino is not None:
+        return destino
+
+    producto = catalogo.de(clave_padre)
+    if propuesto:
+        elegido = catalogo.de(propuesto)
+        if elegido.del_catalogo:
+            raise BusinessError(
+                f"{elegido.nombre} se cuenta por unidades, así que no puede recibir "
+                f"{de_donde}: una barra no se pesa. Escoja un producto que se pese, o "
+                "cámbiele la unidad en el catálogo"
+            )
+        raise BusinessError(
+            f"'{propuesto}' no es un producto de esta empresa, así que no puede "
+            f"recibir {de_donde}. Revise el nombre, o agréguelo al catálogo como un "
+            "producto que se pesa"
+        )
+    # Nadie lo nombró y el producto de siempre no puede recibir kilos: es el único
+    # camino que queda sin destinatario, y la salida es decir a cuál le entran.
+    candidatos = [p for p in catalogo.subproductos_de(producto.clave) if p.se_pesa]
+    nombres = ", ".join(f"'{p.nombre}'" for p in candidatos)
+    de_siempre = catalogo.de(TIPO_BORONA)
+    raise BusinessError(
+        f"Diga a qué producto le entran {de_donde}: '{de_siempre.nombre}' se cuenta "
+        "por unidades y no puede recibir kilos"
+        + (f". Puede ser {nombres}" if candidatos else "")
+    )
 
 
 def _nombre_archivo_cliente(cliente: str) -> str:
@@ -322,24 +568,6 @@ def _campos_del_renglon(renglon: Any, esquema: type) -> dict[str, Any]:
     if isinstance(renglon, dict):
         return {k: v for k, v in renglon.items() if k in campos}
     return renglon.model_dump(include=campos)
-
-
-def _tipos_de_los_renglones(renglones: list[Any], esquema: type, por_defecto: str) -> set[str]:
-    """Las claves de producto que trae una factura, para preguntarle al catálogo
-    por sus unidades DE UN SOLO VIAJE (una consulta por factura, no una por
-    renglón).
-
-    Lee cada renglón con el MISMO `_campos_del_renglon` con el que después se le
-    calcula la plata, y no hurgando el objeto con `hasattr`/`get` por su cuenta: así
-    es imposible que el tipo se lea de una forma para validar la unidad y de otra
-    para guardar la fila. Al renglón que llega sin tipo se le pone el de
-    `por_defecto`, que es exactamente el que el ciclo de abajo le va a guardar.
-    """
-    tipos: set[str] = set()
-    for renglon in renglones:
-        data = _campos_del_renglon(renglon, esquema)
-        tipos.add(data.get("tipo") or por_defecto)
-    return tipos
 
 
 def _borrar_cabecera_vacia(servicio: Any, documento_id: uuid.UUID | None) -> None:
@@ -493,7 +721,13 @@ class ProductoReventaService(BaseService[ProductoReventa]):
                 f"número: '{nombre}' no deja con qué identificarlo"
             )
         data["nombre"] = nombre
-        data["clave"] = clave
+        # SI LA CLAVE CHOCA CON UNA FILA CALCULADA DEL DESGLOSE, SE CORRE. Un producto
+        # llamado "Merma" generaba la clave 'merma', que es la de la fila de la pérdida:
+        # su renglón salía rotulado "Merma (pérdida real)" con una VENTA adentro y
+        # además quedaban dos filas con la misma clave en la misma respuesta, que es
+        # con lo que la pantalla decide cómo pintar cada renglón. Se le cambia la clave
+        # y no el nombre: el nombre es del dueño y sale tal cual en todas partes.
+        data["clave"] = clave_sin_chocar_con_el_desglose(clave)
 
     def _unidad_y_derivados(self, data: dict[str, Any]) -> None:
         unidad = data.get("unidad") or UNIDAD_KILO
@@ -503,7 +737,12 @@ class ProductoReventaService(BaseService[ProductoReventa]):
         data["decimales"], data["admite_ajustes"] = derivados_de_unidad(unidad)
 
     def _padre(
-        self, padre_id: uuid.UUID, propio_id: uuid.UUID | None = None
+        self,
+        padre_id: uuid.UUID,
+        propio_id: uuid.UUID | None = None,
+        *,
+        unidad: str | None = None,
+        nombre: str = "",
     ) -> ProductoReventa:
         """El producto del que otro sería subproducto, validado.
 
@@ -515,6 +754,15 @@ class ProductoReventaService(BaseService[ProductoReventa]):
         `lotes.py` implementa exactamente una relación padre-subproducto (queso ->
         borona, con el costo heredado); un subproducto de un subproducto no tendría
         cómo costearse, y ofrecerlo sería prometer una cuenta que no existe.
+
+        Y EL PADRE Y EL SUBPRODUCTO SE MIDEN IGUAL, los dos en kilos o los dos por
+        unidades. No es una manía de coherencia: el grupo de costeo tiene UN pozo y ese
+        pozo está en la unidad de la raíz (ver `GrupoDeCosteo`), así que un subproducto
+        que se pesa colgado de un padre que se cuenta no tiene de dónde heredar costo
+        —no se reparten barras entre kilos—. Medido: colgar la borona (kg) de la
+        mozzarella (unidades) sacaba el desglose con TRES claves repetidas —el grupo
+        salía impreso dos veces, una en la vuelta de los kilos y otra en la de las
+        unidades— y le acreditaba $30.000 de neto al productor equivocado.
         """
         if propio_id is not None and padre_id == propio_id:
             raise BusinessError("Un producto no puede ser subproducto de sí mismo")
@@ -522,6 +770,19 @@ class ProductoReventaService(BaseService[ProductoReventa]):
         if padre is None:
             raise NotFoundError(
                 "El producto del que este sería subproducto no existe en esta empresa"
+            )
+        if unidad is not None and padre.unidad != unidad:
+            propio = f"'{nombre}'" if nombre else "Este producto"
+            se_pesa, se_cuenta = (
+                (propio, f"'{padre.nombre}'")
+                if unidad == UNIDAD_KILO
+                else (f"'{padre.nombre}'", propio)
+            )
+            raise BusinessError(
+                f"{se_pesa} se pesa y {se_cuenta} se cuenta por unidades, así que uno "
+                "no puede ser subproducto del otro: lo que llega gratis hereda el costo "
+                "de su padre, y los kilos no se reparten entre barras. Póngales la "
+                "misma unidad, o déjelo como producto independiente"
             )
         if padre.subproducto_de_id is not None:
             raise BusinessError(
@@ -559,6 +820,40 @@ class ProductoReventaService(BaseService[ProductoReventa]):
                     f"Ya hay un producto que se llama '{otro.nombre}'. Póngale un "
                     "nombre que se distinga, para no anotarle plata al equivocado"
                 )
+
+    def _exigir_que_todavia_pueda_tener_padre(self, clave: str, nombre: str) -> None:
+        """AGREGAR UN PRODUCTO TAMPOCO PUEDE MOVER PLATA YA REGISTRADA.
+
+        Es el mismo candado que `validar_actualizar` y `validar_eliminar` ya ponían en
+        el PUT y en el DELETE, en la puerta que faltaba: la de CREAR (y la de revivir,
+        que es la misma puerta). Ahí estaba el hueco, y no era teórico:
+
+        · una clave puede tener plata anotada SIN estar en el catálogo —una fila vieja,
+          una importada, un tipo escrito de otra forma, o una empresa a la que todavía
+          no le han sembrado la lista—, y esos kilos se leen como los de un producto
+          RAÍZ, con su pozo y su fila propios;
+        · el día que alguien la agrega a la lista marcándola subproducto de otro, el
+          grupo de costeo de esas filas VIEJAS cambia, y el reparto de la ganancia se
+          rehace sobre compras y ventas que ya estaban cuadradas. Medido: Patricia
+          Rojas pasaba de $340.000,00 a -$373.333,33 y Sebastián Ruiz de $50.000,00 a
+          $763.333,33 sin que nadie tocara una compra.
+
+        Agregarlo SIN padre sí se puede, y por eso el mensaje manda para allá: como
+        producto independiente es exactamente como sus kilos ya están contados, así que
+        no mueve una sola cifra. Lo que no se puede es meterlo al grupo de otro cuando
+        ya tiene historia propia.
+        """
+        compras, ventas, recibidas = self.repo.movimientos(clave)
+        ajustes = self.repo.ajustes(clave)
+        if compras or ventas or ajustes or recibidas:
+            raise BusinessError(
+                f"'{nombre}' ya tiene "
+                f"{self._texto_movimientos(compras, ventas, ajustes, recibidas)} a "
+                "nombre suyo, así que no se puede agregar como subproducto de otro "
+                "producto: esa plata ya está contada como la de un producto "
+                "independiente, y meterla al grupo de otro recostearía cuentas que "
+                "usted ya cuadró. Agréguelo sin marcarlo como subproducto"
+            )
 
     # ------------------------------------------------------------------ crear
     def crear(self, payload: Any) -> ProductoReventa:
@@ -610,7 +905,12 @@ class ProductoReventaService(BaseService[ProductoReventa]):
             )
         self._validar_nombre_libre(data["nombre"])
         if data.get("subproducto_de_id"):
-            self._padre(data["subproducto_de_id"])
+            self._exigir_que_todavia_pueda_tener_padre(data["clave"], data["nombre"])
+            self._padre(
+                data["subproducto_de_id"],
+                unidad=data["unidad"],
+                nombre=data["nombre"],
+            )
 
     def _revivir(
         self, dormido: ProductoReventa, data: dict[str, Any]
@@ -618,7 +918,19 @@ class ProductoReventaService(BaseService[ProductoReventa]):
         self._validar_nombre_libre(data["nombre"], propio_id=dormido.id)
         padre_id = data.get("subproducto_de_id")
         if padre_id:
-            self._padre(padre_id, propio_id=dormido.id)
+            # MIENTRAS ESTUVO FUERA DE LA LISTA PUDO RECIBIR PLATA, y esos kilos se
+            # leyeron como los de un producto raíz (la fila que los nombra lo hace con
+            # su clave, esté o no en el catálogo). Por eso acá se pregunta por los
+            # movimientos aunque la fila ya viniera colgada de ese mismo padre antes de
+            # quitarla: lo que cambia el grupo de costeo es volver a estar en la lista
+            # marcada como subproducto, no el valor que tenga guardado la columna.
+            self._exigir_que_todavia_pueda_tener_padre(dormido.clave, data["nombre"])
+            self._padre(
+                padre_id,
+                propio_id=dormido.id,
+                unidad=dormido.unidad,
+                nombre=data["nombre"],
+            )
         antes = serialize_entity(dormido)
         dormido.nombre = data["nombre"]
         dormido.subproducto_de_id = padre_id
@@ -675,26 +987,59 @@ class ProductoReventaService(BaseService[ProductoReventa]):
             "subproducto_de_id" in data
             and data["subproducto_de_id"] != obj.subproducto_de_id
         ):
-            compras, ventas = self.repo.movimientos(obj.clave)
-            if compras or ventas:
+            compras, ventas, recibidas = self.repo.movimientos(obj.clave)
+            # LOS AJUSTES CUENTAN COMO MOVIMIENTOS PARA ESTO. Un ajuste guarda de qué
+            # producto salieron los kilos y a cuál le entraron; re-colgar el producto
+            # dejaría esos ajustes cruzando dos grupos de costeo, y el desglose le
+            # cargaría a un grupo el costo de kilos que salieron de otro. Es
+            # exactamente la clase de cambio del catálogo que no puede mover plata ya
+            # registrada.
+            #
+            # Y LAS COMPRAS QUE LE TRAJERON KILOS GRATIS CUENTAN IGUAL, por la misma
+            # razón y con más fuerza: esos kilos están en la bodega a nombre suyo, y
+            # colgarlo de otro padre los pondría a heredar el costo de un producto del
+            # que nunca salieron.
+            ajustes = self.repo.ajustes(obj.clave)
+            if compras or ventas or ajustes or recibidas:
                 raise BusinessError(
                     f"'{obj.nombre}' ya tiene "
-                    f"{self._texto_movimientos(compras, ventas)}, así que no se le "
-                    "puede cambiar de qué producto es subproducto: de ahí hereda el "
-                    "costo lo que se venda de él, y cambiarlo recostearía cuentas "
-                    "que usted ya cuadró"
+                    f"{self._texto_movimientos(compras, ventas, ajustes, recibidas)}, "
+                    "así que no se le puede cambiar de qué producto es subproducto: de "
+                    "ahí hereda el costo lo que se venda de él, y cambiarlo recostearía "
+                    "cuentas que usted ya cuadró"
                 )
             if data["subproducto_de_id"] is not None:
-                self._padre(data["subproducto_de_id"], propio_id=obj.id)
+                self._padre(
+                    data["subproducto_de_id"],
+                    propio_id=obj.id,
+                    unidad=obj.unidad,
+                    nombre=obj.nombre,
+                )
 
     # ----------------------------------------------------------------- quitar
     @staticmethod
-    def _texto_movimientos(compras: int, ventas: int) -> str:
+    def _texto_movimientos(
+        compras: int, ventas: int, ajustes: int = 0, recibidas: int = 0
+    ) -> str:
+        """Qué historia tiene el producto, dicho para que se pueda ir a buscarla.
+
+        LAS COMPRAS QUE LE TRAJERON KILOS SE DICEN APARTE Y CON ESAS PALABRAS. Sumarlas
+        a las suyas dejaría un mensaje que manda a buscar lo que no hay: "'Borona' ya
+        tiene 2 compras" y el dueño abre la lista de compras de borona y no encuentra
+        ninguna, porque las dos son compras de QUESO que le trajeron kilos encima.
+        """
         partes = []
         if compras:
             partes.append(f"{compras} compra{'s' if compras != 1 else ''}")
         if ventas:
             partes.append(f"{ventas} venta{'s' if ventas != 1 else ''}")
+        if ajustes:
+            partes.append(f"{ajustes} ajuste{'s' if ajustes != 1 else ''}")
+        if recibidas:
+            partes.append(
+                f"kilos que le llegaron en {recibidas} "
+                f"compra{'s' if recibidas != 1 else ''} de otro producto"
+            )
         return " y ".join(partes)
 
     def validar_eliminar(self, obj: ProductoReventa) -> None:
@@ -706,15 +1051,23 @@ class ProductoReventaService(BaseService[ProductoReventa]):
         de algo que ya no aparece en ninguna lista, y el dueño no tendría cómo saber
         qué fue lo que compró.
 
+        Y "MOVERSE" INCLUYE HABER RECIBIDO KILOS GRATIS EN LA COMPRA DE OTRO PRODUCTO.
+        Ahí estaba el hueco: un producto que solo hubiera recibido lo que llegó encima
+        de un lote no tenía compras ni ventas propias, así que esta puerta lo dejaba
+        pasar y se quitaba del catálogo un producto con 25,36 kg en la bodega —los
+        mismos que el resumen seguía reportando en las existencias—.
+
         Para eso está DESACTIVARLO, que es la salida real cuando ya se movió: deja de
         ofrecerse al registrar y su historia se queda completa. Se le dice en el
         mensaje, porque un rechazo sin salida es un rechazo a medias.
         """
-        compras, ventas = self.repo.movimientos(obj.clave)
-        if compras or ventas:
+        compras, ventas, recibidas = self.repo.movimientos(obj.clave)
+        ajustes = self.repo.ajustes(obj.clave)
+        if compras or ventas or ajustes or recibidas:
             raise BusinessError(
                 "Solo se puede quitar un producto que no tenga movimientos: "
-                f"'{obj.nombre}' ya tiene {self._texto_movimientos(compras, ventas)}. "
+                f"'{obj.nombre}' ya tiene "
+                f"{self._texto_movimientos(compras, ventas, ajustes, recibidas)}. "
                 "Si ya no lo maneja, desactívelo: deja de aparecer al registrar y su "
                 "historia se queda completa"
             )
@@ -765,18 +1118,47 @@ class CompraQuesoService(BaseService[CompraQueso]):
         """
         return ProductoReventaRepository(self.db, self.ctx.empresa_id)
 
+    @property
+    def catalogo(self) -> CatalogoReventa:
+        """El catálogo resuelto, que es QUIEN MANDA sobre la unidad de un renglón.
+
+        Se arma nuevo en cada acceso a propósito: una escritura puede crear un
+        producto y usarlo en la misma petición, y un catálogo cacheado en el servicio
+        contestaría con la foto de antes.
+        """
+        return CatalogoReventa(self.db, self.ctx.empresa_id)
+
     @staticmethod
-    def _calcular(data: dict[str, Any], actual: CompraQueso | None = None) -> dict[str, Any]:
-        """Deja la fila con la cantidad y el precio de SU unidad, y la otra unidad
-        en cero (que es lo que exige el CHECK de la tabla).
+    def _calcular(
+        data: dict[str, Any],
+        actual: CompraQueso | None = None,
+        *,
+        unidad: str = UNIDAD_KILO,
+    ) -> dict[str, Any]:
+        """Deja la fila con la cantidad y el precio de SU unidad, y la otra en cero.
+
+        LA UNIDAD LA MANDA QUIEN LLAMA, Y VIENE DEL CATÁLOGO. Antes esta función
+        preguntaba `tipo == 'mozzarella'`, y ahí estaba el defecto más caro de todos:
+        cualquier otro producto POR UNIDAD —una panela, un huevo, lo que el dueño
+        agregara— caía en la rama de los kilos, que pone `barras = 0` y
+        `precio_barra = 0` y calcula la plata como kilos × precio por kilo. Y como el
+        esquema de entrada RECHAZA que una compra por unidad traiga kilos, esos dos
+        factores eran cero por obligación: valor_total = 0 × 0 = 0. La compra se
+        aceptaba con 201 y se guardaba en ceros: la plata desaparecía entera.
+
+        `unidad` es obligatoria de hecho aunque tenga valor por defecto: el defecto
+        por defecto son los KILOS, que es lo que era todo antes de que existiera el
+        catálogo y lo mismo que hace la clasificación de lectura con una clave que no
+        reconoce (`se_mide_en_kilos`). Así una fila no puede entrar calculada en una
+        unidad y quedar leída en la otra.
 
         El tipo se toma del payload al crear y de la FILA GUARDADA al editar: la
         edición no acepta `tipo` a propósito (ver CompraQuesoUpdate), así que una
-        compra nace de kilos o de barras y se queda así.
+        compra nace de kilos o de unidades y se queda así.
         """
         tipo = data.get("tipo") or (actual.tipo if actual else TIPO_VENTA_QUESO)
         data["tipo"] = tipo
-        if tipo == TIPO_MOZZARELLA:
+        if unidad == UNIDAD_UNIDAD:
             barras = Decimal(data.get("barras") or (actual.barras if actual else CERO))
             precio_barra = Decimal(
                 data.get("precio_barra") or (actual.precio_barra if actual else CERO)
@@ -785,9 +1167,12 @@ class CompraQuesoService(BaseService[CompraQueso]):
             data["precio_barra"] = precio_barra
             # Todo lo que se mide en kilos queda en cero, y se escribe AQUÍ y no
             # solo en el esquema de entrada: por PUT llega un payload parcial y sin
-            # esto una compra de barras podría quedar con kilos de un intento
-            # anterior. El CHECK de la tabla la rechazaría, pero un 500 de la base
-            # no le dice nada al dueño; mejor que nunca llegue a pasar.
+            # esto una compra por unidad podría quedar con kilos de un intento
+            # anterior. Y AHORA IMPORTA MÁS QUE ANTES: la tabla ya no tiene el CHECK
+            # que rechazaba una fila con kilos Y unidades, así que esta es la única
+            # cosa que impide que exista. Una fila así se clasificaría por lo que
+            # trae (ver `se_mide_en_unidades`) y su plata quedaría contada en una
+            # unidad mientras sus kilos entran al reparto de la otra.
             data["kilos_brutos"] = CERO
             data["kilos_netos"] = CERO
             data["merma_kilos"] = CERO
@@ -852,20 +1237,18 @@ class CompraQuesoService(BaseService[CompraQueso]):
     def preparar_renglones(self, renglones: list[Any]) -> list[dict[str, Any]]:
         """La plata de cada renglón, SIN escribir nada.
 
-        Cada renglón pasa por el mismo `_calcular` de siempre, que es el que deja
-        la cantidad en la columna de SU unidad y la otra en cero (lo que exige el
-        CHECK de la tabla).
+        Cada renglón pasa por el mismo `_calcular` de siempre, que es el que deja la
+        cantidad en la columna de SU unidad y la otra en cero. Ya no lo exige ningún
+        CHECK de la tabla —se quitaron al abrir el catálogo—, así que esto es lo único
+        que impide una fila con kilos Y unidades, que se contaría en las dos canastas.
 
-        LA UNIDAD SE VALIDA CONTRA EL CATÁLOGO DE ESTA EMPRESA (ver
-        `ProductoReventaRepository.unidades_por_clave`, donde está el porqué largo
-        de los dos filtros). Antes se recorrían los productos de TODAS las queseras
-        y dos claves iguales se pisaban entre sí, así que la unidad de la compra la
-        podía estar poniendo el catálogo del vecino.
+        LA UNIDAD LA MANDA EL CATÁLOGO DE ESTA EMPRESA (ver `CatalogoReventa`, que se
+        carga con `empresa_id` y filtrando borrados). Antes se recorrían los productos
+        de TODAS las queseras y dos claves iguales se pisaban entre sí, así que la
+        unidad de la compra la podía estar poniendo el catálogo del vecino.
         """
         datos: list[dict[str, Any]] = []
-        unidades = self.productos.unidades_por_clave(
-            _tipos_de_los_renglones(renglones, RenglonCompraCreate, TIPO_QUESO)
-        )
+        catalogo = self.catalogo
 
         for orden, renglon in enumerate(renglones):
             data = _campos_del_renglon(renglon, RenglonCompraCreate)
@@ -873,23 +1256,65 @@ class CompraQuesoService(BaseService[CompraQueso]):
             data["tipo"] = tipo
             # Lo que no está en el catálogo de esta empresa se pesa, que es como lo
             # lee el resumen (ver `se_mide_en_kilos`).
-            unidad = unidades.get(tipo, UNIDAD_KILO)
+            unidad = catalogo.unidad_de(tipo)
+            nombre = catalogo.de(tipo).nombre
 
-            # Revalidar que los campos enviados coincidan con la unidad del catálogo
+            # Revalidar que los campos enviados coincidan con la unidad del catálogo.
+            # El mensaje habla del NOMBRE que el dueño le puso al producto y no de la
+            # clave: la clave es la identidad interna, y decirle "una compra de
+            # queso_costeno" es hablarle en un idioma que no es el suyo.
             if unidad == UNIDAD_UNIDAD and (data.get("kilos_brutos") or data.get("precio_kilo")):
                 raise BusinessError(
-                    f"Una compra de {tipo} necesita las barras y el precio por barra, no kilos."
+                    f"Una compra de {nombre} se cuenta por unidades: necesita las "
+                    f"unidades y el precio de cada una, no kilos."
                 )
             if unidad == UNIDAD_KILO and (data.get("barras") or data.get("precio_barra")):
                 raise BusinessError(
-                    f"Una compra de {tipo} necesita los kilos y el precio por kilo, no barras."
+                    f"Una compra de {nombre} se pesa: necesita los kilos y el precio "
+                    f"por kilo, no unidades."
                 )
 
-            data = self._calcular(data)
+            # LA UNIDAD DEL CATÁLOGO ES LA QUE CALCULA LA PLATA, y este es el arreglo
+            # del defecto: antes `_calcular` decidía por su cuenta preguntando si el
+            # tipo era literalmente 'mozzarella', así que la compra de cualquier otro
+            # producto por unidad se guardaba en ceros.
+            data = self._calcular(data, unidad=unidad)
+            data["subproducto_tipo"] = self._destinatario_de_lo_gratis(
+                catalogo, tipo, data.get("borona_kilos"), data.get("subproducto_tipo")
+            )
             data["orden"] = orden
             data["estado"] = ESTADO_PENDIENTE
             datos.append(data)
         return datos
+
+    @staticmethod
+    def _destinatario_de_lo_gratis(
+        catalogo: CatalogoReventa,
+        tipo: str,
+        gratis: Any,
+        propuesto: str | None,
+    ) -> str | None:
+        """A qué producto le entran los kilos que llegaron GRATIS con esta compra.
+
+        SE DECIDE AL ESCRIBIR Y SE GUARDA EN LA FILA (`CompraQueso.subproducto_tipo`).
+        Antes no se guardaba: cada vez que alguien pedía el inventario, esos kilos se
+        le acreditaban al subproducto que el catálogo tuviera de PRIMERO en su orden de
+        presentación. Crear un producto con `orden = 0` le vaciaba a la borona todo lo
+        que había recibido gratis en meses, y desde ahí sus ventas legítimas rebotaban
+        con "Solo hay 0,00 kg". Guardarlo cierra eso de raíz.
+
+        Sin kilos gratis no hay a quién nombrar y queda en nulo, que significa
+        exactamente eso: esta compra no trajo nada encima.
+        """
+        if not gratis or Decimal(gratis) <= CERO:
+            return None
+        return _exigir_destino(
+            catalogo.quien_recibe_lo_gratis(tipo, propuesto),
+            catalogo,
+            tipo,
+            propuesto,
+            de_donde="esos kilos que llegaron gratis",
+        )
 
     def exigir_cantidades(
         self, datos: list[dict[str, Any]], *, devolviendo: list[CompraQueso] = ()
@@ -909,36 +1334,58 @@ class CompraQuesoService(BaseService[CompraQueso]):
 
         Al CREAR no hay nada que exigir y por eso `devolviendo` viene vacío:
         comprar SUMA inventario.
+
+        Y SE MIDE PRODUCTO POR PRODUCTO, no en dos canastas de kilos y de barras.
+        Antes se comparaba contra el disponible del queso y contra el de la
+        mozzarella, así que bajarle los kilos a una compra de panela se validaba
+        contra el queso: con queso en bodega se podía dejar el inventario de la panela
+        en negativo, y desde ahí ninguna venta de panela volvía a pasar el control.
         """
-        nuevos_kilos = sum((Decimal(d.get("kilos_netos") or CERO) for d in datos), CERO)
-        nuevas_barras = sum((Decimal(d.get("barras") or CERO) for d in datos), CERO)
-        viejos_kilos = CERO
-        viejas_barras = CERO
+        existencias = ExistenciasReventa(self.db, self.ctx)
+        # Lo que la factura va a dejar de cada producto, y lo que le quita. Las dos
+        # cuentas van POR CLAVE: los kilos de un producto no compensan los de otro.
+        nuevas: dict[str, Decimal] = {}
+        for data in datos:
+            clave = data.get("tipo") or TIPO_QUESO
+            cantidad = (
+                Decimal(data.get("barras") or CERO)
+                if not existencias.catalogo.se_pesa(clave)
+                else Decimal(data.get("kilos_netos") or CERO)
+            )
+            nuevas[clave] = nuevas.get(clave, CERO) + cantidad
+        viejas: dict[str, Decimal] = {}
         for fila in devolviendo:
             if fila.estado == ESTADO_ANULADA:
                 # Una compra anulada no está sosteniendo ningún inventario, así
                 # que quitarla no le quita kilos a nadie.
                 continue
-            viejos_kilos += Decimal(fila.kilos_netos)
-            viejas_barras += Decimal(fila.barras)
-        if nuevos_kilos < viejos_kilos:
-            disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
-            if (nuevos_kilos - viejos_kilos) + disponible < CERO:
+            clave = fila.tipo or TIPO_QUESO
+            cantidad = (
+                Decimal(fila.barras)
+                if not existencias.catalogo.se_pesa(clave)
+                else Decimal(fila.kilos_netos)
+            )
+            viejas[clave] = viejas.get(clave, CERO) + cantidad
+
+        for clave in sorted(set(nuevas) | set(viejas), key=lambda c: (c or "")):
+            quita = viejas.get(clave, CERO) - nuevas.get(clave, CERO)
+            if quita <= CERO:
+                continue
+            disponible = existencias.disponible(clave)
+            if disponible - quita < CERO:
+                unidad = existencias.rotulo_de_unidad(clave)
                 raise BusinessError(
-                    f"No se pueden quitar tantos kilos: de esta compra ya salieron "
-                    f"vendidos. Solo quedan {disponible} kg sin vender"
-                )
-        if nuevas_barras < viejas_barras:
-            disponibles = ReventaResumenService.barras_disponibles(self.db, self.ctx)
-            if (nuevas_barras - viejas_barras) + disponibles < CERO:
-                raise BusinessError(
-                    f"No se pueden quitar tantas barras: de esta compra ya "
-                    f"salieron vendidas. Solo quedan {disponibles} barras sin "
-                    f"vender"
+                    f"No se pueden quitar tantas cantidades de "
+                    f"{existencias.nombre(clave)}: de esta compra ya salieron "
+                    f"vendidas. Solo quedan {disponible} {unidad} sin vender"
                 )
 
     def escribir_renglones(
-        self, documento: DocumentoReventa, datos: list[dict[str, Any]]
+        self,
+        documento: DocumentoReventa,
+        datos: list[dict[str, Any]],
+        *,
+        hora_de_registro: datetime | None = None,
     ) -> list[CompraQueso]:
         """Escribe los renglones ya calculados y ya validados.
 
@@ -948,6 +1395,10 @@ class CompraQuesoService(BaseService[CompraQueso]):
         por `fecha` DE LA FILA. Si el renglón no los llevara, todos ellos tendrían
         que aprender a saltar a la cabecera; llevándolos, no se enteran de que los
         documentos existen.
+
+        `hora_de_registro` ES EL PUESTO DE LA FACTURA EN EL REPARTO, y solo lo manda
+        quien REHACE los renglones de una factura que ya existía. Ver el porqué
+        completo en `DocumentoReventaService._hora_de_la_factura`.
         """
         filas = []
         for data in datos:
@@ -955,6 +1406,8 @@ class CompraQuesoService(BaseService[CompraQueso]):
             fila["documento_id"] = documento.id
             fila["fecha"] = documento.fecha
             fila["productor"] = documento.tercero
+            if hora_de_registro is not None:
+                fila["created_at"] = hora_de_registro
             filas.append(super().crear(fila))
         return filas
 
@@ -992,7 +1445,50 @@ class CompraQuesoService(BaseService[CompraQueso]):
         if actual.estado == ESTADO_ANULADA:
             raise BusinessError("No se puede modificar una compra anulada")
         data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
-        data = self._calcular(data, actual)
+        # LA UNIDAD SALE DEL CATÁLOGO TAMBIÉN POR AQUÍ. Esta puerta no pasa por
+        # `preparar_renglones`, así que era la única del módulo que nunca miraba el
+        # catálogo: a una compra de un producto POR UNIDAD se le podían meter kilos
+        # por PUT y quedaba con kilos > 0 y una clave que la lectura clasifica por
+        # unidades. Con la unidad del catálogo, `_calcular` deja en cero lo de la otra
+        # unidad y esa fila mestiza no se puede volver a escribir.
+        catalogo = self.catalogo
+        unidad = catalogo.unidad_de(actual.tipo)
+        nombre = catalogo.de(actual.tipo).nombre
+        if unidad == UNIDAD_UNIDAD and (data.get("kilos_brutos") or data.get("precio_kilo")):
+            raise BusinessError(
+                f"Una compra de {nombre} se cuenta por unidades: necesita las "
+                f"unidades y el precio de cada una, no kilos."
+            )
+        if unidad == UNIDAD_KILO and (data.get("barras") or data.get("precio_barra")):
+            raise BusinessError(
+                f"Una compra de {nombre} se pesa: necesita los kilos y el precio por "
+                f"kilo, no unidades."
+            )
+        data = self._calcular(data, actual, unidad=unidad)
+        # A QUIÉN LE ENTRA LO QUE LLEGÓ GRATIS, también por esta puerta. Se recalcula
+        # con la cifra que va a quedar guardada —la del payload si vino, y si no la que
+        # ya tenía la fila—, porque editar una compra para AGREGARLE kilos gratis tiene
+        # que dejarle su destinatario igual que si se hubiera registrado así.
+        gratis = data.get("borona_kilos")
+        if gratis is None:
+            gratis = actual.borona_kilos
+        if Decimal(gratis or CERO) > CERO and actual.subproducto_tipo:
+            # SI LA FILA YA NOMBRÓ A SU PRODUCTO, SE RESPETA TAL CUAL. La edición no
+            # acepta cambiar el destinatario (no está en `CompraQuesoUpdate`), así que
+            # esto nunca fue "lo que pidió el usuario": es lo que la fila decidió el
+            # día que se registró, y ningún cambio posterior del catálogo lo mueve.
+            #
+            # Y ES LO QUE IMPIDE QUE EL CATÁLOGO BLOQUEE UNA EDICIÓN: pasar el valor
+            # guardado como si fuera una propuesta lo hacía validar otra vez contra el
+            # catálogo de HOY, así que corregirle el precio a una compra vieja
+            # rebotaba con 422 si su destinatario ya no estaba en la lista. Es el
+            # mismo error de siempre —decidir con lo que el catálogo dice hoy sobre
+            # kilos que la fila ya nombró—, esta vez en la puerta de editar.
+            data["subproducto_tipo"] = actual.subproducto_tipo
+        else:
+            data["subproducto_tipo"] = self._destinatario_de_lo_gratis(
+                catalogo, actual.tipo, gratis, None
+            )
         # Se puede editar aunque tenga abonos (incluida una pagada): se recalcula el
         # estado con los abonos ya registrados y el saldo queda al día. Lo que NO
         # se permite es dejar el total por debajo de lo ya abonado: el saldo se
@@ -1120,31 +1616,23 @@ class CompraQuesoService(BaseService[CompraQueso]):
         # entender por qué. Lo que hay que hacer en ese caso es corregir la
         # compra (editarla) o anular primero las ventas que se llevaron ese queso.
         #
-        # Cada tipo se mira contra SU inventario: anular una compra de barras no
-        # puede consultar los kilos disponibles (siempre pasaría el control, y las
-        # barras quedarían en negativo), ni al contrario.
-        if compra.tipo == TIPO_MOZZARELLA:
-            disponibles = ReventaResumenService.barras_disponibles(self.db, self.ctx)
-            if disponibles - Decimal(compra.barras) < CERO:
-                raise BusinessError(
-                    f"No se puede anular: la mozzarella de esta compra ya se "
-                    f"vendió. Solo quedan {disponibles} barras sin vender de las "
-                    f"{compra.barras} que trajo. Anule primero las ventas que se "
-                    f"las llevaron, o corrija la compra en vez de anularla"
-                )
-            antes = compra.estado
-            compra.estado = ESTADO_ANULADA
-            compra.updated_by = self.ctx.user_id
-            self.db.flush()
-            self._audit("editar", compra.id, {"estado": antes}, {"estado": ESTADO_ANULADA})
-            return compra
-        disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
-        if disponible - Decimal(compra.kilos_netos) < CERO:
+        # Cada PRODUCTO se mira contra SU inventario: anular una compra de unidades
+        # no puede consultar los kilos disponibles (siempre pasaría el control, y las
+        # unidades quedarían en negativo), ni al contrario. Y ya no son tres
+        # inventarios con sus nombres escritos aquí: es el de SU producto, sea el
+        # queso de siempre o uno que el dueño haya agregado (ver `ExistenciasReventa`).
+        existencias = ExistenciasReventa(self.db, self.ctx)
+        clave = compra.tipo or TIPO_QUESO
+        se_pesa = existencias.catalogo.se_pesa(clave)
+        cantidad = Decimal(compra.kilos_netos) if se_pesa else Decimal(compra.barras)
+        disponible = existencias.disponible(clave)
+        if disponible - cantidad < CERO:
+            unidad = existencias.rotulo_de_unidad(clave)
             raise BusinessError(
-                f"No se puede anular: el queso de esta compra ya se vendió. "
-                f"Solo quedan {disponible} kg sin vender de los "
-                f"{compra.kilos_netos} kg que trajo. Anule primero las ventas "
-                f"que se lo llevaron, o corrija la compra en vez de anularla"
+                f"No se puede anular: {existencias.nombre(clave)} de esta compra ya "
+                f"se vendió. Solo quedan {disponible} {unidad} sin vender de "
+                f"{cantidad} que trajo. Anule primero las ventas que se lo llevaron, "
+                f"o corrija la compra en vez de anularla"
             )
         antes = compra.estado
         compra.estado = ESTADO_ANULADA
@@ -1204,26 +1692,25 @@ class VentaQuesoService(BaseService[VentaQueso]):
             data["cliente"] = self.canonizar_tercero(data["cliente"])
         return data
 
-    @staticmethod
-    def _inventario_de(tipo: str) -> tuple[Any, str, str]:
-        """(de dónde se lee el disponible, cómo se llama, en qué unidad).
+    @property
+    def catalogo(self) -> CatalogoReventa:
+        """El catálogo resuelto (mismo porqué que en `CompraQuesoService.catalogo`)."""
+        return CatalogoReventa(self.db, self.ctx.empresa_id)
 
-        Los tres inventarios son SEPARADOS y cada uno se compara solo con el suyo:
-        tener 500 kg de queso no autoriza a despachar una barra de mozzarella que
-        no se compró.
+    @staticmethod
+    def _cantidad_de(fila: VentaQueso, catalogo: CatalogoReventa) -> Decimal:
+        """Cuánto tiene apartado esta venta, EN LA UNIDAD DE SU PRODUCTO.
+
+        La unidad sale del catálogo y no de preguntar si el tipo es 'mozzarella': una
+        venta de un producto por unidad que no fuera la mozzarella devolvía sus KILOS
+        —que en una venta por unidad son cero—, así que devolverle al inventario lo que
+        tenía apartado le devolvía nada.
         """
-        if tipo == TIPO_VENTA_MOZZARELLA:
-            return ReventaResumenService.barras_disponibles, "mozzarella", "barras"
-        if tipo == TIPO_VENTA_BORONA:
-            return ReventaResumenService.borona_disponible, "borona", "kg"
-        return ReventaResumenService.queso_disponible, "queso", "kg"
-
-    @staticmethod
-    def _cantidad_de(fila: VentaQueso) -> Decimal:
-        """Cuánto tiene apartado esta venta, EN SU UNIDAD."""
-        if (fila.tipo or TIPO_VENTA_QUESO) == TIPO_VENTA_MOZZARELLA:
-            return Decimal(fila.barras)
-        return Decimal(fila.kilos)
+        return (
+            Decimal(fila.kilos)
+            if catalogo.se_pesa(fila.tipo or TIPO_VENTA_QUESO)
+            else Decimal(fila.barras)
+        )
 
     def exigir_cantidades(
         self,
@@ -1251,10 +1738,23 @@ class VentaQuesoService(BaseService[VentaQueso]):
         que esos kilos ya están descontados. Es el mismo `actual` de antes, en
         plural.
 
-        Cada disponible se consulta UNA sola vez y solo si hace falta (`cache`):
-        son tres sumas contra la base y una factura de queso no tiene por qué
-        pagar las de la mozzarella.
+        Y CADA PRODUCTO SE COMPARA CONTRA EL SUYO, que es el arreglo de los dos
+        defectos más caros de este lado. Antes había TRES inventarios con sus nombres
+        escritos en el código, y todo producto caía en uno de los tres:
+
+        · lo que se pesaba y no se llamaba 'queso' se comparaba contra el disponible
+          del queso, que su venta no bajaba nunca: se compraban 100 kg y se podían
+          despachar 100 kg cuantas veces se quisiera;
+        · lo que se contaba y no era la mozzarella se comparaba contra el inventario
+          de queso EN KILOS, y contra `kilos` de la venta, que en una venta por unidad
+          es cero: pasaban 5.000 panelas sin haber comprado una.
+
+        Los disponibles se cargan UNA vez para toda la validación (ver
+        `ExistenciasReventa`): si cada renglón volviera a sumar la base, dos renglones
+        del mismo producto se compararían cada uno contra el disponible completo.
         """
+        existencias = ExistenciasReventa(self.db, self.ctx)
+        catalogo = existencias.catalogo
         cache: dict[str, Decimal] = {}
 
         from app.modules.empresas.models import Empresa
@@ -1264,13 +1764,12 @@ class VentaQuesoService(BaseService[VentaQueso]):
             .with_for_update()
         )
 
-        def disponible_de(tipo: str) -> Decimal:
-            if tipo not in cache:
-                fuente, _, _ = self._inventario_de(tipo)
-                cache[tipo] = fuente(self.db, self.ctx)
-            return cache[tipo]
+        def disponible_de(clave: str) -> Decimal:
+            if clave not in cache:
+                cache[clave] = existencias.disponible(clave)
+            return cache[clave]
 
-        # Lo pedido, POR TIPO y en el orden en que aparecen los renglones: así el
+        # Lo pedido, POR PRODUCTO y en el orden en que aparecen los renglones: así el
         # mensaje de error habla del primer producto que no alcanza, que es el que
         # el usuario tiene que corregir.
         pedido: dict[str, Decimal] = {}
@@ -1278,27 +1777,27 @@ class VentaQuesoService(BaseService[VentaQueso]):
         for data in datos:
             tipo = data.get("tipo") or TIPO_VENTA_QUESO
             cantidad = (
-                Decimal(data.get("barras") or CERO)
-                if tipo == TIPO_VENTA_MOZZARELLA
-                else Decimal(data.get("kilos") or CERO)
+                Decimal(data.get("kilos") or CERO)
+                if catalogo.se_pesa(tipo)
+                else Decimal(data.get("barras") or CERO)
             )
             pedido[tipo] = pedido.get(tipo, CERO) + cantidad
             renglones_por_tipo[tipo] = renglones_por_tipo.get(tipo, 0) + 1
 
-        # Lo que se devuelve al inventario, cada cantidad al inventario DE SU TIPO:
-        # devolver kilos a un inventario de barras dejaría al guardia comparando
-        # contra una cifra inventada.
+        # Lo que se devuelve al inventario, cada cantidad al inventario DE SU
+        # PRODUCTO: devolverle kilos al inventario de otro dejaría al guardia
+        # comparando contra una cifra inventada.
         for fila in devolviendo:
             if fila.estado == ESTADO_ANULADA:
                 # Una venta anulada no tiene nada apartado: ya se le devolvió.
                 continue
             tipo = fila.tipo or TIPO_VENTA_QUESO
-            cache[tipo] = disponible_de(tipo) + self._cantidad_de(fila)
+            cache[tipo] = disponible_de(tipo) + self._cantidad_de(fila, catalogo)
 
         for tipo, cantidad in pedido.items():
             disponible = disponible_de(tipo)
             if cantidad > disponible:
-                _, que, unidad = self._inventario_de(tipo)
+                unidad = existencias.rotulo_de_unidad(tipo)
                 detalle = ""
                 if renglones_por_tipo[tipo] > 1:
                     # Con el producto repetido en varios renglones, el mensaje
@@ -1310,7 +1809,8 @@ class VentaQuesoService(BaseService[VentaQueso]):
                         f"{unidad} entre {renglones_por_tipo[tipo]} renglones"
                     )
                 raise BusinessError(
-                    f"Solo hay {disponible} {unidad} de {que} disponibles{detalle}"
+                    f"Solo hay {disponible} {unidad} de {existencias.nombre(tipo)} "
+                    f"disponibles{detalle}"
                 )
 
     def _exigir_existencias(
@@ -1325,7 +1825,7 @@ class VentaQuesoService(BaseService[VentaQueso]):
         una ganancia que no era la real, distinta además de la del desglose por
         lote, que es justo lo que el dueño ve al cuadrar a mano.
         """
-        clave = "barras" if tipo == TIPO_VENTA_MOZZARELLA else "kilos"
+        clave = "kilos" if self.catalogo.se_pesa(tipo) else "barras"
         self.exigir_cantidades(
             [{"tipo": tipo, clave: cantidad}],
             devolviendo=[actual] if actual is not None else [],
@@ -1343,24 +1843,26 @@ class VentaQuesoService(BaseService[VentaQueso]):
         la plata del renglón (barras × precio por barra, o kilos × precio por kilo).
         """
         datos: list[dict[str, Any]] = []
-        unidades = self.productos.unidades_por_clave(
-            _tipos_de_los_renglones(renglones, RenglonVentaCreate, TIPO_VENTA_QUESO)
-        )
+        catalogo = self.catalogo
 
         for orden, renglon in enumerate(renglones):
             data = _campos_del_renglon(renglon, RenglonVentaCreate)
             tipo = data.get("tipo") or TIPO_VENTA_QUESO
             data["tipo"] = tipo
-            unidad = unidades.get(tipo, UNIDAD_KILO)
+            unidad = catalogo.unidad_de(tipo)
+            nombre = catalogo.de(tipo).nombre
 
-            # Revalidar que los campos enviados coincidan con la unidad del catálogo
+            # Revalidar que los campos enviados coincidan con la unidad del catálogo.
+            # El mensaje habla del NOMBRE del producto, que es como el dueño lo llama.
             if unidad == UNIDAD_UNIDAD and (data.get("kilos") or data.get("precio_kilo")):
                 raise BusinessError(
-                    f"Una venta de {tipo} necesita las barras y el precio por barra, no kilos."
+                    f"Una venta de {nombre} se cuenta por unidades: necesita las "
+                    f"unidades y el precio de cada una, no kilos."
                 )
             if unidad == UNIDAD_KILO and (data.get("barras") or data.get("precio_barra")):
                 raise BusinessError(
-                    f"Una venta de {tipo} necesita los kilos y el precio por kilo, no barras."
+                    f"Una venta de {nombre} se pesa: necesita los kilos y el precio "
+                    f"por kilo, no unidades."
                 )
 
             if unidad == UNIDAD_UNIDAD:
@@ -1389,12 +1891,18 @@ class VentaQuesoService(BaseService[VentaQueso]):
         return datos
 
     def escribir_renglones(
-        self, documento: DocumentoReventa, datos: list[dict[str, Any]]
+        self,
+        documento: DocumentoReventa,
+        datos: list[dict[str, Any]],
+        *,
+        hora_de_registro: datetime | None = None,
     ) -> list[VentaQueso]:
         """Escribe los renglones ya calculados y ya validados.
 
-        LA FECHA Y EL CLIENTE SE COPIAN DE LA CABECERA: ver el porqué largo en
-        `CompraQuesoService.escribir_renglones`.
+        LA FECHA Y EL CLIENTE SE COPIAN DE LA CABECERA, y `hora_de_registro` conserva
+        el puesto de la factura en el reparto cuando se rehacen sus renglones: ver el
+        porqué largo en `CompraQuesoService.escribir_renglones` y en
+        `DocumentoReventaService._hora_de_la_factura`.
         """
         filas = []
         for data in datos:
@@ -1402,6 +1910,8 @@ class VentaQuesoService(BaseService[VentaQueso]):
             fila["documento_id"] = documento.id
             fila["fecha"] = documento.fecha
             fila["cliente"] = documento.tercero
+            if hora_de_registro is not None:
+                fila["created_at"] = hora_de_registro
             filas.append(super().crear(fila))
         return filas
 
@@ -1435,9 +1945,11 @@ class VentaQuesoService(BaseService[VentaQueso]):
             raise BusinessError("No se puede modificar una venta anulada")
         data = payload.model_dump(exclude_unset=True) if not isinstance(payload, dict) else dict(payload)
         # El tipo NO se edita (VentaQuesoUpdate no lo recibe): manda el de la fila
-        # guardada, que es el que dice en qué unidad está esta venta.
+        # guardada. Y LA UNIDAD LA MANDA EL CATÁLOGO, no el literal del tipo: esta
+        # puerta no pasa por `preparar_renglones`, así que era la que dejaba editar
+        # una venta por unidad como si fuera de kilos.
         tipo = actual.tipo
-        if tipo == TIPO_VENTA_MOZZARELLA:
+        if not self.catalogo.se_pesa(tipo):
             barras = Decimal(data.get("barras") or actual.barras)
             precio_barra = Decimal(data.get("precio_barra") or actual.precio_barra)
             # La MISMA comprobación que al crear, en barras. Sin esto se registra
@@ -1774,6 +2286,43 @@ class DocumentoReventaService(BaseService[DocumentoReventa]):
         return documento
 
     # ------------------------------------------------------------- actualizar
+    @staticmethod
+    def _hora_de_la_factura(renglones: list[Any]) -> datetime | None:
+        """LA HORA EN QUE SE REGISTRÓ ESTA FACTURA: la más vieja de sus renglones.
+
+        POR QUÉ ESTO ES PLATA Y NO UN DETALLE TÉCNICO. La llave de orden del reparto
+        FIFO es (fecha, hora de registro, renglón), y de ese orden sale A QUÉ PRODUCTOR
+        se le consumen los kilos de una venta, con su costo y su ganancia. Rehacer los
+        renglones de una factura los BORRA y los CREA de nuevo, así que nacían con la
+        hora de HOY y la factura se iba al FINAL del orden de su día.
+
+        Lo que eso significaba en la práctica: se le corrige un dato a la factura de la
+        mañana —hasta mandando los renglones EXACTAMENTE IGUALES, mismos kilos y mismo
+        precio— y la venta de la tarde dejaba de consumir los kilos baratos del primer
+        productor y empezaba por los caros del segundo. La ganancia cambiaba de dueño y
+        el costo del inventario que queda en bodega también, sin que ninguna cifra del
+        negocio hubiera cambiado. En Postgres era seguro que pasara: `now()` es la hora
+        de la transacción, así que la fila rehecha queda de última siempre.
+
+        LA DECISIÓN: el puesto en el reparto es DE LA FACTURA, no de sus renglones.
+        Corregirle un renglón no la vuelve a registrar; sigue siendo la compra de esa
+        mañana. Así que los renglones nuevos heredan la hora de registro de la factura,
+        que es la MÁS VIEJA de las de sus renglones —la de cuando se escribió el
+        primero— y el `orden` del renglón sigue desempatando dentro de ella, que es lo
+        que ya hace la llave.
+
+        Se toma la más vieja y no la del primer renglón por si acaso: si a una factura
+        se le agregó un renglón un día después, su hora es más nueva, y lo que hay que
+        conservar es cuándo entró la factura al negocio. Y se miran TODOS los renglones
+        (también los anulados): un renglón anulado no suma plata, pero es prueba de
+        cuándo se registró esta factura, y es el único que queda si se anularon todos.
+
+        Devuelve `None` cuando no hay ningún renglón de dónde sacarla; ahí no hay nada
+        que conservar y la hora nueva es la correcta.
+        """
+        horas = [r.created_at for r in renglones if r.created_at is not None]
+        return min(horas) if horas else None
+
     def actualizar(self, documento_id: uuid.UUID, payload: Any) -> DocumentoReventa:
         """Edita la cabecera y, si vienen, REHACE los renglones."""
         documento = self.repo.get_or_fail(documento_id)
@@ -1818,9 +2367,12 @@ class DocumentoReventaService(BaseService[DocumentoReventa]):
             # Se valida ANTES de borrar nada, devolviéndole al inventario lo que
             # tienen apartado los renglones que se van.
             servicio.exigir_cantidades(datos, devolviendo=vivos)
+            # EL PUESTO EN EL REPARTO SE CONSERVA: los renglones nuevos nacen con la
+            # hora de registro que tenía la factura, no con la de hoy.
+            hora = self._hora_de_la_factura(renglones)
             for renglon in vivos:
                 servicio.eliminar(renglon.id, cuidar_cabecera=False)
-            servicio.escribir_renglones(documento, datos)
+            servicio.escribir_renglones(documento, datos, hora_de_registro=hora)
         else:
             for renglon in renglones:
                 renglon.fecha = fecha
@@ -2135,19 +2687,100 @@ class SaldoAnteriorService(BaseService[SaldoAnterior]):
 
 
 class ConversionBoronaService(BaseService[ConversionBorona]):
-    """Pasar queso del inventario de reventa a borona."""
+    """Pasar kilos de un producto a un subproducto suyo (o perderlos como merma).
+
+    EL AJUSTE NOMBRA SUS DOS PRODUCTOS Y SE RESUELVE AQUÍ, UNA SOLA VEZ. Es toda la
+    diferencia con lo que había: antes la fila no decía de qué producto salían los
+    kilos ni a cuál entraban, así que CADA LECTURA lo adivinaba mirando el ORDEN del
+    catálogo —un campo de presentación que la API deja cambiar con un PUT—, y
+    reordenar la lista le transfería a otro producto meses de historia de la borona
+    (el detalle, con cifras, está en el docstring de `ConversionBorona`).
+
+    Ahora se decide al ESCRIBIR, contra el catálogo del momento, y queda guardado en
+    la fila. De ahí sale la garantía que el dueño necesita: crear, reordenar,
+    renombrar o desactivar productos no le mueve un kilo ni un peso a lo ya anotado.
+
+    QUÉ PASA SI LA PANTALLA NO MANDA LOS PRODUCTOS (que es lo que hace hoy). El origen
+    es el producto de siempre —'queso', la constante, no "el primero de la lista"— y
+    el destino lo resuelve el catálogo sin mirar el orden: si ese producto tiene UN
+    solo subproducto que se pese, es ese, porque no hay a quién más darle; si no, la
+    clave de siempre ('borona'), que es lo que estos ajustes han significado desde que
+    existen (ver `CatalogoReventa._quien_recibe`).
+
+    Y REGISTRAR SIEMPRE GANA: UN PROBLEMA DEL CATÁLOGO NO PARA EL AJUSTE DEL DÍA. Está
+    medido contra el código desplegado: con una empresa recién creada —su catálogo no
+    se siembra hasta el despliegue siguiente—, con la borona fuera de la lista o
+    descolgada de su padre, este ajuste rebotaba con 422 donde antes respondía 201, y
+    nombrar el origen y el destino a mano tampoco salvaba al dueño. Un ajuste es él
+    anotando que unos kilos ya dejaron de ser una cosa y pasaron a ser otra: eso ya
+    pasó en la bodega, y una lista de productos no puede decirle que no.
+
+    LOS RECHAZOS QUE QUEDAN SON LOS QUE NECESITAN QUE UNA PERSONA DECIDA, y ninguno es
+    un problema de la lista: sacar kilos de un producto que se cuenta por unidades (una
+    barra no se desmenuza), convertir un producto en sí mismo, mandarle los kilos a un
+    producto que se cuenta o a un nombre que nadie conoce, y no tener esos kilos en la
+    bodega. Todos con un mensaje que dice la salida.
+    """
 
     repository_cls = ConversionBoronaRepository
     modulo = "reventa"
 
     def crear(self, payload: Any) -> ConversionBorona:
-        data = payload.model_dump(exclude_unset=True)
-        disponible = ReventaResumenService.queso_disponible(self.db, self.ctx)
-        if Decimal(data["kilos"]) > disponible:
-            raise BusinessError(f"Solo hay {disponible} kg de queso disponibles")
-        # La merma es pérdida sin valor: no lleva precio.
+        data = (
+            payload.model_dump(exclude_unset=True)
+            if not isinstance(payload, dict)
+            else dict(payload)
+        )
+        existencias = ExistenciasReventa(self.db, self.ctx)
+        catalogo = existencias.catalogo
+
+        # ------------------------------------------------- de qué producto salen
+        # NO SE LE PREGUNTA A LA LISTA SI EL ORIGEN ESTÁ EN ELLA, se le pregunta A LA
+        # BODEGA si esos kilos existen (más abajo), que es la pregunta que de verdad
+        # protege la plata. Una clave que no está en el catálogo se pesa y es su propio
+        # producto —la regla del final del docstring de `catalogo.py`—, así que sus
+        # kilos están contados. Exigir el catálogo dejaba a una empresa recién creada
+        # sin poder registrar el ajuste de todos los días hasta el despliegue siguiente.
+        origen = data.get("producto_origen") or TIPO_QUESO
+        producto = catalogo.de(origen)
+        if not producto.se_pesa:
+            raise BusinessError(
+                f"{producto.nombre} se cuenta por unidades: una unidad no se desmenuza "
+                "ni pierde peso, así que no admite estos ajustes"
+            )
+        data["producto_origen"] = producto.clave
+
+        # ------------------------------------------------- a qué producto le entran
         if data.get("destino") == DESTINO_MERMA:
+            # La merma es pérdida sin valor: no lleva precio y no le entra a nadie.
             data["precio_kilo"] = CERO
+            data["producto_destino"] = None
+        else:
+            propuesto = data.get("producto_destino")
+            destino = _exigir_destino(
+                catalogo.subproducto_que_recibe(producto.clave, propuesto),
+                catalogo,
+                producto.clave,
+                propuesto,
+                de_donde="estos kilos",
+            )
+            if destino == producto.clave:
+                # UN PRODUCTO NO SE CONVIERTE EN SÍ MISMO. La fila diría que los mismos
+                # kilos salieron y entraron al mismo inventario, y el desglose sacaría
+                # dos renglones de la misma clave hablando del mismo movimiento. Es un
+                # error de dedo, no un ajuste, y por eso se dice en vez de guardarlo.
+                raise BusinessError(
+                    f"Los kilos que salen de {producto.nombre} tienen que entrarle a "
+                    f"OTRO producto: {producto.nombre} no se convierte en sí mismo. "
+                    "Diga a cuál le entran, o regístrelo como merma si se perdieron"
+                )
+            data["producto_destino"] = destino
+
+        disponible = existencias.disponible(producto.clave)
+        if Decimal(data["kilos"]) > disponible:
+            raise BusinessError(
+                f"Solo hay {disponible} kg de {producto.nombre} disponibles"
+            )
         return super().crear(data)
 
 
@@ -2575,57 +3208,7 @@ class ReventaResumenService:
         self.ventas = VentaQuesoRepository(db, ctx.empresa_id)
         self.conversiones = ConversionBoronaRepository(db, ctx.empresa_id)
         self.saldos = SaldoAnteriorRepository(db, ctx.empresa_id)
-
-    @staticmethod
-    def queso_disponible(db, ctx) -> Decimal:
-        compras = CompraQuesoRepository(db, ctx.empresa_id)
-        ventas = VentaQuesoRepository(db, ctx.empresa_id)
-        conversiones = ConversionBoronaRepository(db, ctx.empresa_id)
-        kilos_comprados, _, _ = compras.acumulados()
-        kilos_queso_vendidos, _, _ = ventas.acumulados()
-        return kilos_comprados - kilos_queso_vendidos - conversiones.total_convertido()
-
-    @staticmethod
-    def borona_disponible(db, ctx) -> Decimal:
-        compras = CompraQuesoRepository(db, ctx.empresa_id)
-        ventas = VentaQuesoRepository(db, ctx.empresa_id)
-        conversiones = ConversionBoronaRepository(db, ctx.empresa_id)
-        _, borona_de_compras, _ = compras.acumulados()
-        _, borona_vendida, _ = ventas.acumulados()
-        return borona_de_compras + conversiones.total_a_borona() - borona_vendida
-
-    @staticmethod
-    def barras_disponibles(db, ctx) -> Decimal:
-        """Barras de mozzarella en bodega: compradas − vendidas, histórico.
-
-        LA CUENTA MÁS CORTA DE LAS TRES, Y NO ES UN OLVIDO: no le resta
-        conversiones porque la mozzarella no participa en ellas. La barra entra
-        como barra y sale como barra: no se desmenuza para pasarla a borona (eso es
-        desmenuzar queso) y no pierde peso en el camino, porque no se está pesando.
-        Si algún día una barra se daña, eso es una BAJA DE UNIDADES, un movimiento
-        propio que hoy no existe, y nunca kilos metidos en la tabla de ajustes.
-
-        Es el hermano de `queso_disponible` y `borona_disponible`, en su unidad, y
-        el que usan los tres guardias de existencias de la mozzarella (crear venta,
-        editar venta y anular compra).
-        """
-        compras = CompraQuesoRepository(db, ctx.empresa_id)
-        ventas = VentaQuesoRepository(db, ctx.empresa_id)
-        return compras.barras_acumuladas() - ventas.barras_acumuladas()
-
-    @staticmethod
-    def _costo_de(kilos: Decimal, kilos_comprados: Decimal, total_compras: Decimal) -> Decimal:
-        """Costo de esas UNIDADES al precio promedio de compra del período.
-        Divide sin redondear antes de multiplicar para no acumular error.
-
-        Sirve para las dos unidades —se le pasan kilos con kilos y barras con
-        barras—, y por eso los nombres de los parámetros hablan de kilos: es el uso
-        original. Lo que NO puede hacerse nunca es mezclar: pasarle barras con un
-        total de plata de kilos daría un costo por barra inventado.
-        """
-        if not kilos_comprados:
-            return CERO
-        return (kilos * total_compras / kilos_comprados).quantize(DOS_DECIMALES)
+        self.catalogo = CatalogoReventa(db, ctx.empresa_id)
 
     @classmethod
     def _fila_producto(
@@ -2637,19 +3220,31 @@ class ReventaResumenService:
         gastos: Decimal,
         costo_kilo: Decimal,
         kilos_vendidos: Decimal | None = None,
+        etiqueta: str | None = None,
+        nota: str | None = None,
+        sin_costo_es_de_antes: bool = False,
     ) -> GananciaProducto:
         """`kilos` = kilos del lote comprado que fueron a este destino.
         `kilos_vendidos` = kilos realmente vendidos (solo difiere en la borona).
+
+        `etiqueta` y `nota` llegan armados desde `_etiqueta_y_nota` cuando la fila es
+        de un producto del catálogo; sin ellos se usan los textos de siempre, que es
+        como la llaman los pocos sitios que arman una fila suelta.
         """
         vendidos = kilos if kilos_vendidos is None else kilos_vendidos
+        etiqueta = etiqueta if etiqueta is not None else ETIQUETAS_PRODUCTO[producto]
+        nota = nota if nota is not None else NOTAS_PRODUCTO[producto]
         # Sin costo pero con kilos = la compra quedó fuera del período; decirlo
         # en vez de mostrar $0 de pérdida como si no hubiera costado nada.
-        nota = NOTAS_PRODUCTO[producto]
-        if kilos > CERO and costo == CERO and producto in ("merma", "pendiente"):
+        if (
+            kilos > CERO
+            and costo == CERO
+            and (sin_costo_es_de_antes or producto == "merma")
+        ):
             nota = NOTA_SIN_COSTO
         return GananciaProducto(
             producto=producto,
-            etiqueta=ETIQUETAS_PRODUCTO[producto],
+            etiqueta=etiqueta,
             nota=nota,
             unidad=UNIDAD_KILO,
             kilos=kilos,
@@ -2674,6 +3269,8 @@ class ReventaResumenService:
         gastos: Decimal,
         costo_barra: Decimal,
         barras_vendidas: Decimal | None = None,
+        etiqueta: str | None = None,
+        nota: str | None = None,
     ) -> GananciaProducto:
         """Un renglón del desglose MEDIDO EN BARRAS.
 
@@ -2690,8 +3287,8 @@ class ReventaResumenService:
         vendidas = barras if barras_vendidas is None else barras_vendidas
         return GananciaProducto(
             producto=producto,
-            etiqueta=ETIQUETAS_PRODUCTO[producto],
-            nota=NOTAS_PRODUCTO[producto],
+            etiqueta=etiqueta if etiqueta is not None else ETIQUETAS_PRODUCTO[producto],
+            nota=nota if nota is not None else NOTAS_PRODUCTO[producto],
             unidad=UNIDAD_BARRA,
             # Los dos campos de kilos en cero: este renglón no tiene kilos.
             kilos=CERO,
@@ -2712,142 +3309,472 @@ class ReventaResumenService:
             costo_barra=costo_barra,
         )
 
-    @classmethod
-    def _filas_por_producto(
-        cls,
-        *,
-        kilos_comprados: Decimal,
-        total_compras: Decimal,
-        costo_kilo: Decimal,
-        kilos_queso: Decimal,
-        ventas_queso: Decimal,
-        gastos_queso: Decimal,
-        kilos_a_borona: Decimal,
-        kilos_borona_vendidos: Decimal,
-        ventas_borona: Decimal,
-        gastos_borona: Decimal,
-        kilos_merma: Decimal,
-        kilos_pendientes: Decimal,
-        barras_compradas: Decimal = CERO,
-        compras_mozzarella: Decimal = CERO,
-        barras_vendidas: Decimal = CERO,
-        ventas_mozzarella: Decimal = CERO,
-        gastos_mozzarella: Decimal = CERO,
-    ) -> list[GananciaProducto]:
-        """Desglose de la ganancia del período en cuatro filas: queso, borona,
-        merma y el residuo (lo que quedó en inventario, o lo que salió de un
-        inventario anterior si se movió más de lo comprado en el período).
+    def _movimientos_del_periodo(
+        self, desde: date, hasta: date
+    ) -> tuple[dict[str, _MovimientoDeProducto], dict[str, _MovimientoDeProducto]]:
+        """(lo que se pesó, lo que se contó) del período, ABIERTO POR PRODUCTO.
 
-        CLAVE: el costo se reparte entre los kilos DEL LOTE COMPRADO y sus cuatro
-        destinos reales (vendido como queso, pasado a borona, merma, inventario).
-        La fila de borona se cuesta por los kilos CONVERTIDOS (kilos_a_borona),
-        NO por los vendidos: la borona vendida sale del inventario de borona, que
-        también se alimenta de la borona que llega gratis con el lote y de
-        conversiones de temporadas anteriores. Costear los kilos vendidos
-        inventaba costos que nunca se pagaron.
+        Son DOS diccionarios y no uno con la unidad adentro, y esa es la garantía que
+        importa: ninguna cifra de kilos puede terminar sumada con una de unidades,
+        porque viven en estructuras distintas de punta a punta. La suma de todo el
+        primero es exactamente lo que devuelven las consultas de kilos del período, y
+        la del segundo lo que devuelven las de unidades: es la misma plata de siempre,
+        abierta por producto.
 
-        Las tres primeras filas cargan su costo al precio promedio de compra y el
-        residuo se lleva la diferencia, así la suma de los cuatro costos es
-        EXACTAMENTE total_compras y la suma de las ganancias es exactamente
-        ganancia_estimada (invariante del resumen).
-
-        LA MOZZARELLA AGREGA DOS FILAS PROPIAS AL FINAL, en barras, y NO se mete en
-        el reparto de arriba. `total_compras` que llega aquí es SOLO la plata de las
-        compras en kilos (ver `CompraQuesoRepository.totales_periodo`), así que el
-        costo de las barras no se le puede repartir a ningún kilo ni al contrario:
-        cada unidad reparte su propia plata entre sus propios destinos. Las dos
-        filas nuevas solo aparecen si hubo mozzarella en el período; si no hubo, el
-        desglose sale con las mismas cuatro filas de siempre, idénticas.
-
-        Y el invariante sigue en pie, ahora por partida doble:
-            suma de costos de las filas de kilos  = plata de las compras en kilos
-            suma de costos de las filas de barras = plata de las compras de barras
-            suma de TODAS las ganancias           = ganancia_estimada
+        UN PRODUCTO PUEDE APARECER EN LOS DOS, y no es un caso hipotético que sobre:
+        una fila de un producto por unidad a la que alguien le hubiera metido kilos
+        —lo que se podía hacer por PUT antes de que esa puerta mirara el catálogo— se
+        clasifica por lo que la fila TRAE (ver `se_mide_en_unidades`), así que caería
+        en el primer diccionario. Que pueda estar en los dos es lo que hace que su
+        plata salga en una fila del desglose en vez de perderse.
         """
-        costo_queso = cls._costo_de(kilos_queso, kilos_comprados, total_compras)
-        costo_borona = cls._costo_de(kilos_a_borona, kilos_comprados, total_compras)
-        costo_merma = cls._costo_de(kilos_merma, kilos_comprados, total_compras)
-        costo_residuo = total_compras - (costo_queso + costo_borona + costo_merma)
-        # Residuo positivo: queso comprado que todavía no se ha movido. Negativo:
-        # se movió queso de una temporada anterior, así que su costo es un
-        # crédito (ya se pagó antes) y por eso sale negativo.
-        producto_residuo = "pendiente" if kilos_pendientes >= CERO else "anterior"
+        kilos: dict[str, _MovimientoDeProducto] = {}
+        unidades: dict[str, _MovimientoDeProducto] = {}
 
-        filas = [
-            cls._fila_producto(
-                "queso", kilos_queso, ventas_queso, costo_queso, gastos_queso, costo_kilo
-            ),
-            cls._fila_producto(
-                "borona",
-                kilos_a_borona,
-                ventas_borona,
-                costo_borona,
-                gastos_borona,
-                costo_kilo,
-                kilos_vendidos=kilos_borona_vendidos,
-            ),
-            cls._fila_producto("merma", kilos_merma, CERO, costo_merma, CERO, costo_kilo),
-            cls._fila_producto(
-                producto_residuo, abs(kilos_pendientes), CERO, costo_residuo, CERO, costo_kilo
-            ),
-        ]
+        for clave, cantidad, plata, gratis in self.compras.totales_periodo_por_tipo(
+            desde, hasta
+        ):
+            kilos[clave] = _MovimientoDeProducto(
+                comprado=cantidad, comprado_plata=plata, gratis=gratis
+            )
+        for clave, cantidad, plata, gastos in self.ventas.totales_periodo_por_tipo(
+            desde, hasta
+        ):
+            actual = kilos.get(clave, _MovimientoDeProducto())
+            kilos[clave] = replace(
+                actual, vendido=cantidad, vendido_plata=plata, gastos=gastos
+            )
 
-        # ------------------------------------------------------ mozzarella
-        # Solo si hubo movimiento de barras en el período. Sin esta guarda, todos
-        # los períodos del cliente —que hoy son de puro queso— estrenarían dos
-        # filas en ceros que solo estorban en una pantalla que ya está apretada.
-        #
-        # ESTA GUARDA FUE LA QUE SE TRAGÓ $200.000 una vez: había plata de barras
-        # sin barras que la acompañaran, así que estas dos filas no se imprimían y
-        # esos pesos no quedaban en ninguna. Hoy no puede volver a pasar porque la
-        # clasificación cuenta como plata de barras solo la de las filas que TRAEN
-        # barras (ver `se_mide_en_unidades`): si `compras_mozzarella` trae un peso,
-        # `barras_compradas` trae por lo menos una barra y la guarda abre. Y si
-        # alguna vez volviera a no cumplirse, `_cuadrar_desglose` saca esa plata en
-        # su propia fila en vez de perderla.
-        if barras_compradas or barras_vendidas:
-            costo_barra = (
-                (compras_mozzarella / barras_compradas).quantize(DOS_DECIMALES)
-                if barras_compradas
-                else CERO
+        for clave, cantidad, plata in self.compras.totales_periodo_barras_por_tipo(
+            desde, hasta
+        ):
+            unidades[clave] = _MovimientoDeProducto(
+                comprado=cantidad, comprado_plata=plata
             )
-            costo_vendidas = cls._costo_de(
-                barras_vendidas, barras_compradas, compras_mozzarella
+        for clave, cantidad, plata, gastos in self.ventas.totales_periodo_barras_por_tipo(
+            desde, hasta
+        ):
+            actual = unidades.get(clave, _MovimientoDeProducto())
+            unidades[clave] = replace(
+                actual, vendido=cantidad, vendido_plata=plata, gastos=gastos
             )
-            # El residuo de las barras se lleva la diferencia, igual que el de los
-            # kilos: así los dos costos suman EXACTO la plata de las compras de
-            # mozzarella y el dueño lo puede verificar con la calculadora.
-            costo_residuo_barras = compras_mozzarella - costo_vendidas
-            barras_pendientes = barras_compradas - barras_vendidas
-            producto_residuo_barras = (
-                "mozzarella_pendiente" if barras_pendientes >= CERO else "mozzarella_anterior"
-            )
-            filas.append(
-                cls._fila_barras(
-                    "mozzarella",
-                    barras_vendidas,
-                    ventas_mozzarella,
-                    costo_vendidas,
-                    gastos_mozzarella,
-                    costo_barra,
+        return kilos, unidades
+
+    def _filas_por_producto(
+        self,
+        *,
+        kilos: dict[str, "_MovimientoDeProducto"],
+        unidades: dict[str, "_MovimientoDeProducto"],
+        ajustes: list[tuple[str, str | None, Decimal]],
+        gratis: dict[str, Decimal],
+    ) -> list[GananciaProducto]:
+        """EL DESGLOSE DE LA GANANCIA, UNA FILA POR PRODUCTO Y ARMADO SOLO.
+
+        QUÉ ERA ESTO ANTES Y POR QUÉ HABÍA QUE CAMBIARLO. Eran cuatro filas fijas
+        —queso, borona, merma y el residuo— más dos de mozzarella, con los nombres
+        escritos aquí. El costo se repartía entre "los kilos comprados" y "los kilos
+        vendidos como queso", que en realidad eran los kilos de TODO lo que se pesara.
+        Con un segundo producto por kilo en el catálogo eso se rompía por los dos
+        lados: la venta de la panela no tenía fila, así que su plata caía en la de la
+        borona (que se sacaba por diferencia), y su costo se lo cargaba al pozo del
+        queso, que quedaba diciendo que tenía en bodega un queso que no compró.
+
+        LA REGLA DE AHORA, Y ES UNA SOLA: cada GRUPO DE COSTEO —un producto raíz con
+        sus subproductos, ver `GrupoDeCosteo`— tiene su propio pozo, que es la plata
+        de SUS compras, y ese pozo se reparte entre SUS destinos:
+
+            · lo que se vendió de cada miembro del grupo;
+            · lo que se pasó al subproducto (los kilos convertidos, no los vendidos:
+              la borona vendida sale del inventario de borona, que además recibe la
+              que llega gratis con el lote — costear los vendidos inventaba costos
+              que nunca se pagaron);
+            · la merma;
+            · y el RESIDUO, que es lo que quedó en bodega (o, en negativo, lo que
+              salió de un inventario de antes del período).
+
+        Y LA CUENTA CIERRA POR CONSTRUCCIÓN, no por un ajuste al final: las cantidades
+        de los destinos suman EXACTAMENTE la cantidad comprada del grupo —el residuo
+        es justamente lo que falta para eso—, así que repartir el pozo entre ellos con
+        el reparto por resto mayor (`repartir_al_resto_mayor`) da una suma de costos
+        que es EXACTAMENTE la plata comprada del grupo. Sumando los grupos, la columna
+        del costo suma exacto las compras del período, que es lo que el dueño verifica
+        con la calculadora.
+
+        POR QUÉ EL RESTO MAYOR Y NO "EL ÚLTIMO SE LLEVA LA DIFERENCIA". Porque con las
+        filas armándose solas ya no hay un "último" que signifique nada: la lista
+        depende de cuántos productos tenga el catálogo. Con el resto mayor cada fila
+        queda a lo sumo un centavo de su propia multiplicación —que es la que el dueño
+        rehace a mano— y los centavos que faltan caen donde de verdad se generaron.
+        Es la misma implementación que reparte los fletes de las liquidaciones
+        (`app/common/dinero.py`), para que dos pantallas del sistema no repartan los
+        mismos centavos de dos formas distintas.
+
+        ESTO MUEVE HASTA DOS CENTAVOS DE FILA A FILA CONTRA EL CÓDIGO ANTERIOR, ES A
+        PROPÓSITO Y NO SE DEBE "ARREGLAR" DE VUELTA. Está medido: 625 cifras en 40
+        escenarios, y la diferencia máxima entre una fila de antes y la misma fila de
+        hoy es de $0,02. Lo que NO se movió es nada de lo que el dueño cuadra:
+
+          · los encabezados (`total_compras`, `total_ventas`, `total_gastos`,
+            `ganancia_estimada`) dan exactamente lo mismo;
+          · todos los desgloses siguen sumando EXACTO su cifra grande;
+          · los PDF salen idénticos.
+
+        Y lo que se ganó es lo que hacía falta: cada fila queda reproducible con su
+        propia multiplicación. Con "el último se lleva la diferencia" salían renglones
+        de "0 kg, $0,01" que el dueño no podía explicar con ninguna cuenta, porque esos
+        centavos no eran de esa fila: eran los sobrantes de todas las demás.
+
+        LAS DOS UNIDADES NUNCA SE MEZCLAN. Un grupo que se pesa reparte kilos con
+        kilos y sale con filas de kilos; uno que se cuenta reparte unidades con
+        unidades y sale con filas de unidades. Los pesos sí se suman entre todas,
+        porque los pesos son pesos.
+
+        CUÁNDO APARECE UN GRUPO. Cuando tuvo movimiento en el período, y siempre en el
+        caso del grupo del producto DE SIEMPRE: sus filas son donde se reporta la merma
+        y de dónde salió lo que se movió de un inventario anterior, y eso puede existir
+        sin una sola compra en el período. Es exactamente lo que se veía antes (las
+        cuatro filas de kilos salían siempre, las de mozzarella solo si hubo barras).
+
+        Y ESE "DE SIEMPRE" ES UNA CONSTANTE Y NO UNA CONSULTA AL CATÁLOGO. Antes era
+        "el grupo de la pareja de ajustes", o sea el primer subproducto que se pesara
+        EN EL ORDEN del catálogo: crear un producto y ponerlo de primero le quitaba al
+        queso sus cuatro renglones de siempre y se los estrenaba a otro. Igual que
+        `CLAVES_DE_RESIDUO_HISTORICAS`, esto es una decisión de RÓTULOS —cuáles filas
+        se imprimen aunque vayan en cero— y ninguna cifra se decide aquí.
+        """
+        vacio = _MovimientoDeProducto()
+        # Los ajustes del período, abiertos POR EL PRODUCTO DEL QUE SALIERON. Cada uno
+        # dice a cuál le entró (o nulo si fue merma), y de ahí sale a qué fila del
+        # desglose van esos kilos, sin preguntarle nada al orden del catálogo.
+        por_origen: dict[str, dict[str | None, Decimal]] = {}
+        for origen, destino, cantidad in ajustes:
+            hacia = por_origen.setdefault(origen, {})
+            hacia[destino] = hacia.get(destino, CERO) + cantidad
+
+        filas: list[GananciaProducto] = []
+        # LAS CLAVES DE LO QUE LLEGÓ GRATIS ENTRAN TAMBIÉN, y no es un adorno: son
+        # productos que recibieron mercancía de verdad sin tener una sola compra ni una
+        # sola venta a nombre propio. Sin ellas, un producto que solo hubiera recibido
+        # kilos gratis y que NO estuviera en el catálogo (una base vieja, una fila que
+        # nombra un producto que ya no está) se quedaba sin grupo y sin renglón: el
+        # desglose no lo mencionaba mientras las existencias de la MISMA respuesta
+        # reportaban sus 25,36 kg. Es el mismo olvido de `movimientos()`, en la puerta
+        # de leer: la fila ya nombró a su producto en `subproducto_tipo`.
+        for grupo in self.catalogo.grupos([*kilos, *unidades, *por_origen, *gratis]):
+            for en_kilos, movimientos in ((True, kilos), (False, unidades)):
+                mios = {c: movimientos.get(c, vacio) for c in grupo.claves}
+                # Los ajustes son kilos de punta a punta (ver `ConversionBorona`), así
+                # que solo entran en la vuelta de lo que se pesa.
+                suyos = (
+                    {c: por_origen[c] for c in grupo.claves if c in por_origen}
+                    if en_kilos
+                    else {}
                 )
-            )
-            filas.append(
-                cls._fila_barras(
-                    producto_residuo_barras,
-                    abs(barras_pendientes),
-                    CERO,
-                    costo_residuo_barras,
-                    CERO,
-                    costo_barra,
-                    # El residuo no se vendió: sin barras vendidas no hay precio de
-                    # venta que mostrar (si no, saldría $0 "por barra" como si se
-                    # hubiera regalado).
-                    barras_vendidas=CERO,
+                # Recibir kilos gratis ES movimiento del producto que los recibió, por
+                # lo mismo de arriba. Solo cuenta en la vuelta de los kilos: lo que
+                # llega gratis se pesa.
+                recibio_gratis = en_kilos and any(gratis.get(c) for c in grupo.claves)
+                hubo_movimiento = bool(suyos) or recibio_gratis or any(
+                    m.comprado or m.vendido or m.comprado_plata or m.vendido_plata
+                    for m in mios.values()
                 )
-            )
+                imprime_siempre = en_kilos and grupo.clave == TIPO_QUESO
+                if not hubo_movimiento and not imprime_siempre:
+                    continue
+                filas += self._filas_de_un_grupo(
+                    grupo,
+                    mios,
+                    en_kilos=en_kilos,
+                    imprime_siempre=imprime_siempre,
+                    ajustes=suyos,
+                    gratis=gratis if en_kilos else {},
+                )
         return filas
 
+    def _filas_de_un_grupo(
+        self,
+        grupo: GrupoDeCosteo,
+        movimientos: dict[str, "_MovimientoDeProducto"],
+        *,
+        en_kilos: bool,
+        imprime_siempre: bool,
+        ajustes: dict[str, dict[str | None, Decimal]],
+        gratis: dict[str, Decimal],
+    ) -> list[GananciaProducto]:
+        """Las filas de UN grupo: una por miembro, las mermas y los residuos.
+
+        UN POZO POR PRODUCTO QUE HAYA COMPRADO, Y NO UNO SOLO POR GRUPO. Esta es la
+        pieza que arregla el segundo defecto: comprar borona directamente. El pozo del
+        grupo era la plata de TODAS sus compras, y sus destinos eran "lo vendido de la
+        raíz" y "lo convertido al subproducto"; una compra hecha DIRECTAMENTE al
+        subproducto entraba al pozo pero no tenía ningún destino que la consumiera, así
+        que los $50.000 de esa borona se iban enteros a la fila "Aún en inventario"
+        —como si fueran queso que nadie compró— y la borona vendida salía con ganancia
+        PURA de $100.000. El panel de lotes, que sí le lleva una cola a cada producto,
+        decía otra cosa: dos pantallas del mismo sistema con dos costos de la misma
+        venta.
+
+        La regla de ahora, y son dos frases:
+
+        · LO QUE LLEGA GRATIS CON SU PADRE HEREDA EL COSTO DEL PADRE. Eso es lo que
+          significa la marca del catálogo, y por eso el subproducto consume del pozo de
+          su padre EXACTAMENTE los kilos que se le convirtieron —no los que vendió: lo
+          vendido puede salir de lo que llegó gratis o de conversiones de otro período,
+          y eso no se pagó en este—.
+        · LO QUE SE COMPRA DIRECTAMENTE TIENE SU PROPIO COSTO. Las compras de un
+          subproducto arman SU pozo, con SU precio por kilo, y de ahí sale el costo de
+          lo que se venda de él y de lo que quede en bodega. Las dos cosas conviven en
+          el mismo producto y en el mismo período.
+
+        Y LA CUENTA SIGUE CERRANDO POR CONSTRUCCIÓN: cada pozo reparte su plata entre
+        sus destinos, el residuo es justamente lo que falta para que las cantidades
+        sumen lo comprado de ESE producto, y la suma de todos los pozos del grupo es la
+        plata comprada del grupo. Sumando los grupos, la columna del costo suma exacto
+        las compras del período, que es lo que el dueño verifica con la calculadora.
+        """
+        vacio = _MovimientoDeProducto()
+        # Cuántos kilos le ENTRARON a cada miembro por ajustes dentro del grupo. Son
+        # kilos que ya vienen costeados del pozo de quien los soltó, así que no
+        # consumen el pozo propio del que los recibe.
+        entra_por_ajustes: dict[str, Decimal] = {}
+        for hacia in ajustes.values():
+            for destino, cantidad in hacia.items():
+                if destino:
+                    entra_por_ajustes[destino] = (
+                        entra_por_ajustes.get(destino, CERO) + cantidad
+                    )
+
+        def consumo_de_lo_vendido(producto: Any, mov: "_MovimientoDeProducto") -> Decimal:
+            """De lo VENDIDO de un producto, cuánto sale de SUS PROPIAS COMPRAS.
+
+            LA CUENTA NO ESTÁ AQUÍ: está en `kilos_que_salen_de_lo_pagado`, en
+            `lotes.py`, y es LA MISMA que usa el panel de lotes para servir esa venta de
+            la cola de inventario. Lo que se hace aquí es juntar los dos orígenes que
+            este producto tuvo sin pagar —lo que le llegó GRATIS con la compra de su
+            padre (cuesta cero) y lo que le entró CONVERTIDO desde él (ya se costeó
+            contra el pozo del padre, en la fila de este mismo producto)— y preguntarle
+            a esa función. Cargarle esos kilos otra vez al pozo propio los cobraría dos
+            veces.
+
+            LAS DOS PANTALLAS TIENEN QUE DECIR EL MISMO COSTO DE LA MISMA VENTA, y por
+            eso la cuenta se escribe una sola vez: cuando cada una ordenaba a su manera,
+            el desglose cobraba $225.000 por un despacho de borona que el panel de lotes
+            valoraba en $35.000. El detalle, con las cifras, está en el docstring de esa
+            función.
+
+            Para un producto que no recibe nada gratis ni convertido —o sea todos los
+            que se compran y se venden y ya— esto es exactamente `mov.vendido`, que es
+            lo que este renglón ha hecho siempre.
+            """
+            sin_pagar = gratis.get(producto.clave, CERO) + entra_por_ajustes.get(
+                producto.clave, CERO
+            )
+            return kilos_que_salen_de_lo_pagado(mov.vendido, sin_pagar)
+
+        # ------------------------------------------------------------ las filas
+        # Se van creando en el orden en que tienen que salir en pantalla: primero los
+        # miembros del grupo (la raíz y después sus subproductos, en el orden del
+        # catálogo), después las mermas y por último los residuos.
+        orden: list[str] = []
+        acumulado: dict[str, dict[str, Any]] = {}
+
+        def renglon(clave_fila: str, producto: Any, papel: str = "vendido") -> dict:
+            if clave_fila not in acumulado:
+                orden.append(clave_fila)
+                acumulado[clave_fila] = {
+                    "producto": producto,
+                    "papel": papel,
+                    "cantidad": CERO,
+                    "vendida": CERO,
+                    "ingreso": CERO,
+                    "gastos": CERO,
+                    "costo": CERO,
+                    # De qué pozos salió su costo. Con uno solo, la columna "costo por
+                    # kilo" es la de ese pozo (que es la que el dueño cruza con el
+                    # recibo del productor); con dos, la única cifra honesta es la de
+                    # la propia fila.
+                    "unitarios": [],
+                }
+            return acumulado[clave_fila]
+
+        for producto in grupo.miembros:
+            mov = movimientos.get(producto.clave, vacio)
+            fila = renglon(_clave_de_fila(producto.clave), producto)
+            fila["vendida"] += mov.vendido
+            fila["ingreso"] += mov.vendido_plata
+            fila["gastos"] += mov.gastos
+
+        # ------------------------------------------------------------- los pozos
+        for producto in grupo.miembros:
+            mov = movimientos.get(producto.clave, vacio)
+            es_raiz = producto.clave == grupo.raiz.clave
+            # El pozo de la RAÍZ existe siempre —es donde cae el residuo del grupo y
+            # es la fila que el dueño ya conoce—; el de un subproducto solo si de
+            # verdad se le compró algo.
+            if not es_raiz and not (mov.comprado or mov.comprado_plata):
+                continue
+
+            # (clave de la fila, cantidad que se lleva de este pozo)
+            destinos: list[tuple[str, Decimal]] = []
+            # Lo vendido DE ESTE producto sale de SUS compras, descontando lo que no
+            # se pagó (ver `consumo_de_lo_vendido`).
+            destinos.append(
+                (_clave_de_fila(producto.clave), consumo_de_lo_vendido(producto, mov))
+            )
+
+            # Lo que salió de él por ajustes: a un subproducto suyo o a la merma.
+            for destino, cantidad in sorted(
+                ajustes.get(producto.clave, {}).items(),
+                key=lambda par: (par[0] is None, par[0] or ""),
+            ):
+                if destino is None:
+                    clave_merma = _clave_de_merma(producto.clave)
+                    renglon(clave_merma, producto, papel="merma")
+                    destinos.append((clave_merma, cantidad))
+                elif destino in grupo.claves:
+                    destinos.append((_clave_de_fila(destino), cantidad))
+                # UN DESTINO QUE YA NO ES SUBPRODUCTO DE ESTE (solo puede quedar así
+                # tocando la base a mano: el catálogo no deja re-colgar un producto que
+                # tenga ajustes) se deja SIN consumir el pozo, así que esos kilos se
+                # quedan en el residuo. Es lo más pequeño que se puede decir sin
+                # mentir: la plata no se pierde y no se le acredita a nadie que no sea.
+
+            # LA FILA DE LA MERMA SALE SIEMPRE en el grupo del producto de siempre,
+            # aunque el período no tenga merma. Es un renglón que el dueño busca con el
+            # dedo —"¿cuánto se perdió este mes?"— y un cero explícito es una
+            # respuesta; que la fila desaparezca lo deja sin saber si no hubo merma o
+            # si el sistema no la contó.
+            if imprime_siempre and es_raiz:
+                clave_merma = _clave_de_merma(producto.clave)
+                if clave_merma not in acumulado:
+                    renglon(clave_merma, producto, papel="merma")
+                    destinos.append((clave_merma, CERO))
+
+            # EL RESIDUO ES LO QUE FALTA PARA QUE LOS DESTINOS SUMEN LO COMPRADO DE
+            # ESTE PRODUCTO, así que las cantidades cierran exacto por definición y el
+            # reparto del pozo también.
+            residuo = mov.comprado - sum((c for _, c in destinos), CERO)
+            clave_sobra, clave_falta = _claves_de_residuo(producto.clave)
+            papel_residuo = "pendiente" if residuo >= CERO else "anterior"
+            clave_residuo = clave_sobra if residuo >= CERO else clave_falta
+            renglon(clave_residuo, producto, papel=papel_residuo)
+            # El papel se vuelve a fijar: la MISMA fila puede haberse creado como
+            # 'pendiente' en una vuelta anterior y ahora ser 'anterior' (no puede
+            # pasar hoy —cada pozo tiene su propia clave de residuo— pero si algún día
+            # dos pozos compartieran una, el rótulo tiene que decir lo que la fila es).
+            acumulado[clave_residuo]["papel"] = papel_residuo
+            destinos.append((clave_residuo, residuo))
+
+            # El costo de cada destino: su parte del pozo, repartida al resto mayor
+            # sobre los valores EXACTOS (sin redondear antes de multiplicar, que es lo
+            # que desviaba la columna unos pesos de la cifra grande).
+            exactos = [
+                (
+                    indice,
+                    (cantidad * mov.comprado_plata / mov.comprado)
+                    if mov.comprado
+                    else CERO,
+                )
+                for indice, (_, cantidad) in enumerate(destinos)
+            ]
+            costos = repartir_al_resto_mayor(exactos, mov.comprado_plata)
+            # El costo unitario del pozo, para la columna que el dueño cruza a mano con
+            # lo que le pagó al productor. Es el de ESTE producto y no el del período
+            # entero: meterle la plata de otro daría un precio por kilo que no está en
+            # ningún recibo.
+            unitario = (
+                (mov.comprado_plata / mov.comprado).quantize(DOS_DECIMALES)
+                if mov.comprado
+                else CERO
+            )
+            for indice, (clave_fila, cantidad) in enumerate(destinos):
+                fila = acumulado[clave_fila]
+                fila["cantidad"] += cantidad
+                fila["costo"] += costos[indice]
+                if unitario not in fila["unitarios"]:
+                    fila["unitarios"].append(unitario)
+
+        # El costo por unidad del pozo de la raíz es el que contesta por las filas que
+        # no consumieron de ningún pozo (un subproducto que solo vendió lo que le llegó
+        # gratis): es lo que este renglón devolvía antes y lo que el dueño ya conoce.
+        unitario_de_la_raiz = (
+            acumulado.get(_clave_de_fila(grupo.raiz.clave), {}).get("unitarios") or [CERO]
+        )[0]
+
+        # ------------------------------------------------------- armar la respuesta
+        salida: list[GananciaProducto] = []
+        for clave_fila in orden:
+            fila = acumulado[clave_fila]
+            papel = fila["papel"]
+            es_residuo = papel in ("pendiente", "anterior")
+            producto = fila["producto"]
+            nombre = producto.nombre if producto is not None else ""
+            etiqueta, nota = _etiqueta_y_nota(
+                clave_fila, nombre, papel=papel, se_pesa=en_kilos
+            )
+            unitarios = fila["unitarios"]
+            if not unitarios:
+                costo_unitario = unitario_de_la_raiz
+            elif len(unitarios) == 1:
+                costo_unitario = unitarios[0]
+            else:
+                # La fila se sirvió de dos pozos con precios distintos (lo convertido
+                # del padre y lo que se le compró a él directo). Ningún precio de
+                # recibo explica esa mezcla: lo único cierto es lo que costó ESTA fila.
+                costo_unitario = (
+                    (fila["costo"] / fila["cantidad"]).quantize(DOS_DECIMALES)
+                    if fila["cantidad"]
+                    else CERO
+                )
+            cantidad = abs(fila["cantidad"]) if es_residuo else fila["cantidad"]
+            if en_kilos:
+                salida.append(
+                    self._fila_producto(
+                        clave_fila,
+                        cantidad,
+                        fila["ingreso"],
+                        fila["costo"],
+                        fila["gastos"],
+                        costo_unitario,
+                        # EN LAS FILAS QUE NO SE VENDEN (la merma y el residuo) los
+                        # "vendidos" quedan iguales a la cantidad, que es lo que ya
+                        # devolvía el resumen. No es un descuido heredado: la pantalla
+                        # muestra la nota "vendidos: X" SOLO cuando difiere de la
+                        # cantidad, así que dejarlos en cero le estrenaría al dueño una
+                        # nota que dice "vendidos: 0" en dos filas que por definición
+                        # no se vendieron. Igualarlos es lo que la mantiene callada.
+                        kilos_vendidos=(
+                            None if es_residuo or papel == "merma" else fila["vendida"]
+                        ),
+                        etiqueta=etiqueta,
+                        nota=nota,
+                        # Cantidad sin costo = la compra cayó fuera del período, y hay
+                        # que decirlo en vez de mostrar $0 de pérdida. Aplica al
+                        # residuo que sobró y a la merma, que es de donde salían los
+                        # dos casos reales.
+                        sin_costo_es_de_antes=(
+                            papel == "merma" or (es_residuo and papel == "pendiente")
+                        ),
+                    )
+                )
+            else:
+                salida.append(
+                    self._fila_barras(
+                        clave_fila,
+                        cantidad,
+                        fila["ingreso"],
+                        fila["costo"],
+                        fila["gastos"],
+                        costo_unitario,
+                        # El residuo no se vendió: sin unidades vendidas no hay precio
+                        # de venta que mostrar (si no, saldría $0 "por unidad" como si
+                        # se hubiera regalado).
+                        barras_vendidas=CERO if es_residuo else fila["vendida"],
+                        etiqueta=etiqueta,
+                        nota=nota,
+                    )
+                )
+        return salida
     @classmethod
     def _cuadrar_desglose(
         cls,
@@ -2900,41 +3827,53 @@ class ReventaResumenService:
         desde: date,
         hasta: date,
         *,
+        grupos: list[GrupoDeCosteo],
+        kilos: dict[str, _MovimientoDeProducto],
+        unidades: dict[str, _MovimientoDeProducto],
         valor_realizado_kilo: Decimal,
-        neto_periodo: Decimal,
-        kilos_comprados: Decimal,
         valor_realizado_barra: Decimal = CERO,
-        neto_barras: Decimal = CERO,
-        barras_compradas: Decimal = CERO,
+        clave_de_las_unidades: str | None = None,
     ) -> list[GananciaProductor]:
         """Ganancia ESTIMADA por productor (la UI debe decir que es estimación).
 
-        Reparte el valor neto que dejaron las ventas del período (`neto_periodo`
-        = ventas − gastos) entre los kilos que se le compraron a cada uno. Quien
-        vendió más barato dejó más margen. Como el divisor son los kilos
-        COMPRADOS, la suma de las filas cuadra con la ganancia neta del período:
-        no hay forma de que el ranking contradiga la tarjeta de arriba.
+        LA CUENTA, Y EL PORQUÉ DE QUE SEA POR GRUPO. A cada productor se le acredita
+        la parte del valor neto que dejaron las ventas —ventas menos gastos— que le
+        corresponde a las cantidades que él vendió, y se le descuenta lo que se le
+        pagó. Quien vendió más barato dejó más margen. El divisor son las cantidades
+        COMPRADAS y no las vendidas: así la suma de la columna cuadra con la ganancia
+        neta del período y el ranking no puede contradecir la tarjeta de arriba.
 
-        El reparto NO quantiza el valor por kilo antes de multiplicarlo (se hace
-        kilos × neto / kilos_comprados y se redondea al final) y la diferencia de
-        centavos se le da a la ÚLTIMA fila, igual que `costo_residuo` en
-        _filas_por_producto: repartir con el `valor_realizado_kilo` ya redondeado
-        a dos decimales desviaba la columna unos pesos de la ganancia del período.
+        EL REPARTO SE HACE UNA VEZ POR GRUPO DE COSTEO, y es la única forma de que
+        cuadre. El neto que dejaron las ventas de un grupo se reparte entre las
+        cantidades compradas DE ESE GRUPO, en SU unidad. Si se repartiera todo el neto
+        entre los kilos, a un productor que solo vendió unidades le saldría ganancia
+        cero y su plata se les acreditaría a los de kilos: el ranking diría que el
+        mejor negocio lo hizo alguien que no vendió una sola barra. Las partes se SUMAN
+        en `ganancia_estimada` porque son pesos, y la columna sigue sumando la
+        ganancia del período:
+
+            Σ_grupos (neto del grupo − comprado del grupo)
+            = total_ventas − total_gastos − total_compras = ganancia_estimada
+
+        Antes esto se hacía dos veces —una para los kilos y otra para las barras— con
+        las dos unidades escritas a mano. Con el reparto por grupo, un producto nuevo
+        entra al ranking solo, sin que nadie tenga que agregarle su vuelta.
+
+        LOS CENTAVOS VAN AL RESTO MAYOR y no a la última fila de la lista. Antes el
+        residuo del redondeo se le sumaba a "la última fila que tuviera de esa unidad",
+        que es un puesto que no significa nada —depende de cómo la base devolvió las
+        filas— y le desviaba a ese productor su cifra de su propia multiplicación. El
+        dueño revisa el ranking fila por fila. Con el resto mayor cada fila queda a lo
+        sumo un centavo de su cuenta y la columna sigue sumando exacto.
 
         Las filas salen del conjunto HISTÓRICO de productores a los que se les
         debe, no solo de los que tuvieron compras EN EL PERÍODO: a quien se le
         compró en mayo y no se le ha pagado se le sigue debiendo en julio, y sin
         su fila la columna `por_pagar` no sumaba la tarjeta "Por pagar a
-        productores", que sí es histórica. Esas filas van con kilos 0 y comprado
+        productores", que sí es histórica. Esas filas van con cantidades 0 y comprado
         0 —no tuvieron compras en el período, así que no inventan plata en el
         desglose— pero con TODA su deuda: la de las compras del sistema más la
         del libro anterior.
-
-        La columna `por_pagar` INCLUYE el saldo del libro anterior de cada
-        productor, porque la tarjeta "Por pagar a productores" también lo
-        incluye: si solo lo sumara la tarjeta, la columna dejaría de cuadrar con
-        ella. Los kilos, el costo y la ganancia NO se tocan: los saldos
-        anteriores no son compras de este sistema.
 
         SIN COMPRAS EN EL PERÍODO no hay a quién repartirle y las filas se quedan
         con ganancia 0, que es lo correcto: a esa gente no se le compró nada este
@@ -2948,20 +3887,7 @@ class ReventaResumenService:
         Cómo lo detecta el frontend: `kilos_comprados == 0` en el mismo resumen.
         NO se agrega un campo nuevo a propósito: sería un segundo nombre para un
         hecho que ya viaja en la respuesta y que además es EL MISMO divisor del
-        reparto (`neto_periodo / kilos_comprados`), así que no puede desincronizarse
-        del cálculo. Un `bool` aparte sí podría quedar en desacuerdo con los kilos
-        el día que alguien toque una de las dos ramas.
-
-        EL REPARTO SE HACE DOS VECES, UNA POR UNIDAD, y esa es la única forma de
-        que cuadre: el neto que dejaron las ventas EN KILOS se reparte entre los
-        KILOS comprados y el de las ventas EN BARRAS entre las BARRAS compradas.
-        Si se repartiera todo el neto entre los kilos, a un productor que solo
-        vendió barras le saldría ganancia cero y su plata se les acreditaría a los
-        de kilos: el ranking diría que el mejor negocio lo hizo alguien que no
-        vendió una sola barra. Las dos partes se SUMAN en `ganancia_estimada`
-        porque son pesos, y la columna sigue sumando la ganancia del período:
-            (neto_kilos − comprado_kilos) + (neto_barras − comprado_barras)
-            = total_ventas − total_gastos − total_compras = ganancia
+        reparto, así que no puede desincronizarse del cálculo.
         """
         # Deuda HISTÓRICA por productor, agrupada en Python con el mismo criterio
         # las dos: la de las compras de este sistema y la que quedó del libro
@@ -2973,94 +3899,140 @@ class ReventaResumenService:
             self.saldos.pendiente_por_tercero(TIPO_SALDO_PAGAR)
         )
 
-        del_periodo = self.compras.por_productor(desde, hasta)
-        # Valor neto realizado que le corresponde a los kilos de cada productor.
-        # A la última fila se le suma la diferencia de redondeo para que el
-        # reparto sume EXACTAMENTE neto_periodo (los kilos de las filas suman
-        # kilos_comprados, así que sin compras en el período la lista va vacía).
-        realizados = [
-            (kilos * neto_periodo / kilos_comprados).quantize(DOS_DECIMALES)
-            if kilos_comprados
-            else CERO
-            for _, _, kilos, _, _, _, _ in del_periodo
-        ]
-        # El mismo reparto, EN BARRAS y con su propio neto. Dos listas separadas y
-        # no una sola cifra por fila: si se sumaran antes de ajustar el residuo, la
-        # diferencia de redondeo de una unidad se le cargaría a la otra.
-        realizados_barras = [
-            (barras * neto_barras / barras_compradas).quantize(DOS_DECIMALES)
-            if barras_compradas
-            else CERO
-            for _, _, _, _, _, barras, _ in del_periodo
-        ]
-        # El ajuste del residuo solo tiene sentido si de verdad hubo kilos que
-        # repartir: sin `kilos_comprados` el reparto es todo ceros y sumarle la
-        # diferencia le daría TODO el neto del período a la última fila, que es
-        # justo la plata que no le corresponde a nadie de la lista.
-        #
-        # Y el residuo se le da a la última fila QUE TENGA DE ESA UNIDAD. Antes de
-        # la mozzarella daba igual (todas las filas tenían kilos), pero ahora un
-        # productor de solo barras tiene kilos 0: darle a él los centavos del
-        # reparto de los kilos le inventaría una ganancia en una unidad que no
-        # vendió, y su fila diría "0 kg" con plata al lado.
-        def _ajustar(valores: list[Decimal], cantidades: list[Decimal], neto: Decimal) -> None:
-            ultimo = next(
-                (i for i in range(len(cantidades) - 1, -1, -1) if cantidades[i] > CERO), None
+        # Lo comprado en el período, por productor y por producto. El nombre se
+        # conserva tal como está escrito en las compras (es el que el dueño ve en el
+        # resto del módulo) y se agrupa por su clave canónica, para que dos
+        # escrituras del mismo señor no salgan en dos filas.
+        nombres: dict[str, str] = {}
+        # (clave del tercero, clave del grupo) -> (cantidad, plata)
+        comprado: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
+        conteo: dict[str, int] = {}
+        orden_de_aparicion: list[str] = []
+        for productor, tipo, cuantas, kilos_netos, unidades_compradas, plata in (
+            self.compras.por_productor_y_tipo(desde, hasta)
+        ):
+            clave_tercero = _clave_tercero(productor)
+            if clave_tercero not in nombres:
+                nombres[clave_tercero] = productor
+                orden_de_aparicion.append(clave_tercero)
+            clave_grupo = self.catalogo.raiz_de(tipo)
+            cantidad = kilos_netos if self.catalogo.se_pesa(tipo) else unidades_compradas
+            antes = comprado.get((clave_tercero, clave_grupo), (CERO, CERO))
+            comprado[(clave_tercero, clave_grupo)] = (
+                antes[0] + cantidad,
+                antes[1] + plata,
             )
-            if ultimo is not None:
-                valores[ultimo] += neto - sum(valores, CERO)
+            conteo[clave_tercero] = conteo.get(clave_tercero, 0) + cuantas
 
-        if kilos_comprados:
-            _ajustar(realizados, [fila[2] for fila in del_periodo], neto_periodo)
-        if barras_compradas:
-            _ajustar(realizados_barras, [fila[5] for fila in del_periodo], neto_barras)
+        # EL REPARTO, GRUPO POR GRUPO. `realizado[(tercero, grupo)]` es la parte del
+        # neto de ese grupo que le corresponde a ese productor, y la suma de cada
+        # grupo da EXACTAMENTE su neto.
+        realizado: dict[tuple[str, str], Decimal] = {}
+        for grupo in grupos:
+            # EL NETO DEL GRUPO SE TOMA DE LAS DOS CLASES DE MOVIMIENTO —lo que se pesó
+            # y lo que se contó— aunque un grupo normal solo tenga una. Es lo que
+            # garantiza que la columna sume la tarjeta pase lo que pase: si una fila
+            # vieja de un producto por unidad trajera kilos (una mestiza, que hoy ya no
+            # se puede escribir pero pudo quedar guardada), su plata estaría en la otra
+            # clase y se quedaría sin repartir. El neto son PESOS, así que sumarlos es
+            # legal; lo que nunca se mezcla son las CANTIDADES, y esas siguen saliendo
+            # cada una de la columna de su unidad.
+            mios = [
+                mapa.get(clave, _MovimientoDeProducto())
+                for mapa in (kilos, unidades)
+                for clave in grupo.claves
+            ]
+            neto = sum((m.vendido_plata - m.gastos for m in mios), CERO)
+            total_cantidad = sum(
+                (c for (t, g), (c, _) in comprado.items() if g == grupo.clave), CERO
+            )
+            if not total_cantidad:
+                # Sin compras de este grupo en el período no hay a quién repartirle:
+                # esa plata salió de inventario viejo y lo dice la fila del residuo.
+                continue
+            exactos = [
+                (tercero, cantidad * neto / total_cantidad)
+                for (tercero, g), (cantidad, _) in sorted(comprado.items())
+                if g == grupo.clave and cantidad > CERO
+            ]
+            for tercero, parte in repartir_al_resto_mayor(exactos, neto).items():
+                realizado[(tercero, grupo.clave)] = parte
 
+        claves_kg = {g.clave for g in grupos if g.raiz.se_pesa}
+        # El orden en que se arman las filas: del que más plata trajo al que menos, y
+        # la clave del tercero como desempate. Es el mismo criterio de siempre, pero
+        # escrito acá y no dejado al `ORDER BY` de la base: dos productores que hayan
+        # traído lo mismo tienen que salir en el mismo puesto en cada consulta, o el
+        # ranking se ve distinto cada vez que se abre la pantalla.
+        orden_de_aparicion.sort(
+            key=lambda t: (
+                -sum((v[1] for (x, _), v in comprado.items() if x == t), CERO),
+                t,
+            )
+        )
         filas: list[GananciaProductor] = []
-        # El 5.º campo de por_productor (su saldo por grupo de SQL) NO se usa
-        # aquí: la deuda sale de `pendiente_sistema`, que agrupa las variantes de
-        # escritura en Python y así ninguna queda por fuera ni contada dos veces.
-        for (
-            (productor, compras, kilos, total_comprado, _, barras, comprado_barras),
-            realizado,
-            realizado_barras,
-        ) in zip(del_periodo, realizados, realizados_barras):
-            # El precio promedio POR KILO se saca de la plata de los kilos: al
-            # total de sus compras se le quita el pedazo de las barras. Si no, a un
-            # productor que vendió 10 kg y 100 barras le saldría un precio por kilo
-            # que incluye toda la plata de la mozzarella.
-            comprado_kilos = total_comprado - comprado_barras
+        for clave_tercero in orden_de_aparicion:
+            mios = {g: v for (t, g), v in comprado.items() if t == clave_tercero}
+            # Las cantidades de kilos se suman entre grupos que se pesan (los kilos son
+            # kilos); las de unidades NO se suman entre productos distintos, así que la
+            # columna `barras` habla del producto por unidad de siempre y el resto sale
+            # en el desglose por producto. Ver el docstring de `ResumenReventa`.
+            cantidad_kilos = sum(
+                (v[0] for g, v in mios.items() if g in claves_kg), CERO
+            )
+            plata_kilos = sum((v[1] for g, v in mios.items() if g in claves_kg), CERO)
+            cantidad_unidades, plata_unidades = mios.get(
+                clave_de_las_unidades or "", (CERO, CERO)
+            )
             precio_promedio = (
-                (comprado_kilos / kilos).quantize(DOS_DECIMALES) if kilos else CERO
+                (plata_kilos / cantidad_kilos).quantize(DOS_DECIMALES)
+                if cantidad_kilos
+                else CERO
             )
             precio_promedio_barra = (
-                (comprado_barras / barras).quantize(DOS_DECIMALES) if barras else CERO
+                (plata_unidades / cantidad_unidades).quantize(DOS_DECIMALES)
+                if cantidad_unidades
+                else CERO
             )
-            clave = _clave_tercero(productor)
-            _, del_sistema = pendiente_sistema.pop(clave, ("", CERO))
-            _, del_libro = pendiente_libro.pop(clave, ("", CERO))
+            # LA GANANCIA ES LA SUMA DE SUS GRUPOS: lo que cada unidad realizó menos lo
+            # que esa unidad costó. Se suman porque son pesos.
+            ganancia = sum(
+                (
+                    realizado.get((clave_tercero, g), CERO) - v[1]
+                    for g, v in mios.items()
+                ),
+                CERO,
+            )
+            _, del_sistema = pendiente_sistema.pop(clave_tercero, ("", CERO))
+            _, del_libro = pendiente_libro.pop(clave_tercero, ("", CERO))
             filas.append(
                 GananciaProductor(
-                    productor=productor,
-                    compras=compras,
-                    kilos=kilos,
-                    barras=barras,
-                    total_comprado=total_comprado,
-                    total_comprado_barras=comprado_barras,
+                    productor=nombres[clave_tercero],
+                    compras=conteo.get(clave_tercero, 0),
+                    kilos=cantidad_kilos,
+                    barras=cantidad_unidades,
+                    total_comprado=sum((v[1] for v in mios.values()), CERO),
+                    total_comprado_barras=plata_unidades,
                     precio_promedio=precio_promedio,
                     precio_promedio_barra=precio_promedio_barra,
+                    # La columna `por_pagar` INCLUYE el saldo del libro anterior,
+                    # porque la tarjeta "Por pagar a productores" también lo incluye:
+                    # si solo lo sumara la tarjeta, la columna dejaría de cuadrar con
+                    # ella. Los kilos, el costo y la ganancia NO se tocan: los saldos
+                    # anteriores no son compras de este sistema.
                     por_pagar=del_sistema + del_libro,
                     margen_por_kilo=(
-                        valor_realizado_kilo - precio_promedio if kilos else CERO
+                        valor_realizado_kilo - precio_promedio if cantidad_kilos else CERO
                     ),
                     margen_por_barra=(
-                        valor_realizado_barra - precio_promedio_barra if barras else CERO
+                        valor_realizado_barra - precio_promedio_barra
+                        if cantidad_unidades
+                        else CERO
                     ),
-                    # Las dos ganancias se SUMAN porque son pesos. Cada una es lo
-                    # que su unidad realizó menos lo que su unidad costó.
-                    ganancia_estimada=(realizado - comprado_kilos)
-                    + (realizado_barras - comprado_barras),
+                    ganancia_estimada=ganancia,
                 )
             )
+
         # Productores a los que se les debe pero que NO tuvieron compras en el
         # período: de una compra vieja del sistema, del libro anterior, o de las
         # dos. Es el caso normal de quien acaba de migrar, y sin estas filas la
@@ -3089,80 +4061,150 @@ class ReventaResumenService:
             )
         filas.sort(key=lambda fila: fila.ganancia_estimada, reverse=True)
         return filas
-
     def resumen(self, desde: date, hasta: date) -> ResumenReventa:
-        """El resumen del período, CON LAS DOS UNIDADES SEPARADAS.
+        """El resumen del período, ARMADO PRODUCTO POR PRODUCTO.
 
-        La regla que manda sobre todo lo demás: los kilos y las barras nunca se
-        suman en una misma cifra ("20 kg + 8 barras" no es un número). La plata sí:
-        los pesos son pesos, vengan de kilos o de barras.
+        DE DÓNDE SALE CADA CIFRA, Y ES UN SOLO SITIO. Todo lo que hay aquí abajo se
+        arma de `_movimientos_del_periodo`, que abre las compras y las ventas del
+        período por producto y por unidad. Antes cada cifra salía de su propia
+        consulta con el nombre del producto escrito adentro —"las ventas de tipo
+        'queso'", "las ventas que no son de tipo 'queso' son la borona"—, y de ahí
+        venía el defecto más caro: la venta de un producto que se pesara y no se
+        llamara 'queso' se contaba como BORONA, que es subproducto sin costo, así que
+        el resumen mostraba "borona vendida" que el dueño no tiene y la ganancia
+        inflada.
 
-        Cómo se sostiene eso aquí: cada consulta del repositorio ya viene filtrada
-        por unidad (las de kilos excluyen la mozzarella y al contrario), así que
-        NINGUNA de las variables de abajo puede traer las dos mezcladas. Las
-        cantidades se llevan en variables con la unidad en el nombre (`kilos_*` y
-        `barras_*`) y solo las de PLATA se suman entre unidades, con la suma escrita
-        de frente para que se vea que es a propósito.
+        LAS DOS REGLAS QUE MANDAN SOBRE TODO LO DEMÁS:
+
+        1. LOS KILOS Y LAS UNIDADES NUNCA SE SUMAN EN UNA MISMA CIFRA ("20 kg + 8
+           barras" no es un número). Los movimientos vienen en dos diccionarios
+           separados y las cantidades se llevan en variables con la unidad en el
+           nombre. LA PLATA SÍ SE SUMA: los pesos son pesos, vengan de kilos o de
+           unidades, y esas sumas están escritas de frente para que se vea que son a
+           propósito.
+        2. LA BORONA ES BORONA POR SU `subproducto_de_id`, NO POR SU NOMBRE. Lo que el
+           resumen llama "vendido" son los productos que se compran, y "borona" los
+           que llegan gratis con otro. Un producto propio del dueño se cuenta como lo
+           primero, que es lo que es.
+
+        QUÉ SIGNIFICAN LOS CAMPOS DE UNIDADES DEL ENCABEZADO (`barras_*`,
+        `*_mozzarella`): el producto por unidad DE SIEMPRE, o sea el primero del
+        catálogo que se cuenta. No son la suma de todos los productos por unidad, y
+        eso es a propósito: sumar panelas con barras de mozzarella daría una cantidad
+        que no significa nada y un "precio promedio por barra" que promedia $3.000 con
+        $12.000. La plata de los demás productos por unidad SÍ entra en
+        `total_compras`, `total_ventas` y `total_gastos` —son pesos— y cada uno tiene
+        su propia fila en `por_producto`, que es el desglose que suma el encabezado.
         """
-        # --------------------------------------------------- lo que se mide en kilos
-        kilos_comprados, compras_kilos = self.compras.totales_periodo(desde, hasta)
-        kilos_queso, ventas_queso = self.ventas.totales_periodo(
-            desde, hasta, tipo=TIPO_VENTA_QUESO
+        # --------------------------------------------- los movimientos, por producto
+        kilos, unidades = self._movimientos_del_periodo(desde, hasta)
+        # Los ajustes del período, abiertos por (de qué producto salieron, a cuál
+        # entraron). Es lo que deja que cada grupo cuente los suyos sin adivinar.
+        ajustes_por_producto = self.conversiones.totales_periodo_por_producto(desde, hasta)
+        # Los kilos que llegaron GRATIS en el período, a nombre del producto QUE CADA
+        # COMPRA NOMBRÓ. Se lee UNA vez y de aquí sale para las dos cosas que lo
+        # necesitan: armar los grupos (un producto que solo recibió kilos gratis
+        # también tiene que tener su fila) y repartir el costo en el desglose.
+        gratis_por_producto = dict(
+            self.compras.gratis_periodo_por_subproducto(desde, hasta)
         )
-        # El total sale de la consulta SIN filtro de tipo (que ya excluye la
-        # mozzarella: son las ventas en kilos) y la borona por diferencia: si algún
-        # día hay otro tipo de venta en kilos, o un dato viejo con el tipo en
-        # blanco, su plata NO desaparece del resumen.
-        kilos_todos, ventas_kilos = self.ventas.totales_periodo(desde, hasta)
-        kilos_borona = kilos_todos - kilos_queso
-        ventas_borona = ventas_kilos - ventas_queso
-        gastos_kilos = self.ventas.gastos_periodo(desde, hasta)
-        # Los gastos de la borona se sacan por diferencia (solo hay dos tipos de
-        # venta en kilos), así queso + borona siempre suma EXACTO el total de
-        # gastos de los kilos.
-        gastos_queso = self.ventas.gastos_periodo(desde, hasta, tipo=TIPO_VENTA_QUESO)
-        gastos_borona = gastos_kilos - gastos_queso
-        # Ajustes del período: lo que se pasó a borona y LA MERMA REAL.
+        grupos = self.catalogo.grupos(
+            [
+                *kilos,
+                *unidades,
+                *(origen for origen, _, _ in ajustes_por_producto),
+                *gratis_por_producto,
+            ]
+        )
+        # LOS TRES PRODUCTOS DE SIEMPRE, POR SU CLAVE Y NO POR SU PUESTO EN LA LISTA.
+        # Los campos `kilos_disponibles`, `borona_disponible`, `barras_*` y
+        # `*_mozzarella` del encabezado son los de esos tres productos: así se llaman
+        # y eso es lo que el dueño lee en sus tarjetas desde hace meses.
+        #
+        # ANTES EL DE UNIDADES SE ESCOGÍA POR ORDEN —"el primero del catálogo que se
+        # cuenta"— y esa era una decisión de plata tomada con un campo de presentación:
+        # crear una panela por unidad y ponerla de primera le cambiaba a la tarjeta de
+        # la mozzarella las barras compradas, las vendidas y su ganancia, sin que se
+        # hubiera movido un solo documento. La plata de los demás productos por unidad
+        # NO se pierde: entra en `total_compras` / `total_ventas` / `total_gastos` y
+        # cada uno tiene su propia fila en `por_producto` y su propia existencia.
+        clave_subproducto = TIPO_BORONA
+        clave_unidades = TIPO_MOZZARELLA
+
+        def suma(movimientos, campo, *, solo=None, excepto=None) -> Decimal:
+            return sum(
+                (
+                    getattr(mov, campo)
+                    for clave, mov in movimientos.items()
+                    if (solo is None or clave in solo) and (excepto is None or clave not in excepto)
+                ),
+                CERO,
+            )
+
+        # --------------------------------------------------- lo que se mide en kilos
+        kilos_comprados = suma(kilos, "comprado")
+        compras_kilos = suma(kilos, "comprado_plata")
+        # LO "VENDIDO" son los productos que se compran y "la borona" los que llegan
+        # gratis con otro: la diferencia la hace `subproducto_de_id` y no el nombre.
+        subproductos = {
+            p.clave for p in self.catalogo.por_clave.values() if p.es_subproducto
+        }
+        kilos_queso = suma(kilos, "vendido", excepto=subproductos)
+        ventas_queso = suma(kilos, "vendido_plata", excepto=subproductos)
+        gastos_queso = suma(kilos, "gastos", excepto=subproductos)
+        kilos_borona = suma(kilos, "vendido", solo=subproductos)
+        ventas_borona = suma(kilos, "vendido_plata", solo=subproductos)
+        gastos_borona = suma(kilos, "gastos", solo=subproductos)
+        # Los totales de kilos son la SUMA de sus partes y no una consulta aparte: así
+        # queso + borona da exacto el total, sin restas que le acrediten a uno lo del
+        # otro (que es justo de donde salía el defecto).
+        ventas_kilos = ventas_queso + ventas_borona
+        gastos_kilos = gastos_queso + gastos_borona
+        # Ajustes del período: lo que se pasó a subproducto y LA MERMA REAL.
         kilos_a_borona, kilos_merma = self.conversiones.totales_periodo(desde, hasta)
 
-        # ------------------------------------------------- lo que se cuenta en barras
-        # Su propio renglón de punta a punta: barras compradas, barras vendidas y la
-        # plata de cada lado. Ninguna de estas cifras entra en las de arriba.
-        barras_compradas, compras_mozzarella = self.compras.totales_periodo_barras(
-            desde, hasta
-        )
-        barras_vendidas, ventas_mozzarella = self.ventas.totales_periodo_barras(desde, hasta)
-        gastos_mozzarella = self.ventas.gastos_periodo_barras(desde, hasta)
+        # ------------------------------------------ lo que se cuenta, en unidades
+        # Su propio renglón de punta a punta. Las cifras del encabezado son las del
+        # producto por unidad de siempre; la plata de todos entra en los totales.
+        del_de_siempre = {clave_unidades} if clave_unidades else set()
+        barras_compradas = suma(unidades, "comprado", solo=del_de_siempre)
+        compras_mozzarella = suma(unidades, "comprado_plata", solo=del_de_siempre)
+        barras_vendidas = suma(unidades, "vendido", solo=del_de_siempre)
+        ventas_mozzarella = suma(unidades, "vendido_plata", solo=del_de_siempre)
+        gastos_mozzarella = suma(unidades, "gastos", solo=del_de_siempre)
+        compras_unidades = suma(unidades, "comprado_plata")
+        ventas_unidades = suma(unidades, "vendido_plata")
+        gastos_unidades = suma(unidades, "gastos")
 
         # ---------------------------------------------- la plata, que SÍ se suma
-        total_compras = compras_kilos + compras_mozzarella
-        total_ventas = ventas_kilos + ventas_mozzarella
-        total_gastos = gastos_kilos + gastos_mozzarella
+        total_compras = compras_kilos + compras_unidades
+        total_ventas = ventas_kilos + ventas_unidades
+        total_gastos = gastos_kilos + gastos_unidades
 
-        kilos_hist_comprados, borona_de_compras, por_pagar = self.compras.acumulados()
-        hist_queso_vendido, hist_borona_vendida, por_cobrar = self.ventas.acumulados()
+        # ------------------------------------------------------------- el inventario
+        existencias = ExistenciasReventa(self.db, self.ctx, catalogo=self.catalogo)
+        _, _, por_pagar = self.compras.acumulados()
+        _, _, por_cobrar = self.ventas.acumulados()
         # Cartera heredada del sistema anterior. Solo entra en lo que se debe
         # cobrar y pagar: NO tiene kilos, no se compró ni se vendió aquí, así que
         # no toca el inventario, ni los totales del período, ni la ganancia.
         por_cobrar_libro = self.saldos.pendiente(TIPO_SALDO_COBRAR)
         por_pagar_libro = self.saldos.pendiente(TIPO_SALDO_PAGAR)
-        # `convertido` = todo lo que salió del queso disponible (borona + merma);
-        # `a_borona` = solo lo que se pasó a borona (suma al inventario de borona).
-        convertido = self.conversiones.total_convertido()
-        a_borona = self.conversiones.total_a_borona()
 
         # El promedio POR KILO divide la plata DE LOS KILOS entre los kilos. Ojo con
-        # no ponerle `total_compras` (que ya incluye las barras): saldría un "precio
+        # no ponerle `total_compras` (que ya incluye las unidades): saldría un "precio
         # por kilo" inflado con pesos que no salieron de ningún kilo, y el dueño lo
-        # cruza a mano con lo que le pagó al productor.
+        # cruza a mano con lo que le pagó al productor. El promedio de CADA producto
+        # sale en su fila del desglose (`costo_kilo`), que es el que de verdad se puede
+        # cruzar con un recibo.
         precio_prom_compra = (
             (compras_kilos / kilos_comprados).quantize(DOS_DECIMALES) if kilos_comprados else CERO
         )
         precio_prom_venta = (
             (ventas_queso / kilos_queso).quantize(DOS_DECIMALES) if kilos_queso else CERO
         )
-        # Los mismos dos promedios en la otra unidad: plata de las barras entre
-        # barras. Nunca se cruzan con los de arriba.
+        # Los mismos dos promedios en la otra unidad: plata del producto por unidad de
+        # siempre entre sus unidades. Nunca se cruzan con los de arriba.
         precio_prom_compra_barra = (
             (compras_mozzarella / barras_compradas).quantize(DOS_DECIMALES)
             if barras_compradas
@@ -3173,22 +4215,55 @@ class ReventaResumenService:
             if barras_vendidas
             else CERO
         )
-        # Kilos que de verdad se vendieron: queso + borona. Es la base de los
-        # promedios por kilo vendido (antes solo contaba el queso, y daba 0
+        # Kilos que de verdad se vendieron: lo propio más los subproductos. Es la base
+        # de los promedios por kilo vendido (antes solo contaba el queso, y daba 0
         # cuando el período solo tuvo ventas de borona).
         kilos_vendidos_total = kilos_queso + kilos_borona
-        # Residuo CON SIGNO del LOTE COMPRADO: lo que no se vendió como queso, no
-        # se pasó a borona y no se perdió. Se resta la borona CONVERTIDA (que sí
-        # salió del queso comprado), NO la borona vendida: esa sale del inventario
-        # de borona, que además recibe la borona que llega gratis con el lote. Así
-        # este residuo coincide con `kilos_disponibles` cuando el período abarca
-        # todo el histórico, y las dos cifras no se contradicen en pantalla.
-        kilos_pendientes = kilos_comprados - kilos_queso - kilos_a_borona - kilos_merma
-        # El residuo de las barras, CON SIGNO y en su propia unidad: compradas −
-        # vendidas. Negativo significa que se vendieron barras compradas antes del
-        # período, igual que en los kilos. No lleva conversiones ni merma: la
-        # mozzarella no participa en esos ajustes (ver `barras_disponibles`).
-        barras_pendientes = barras_compradas - barras_vendidas
+        # ------------------------------------------------------------- el desglose
+        # SE ARMA PRIMERO Y EL ENCABEZADO SE LEE DE ÉL en las cifras que son un
+        # residuo. Es al revés de como estaba: antes el encabezado calculaba
+        # `kilos_pendientes` con su propia resta y el desglose con la suya, y dos
+        # cuentas del mismo hecho terminan contradiciéndose. Ahora el residuo se
+        # calcula UNA vez, dentro del grupo que lo produce.
+        filas = self._filas_por_producto(
+            kilos=kilos,
+            unidades=unidades,
+            ajustes=ajustes_por_producto,
+            gratis=gratis_por_producto,
+        )
+        # Residuo CON SIGNO del período: lo comprado que no se vendió, no se pasó a
+        # subproducto y no se perdió. Sale de las filas del residuo del desglose, que
+        # traen el valor absoluto y el signo en el nombre de la fila ('pendiente' si
+        # sobró, 'anterior' si se movió inventario de antes del período).
+        #
+        # Los kilos SÍ se suman entre grupos que se pesan (los kilos son kilos); las
+        # unidades hablan del producto por unidad de siempre, por lo mismo que los
+        # demás campos `barras_*`.
+        def residuo_de(claves_de_grupos, en_kilos: bool) -> Decimal:
+            unidad_buscada = UNIDAD_KILO if en_kilos else UNIDAD_BARRA
+            # SE RECORREN LOS MIEMBROS DEL GRUPO Y NO SOLO SU RAÍZ: desde que un
+            # subproducto que se compró directamente tiene su propio pozo, también
+            # tiene su propia fila de residuo, y esos kilos son inventario pendiente
+            # igual que los del padre. Sin esto, la borona comprada y no vendida
+            # quedaría fuera de la cifra grande mientras sale en su fila del desglose.
+            total = CERO
+            for grupo in grupos:
+                if grupo.raiz.se_pesa != en_kilos or grupo.clave not in claves_de_grupos:
+                    continue
+                for miembro in grupo.miembros:
+                    sobra, falta = _claves_de_residuo(miembro.clave)
+                    for fila in filas:
+                        if fila.unidad != unidad_buscada:
+                            continue
+                        if fila.producto == sobra:
+                            total += fila.kilos if en_kilos else fila.barras
+                        elif fila.producto == falta:
+                            total -= fila.kilos if en_kilos else fila.barras
+            return total
+
+        kilos_pendientes = residuo_de({g.clave for g in grupos if g.raiz.se_pesa}, True)
+        barras_pendientes = residuo_de(del_de_siempre, False)
+
         # Ganancia neta EXACTA del período = lo que se vendió − lo que se compró
         # − los gastos de venta. Al restar TODA la compra (no solo el costo de lo
         # vendido) queda contado lo que no se alcanzó a vender y la merma real.
@@ -3197,7 +4272,7 @@ class ReventaResumenService:
         ganancia = (total_ventas - total_compras - total_gastos).quantize(DOS_DECIMALES)
         # El margen POR KILO solo mira la plata de los kilos, y esto es lo delicado:
         # dividir la ganancia TOTAL entre los kilos vendidos daría un "peso por
-        # kilo" que lleva adentro lo que dejaron las barras. Con 20 kg y 500 barras
+        # kilo" que lleva adentro lo que dejaron las unidades. Con 20 kg y 500 barras
         # esa cifra no diría nada del queso.
         ganancia_kilos = (ventas_kilos - compras_kilos - gastos_kilos).quantize(DOS_DECIMALES)
         margen = (
@@ -3205,7 +4280,7 @@ class ReventaResumenService:
             if kilos_vendidos_total
             else CERO
         )
-        # Lo mismo por BARRA VENDIDA, con la plata de las barras y nada más.
+        # Lo mismo por UNIDAD VENDIDA, con la plata de ese producto y nada más.
         ganancia_mozzarella = (
             ventas_mozzarella - compras_mozzarella - gastos_mozzarella
         ).quantize(DOS_DECIMALES)
@@ -3217,9 +4292,9 @@ class ReventaResumenService:
         # Lo neto que dejó cada kilo COMPRADO en el período. El divisor son los
         # kilos comprados (no los vendidos) a propósito: así repartirlo entre los
         # productores suma exactamente la ganancia neta del período.
-        # El numerador es el neto DE LOS KILOS: si trajera la plata de las barras,
+        # El numerador es el neto DE LOS KILOS: si trajera la plata de las unidades,
         # repartirlo entre los kilos les acreditaría a los productores de queso una
-        # ganancia que salió de la mozzarella.
+        # ganancia que salió de otro producto.
         valor_realizado_kilo = (
             ((ventas_kilos - gastos_kilos) / kilos_comprados).quantize(DOS_DECIMALES)
             if kilos_comprados
@@ -3268,30 +4343,7 @@ class ReventaResumenService:
             # MISMAS variables que viajan en el encabezado de esta respuesta, no un
             # recálculo: así no pueden desincronizarse de lo que el dueño ve arriba.
             por_producto=self._cuadrar_desglose(
-                self._filas_por_producto(
-                    kilos_comprados=kilos_comprados,
-                    # LA PLATA DE LOS KILOS, no `total_compras`: el desglose reparte
-                    # este costo entre los DESTINOS DE LOS KILOS (vendido, borona,
-                    # merma, inventario), y meterle lo que costaron unas barras le
-                    # cargaría a esos destinos una plata que no es suya.
-                    total_compras=compras_kilos,
-                    costo_kilo=precio_prom_compra,
-                    kilos_queso=kilos_queso,
-                    ventas_queso=ventas_queso,
-                    gastos_queso=gastos_queso,
-                    kilos_a_borona=kilos_a_borona,
-                    kilos_borona_vendidos=kilos_borona,
-                    ventas_borona=ventas_borona,
-                    gastos_borona=gastos_borona,
-                    kilos_merma=kilos_merma,
-                    kilos_pendientes=kilos_pendientes,
-                    # La mozzarella con su plata y sus barras, para sus dos renglones.
-                    barras_compradas=barras_compradas,
-                    compras_mozzarella=compras_mozzarella,
-                    barras_vendidas=barras_vendidas,
-                    ventas_mozzarella=ventas_mozzarella,
-                    gastos_mozzarella=gastos_mozzarella,
-                ),
+                filas,
                 total_compras=total_compras,
                 total_ventas=total_ventas,
                 total_gastos=total_gastos,
@@ -3299,23 +4351,28 @@ class ReventaResumenService:
             por_productor=self._filas_por_productor(
                 desde,
                 hasta,
+                grupos=grupos,
+                kilos=kilos,
+                unidades=unidades,
                 valor_realizado_kilo=valor_realizado_kilo,
-                # El reparto se hace con el neto SIN redondear por kilo, así la
-                # columna suma exacto la ganancia del período. Y con el neto DE LOS
-                # KILOS: el de las barras va por su propio lado, abajo.
-                neto_periodo=ventas_kilos - gastos_kilos,
-                kilos_comprados=kilos_comprados,
                 valor_realizado_barra=valor_realizado_barra,
-                neto_barras=ventas_mozzarella - gastos_mozzarella,
-                barras_compradas=barras_compradas,
+                clave_de_las_unidades=clave_unidades,
             ),
-            kilos_disponibles=kilos_hist_comprados - hist_queso_vendido - convertido,
-            borona_disponible=borona_de_compras + a_borona - hist_borona_vendida,
-            # El tercer inventario, en su propia unidad y jamás sumado con los dos
-            # de arriba. Sale del mismo cálculo que usan los guardias de
-            # existencias, para que la pantalla y el guardia no se contradigan.
-            barras_disponibles=self.compras.barras_acumuladas()
-            - self.ventas.barras_acumuladas(),
+            # Los tres inventarios de siempre, cada uno el de SU producto y ya no una
+            # canasta compartida. `existencias` los trae todos, uno por producto, y es
+            # de donde la pantalla nueva los tiene que leer.
+            kilos_disponibles=existencias.disponible(TIPO_QUESO),
+            borona_disponible=existencias.disponible(clave_subproducto),
+            barras_disponibles=existencias.disponible(clave_unidades),
+            existencias=[
+                ExistenciaProducto(
+                    producto=clave,
+                    etiqueta=self.catalogo.de(clave).nombre,
+                    unidad=self.catalogo.unidad_de(clave),
+                    disponible=existencias.disponible(clave),
+                )
+                for clave in self._claves_para_existencias(existencias)
+            ],
             # Las dos tarjetas de cartera suman el sistema MÁS el libro anterior
             # (es la plata que de verdad se debe hoy), y enseguida va ese pedazo
             # por separado para poder mostrar el desglose.
@@ -3325,6 +4382,23 @@ class ReventaResumenService:
             por_pagar_libro_anterior=por_pagar_libro,
         )
 
+    def _claves_para_existencias(self, existencias: ExistenciasReventa) -> list[str]:
+        """Qué productos salen en la lista de existencias, y en qué orden.
+
+        Salen los del catálogo SIEMPRE —aunque estén en cero, porque "no hay" es una
+        respuesta que el dueño necesita ver— y además cualquier clave que aparezca en
+        los movimientos sin estar en el catálogo, que si no quedaría con mercancía que
+        ninguna pantalla muestra. El orden es el del catálogo (el que el dueño puso) y
+        los sueltos al final.
+        """
+        del_catalogo = [
+            p.clave
+            for p in sorted(
+                self.catalogo.por_clave.values(), key=lambda x: (x.orden, x.clave)
+            )
+        ]
+        sueltos = sorted(c for c in existencias.claves() if c and c not in del_catalogo)
+        return del_catalogo + sueltos
     def sugerencias(self) -> SugerenciasReventa:
         """Nombres ya usados de productores y clientes, para autocompletar.
 
@@ -3414,7 +4488,7 @@ class ReventaResumenService:
                 EstadoCuentaVenta(
                     fecha=venta.fecha,
                     tipo=tipo,
-                    producto=NOMBRE_PRODUCTO.get(tipo, tipo.capitalize()),
+                    producto=_nombre_para_el_cliente(self.catalogo, tipo),
                     unidad=unidad_de(venta),
                     kilos=kilos,
                     precio_kilo=Decimal(venta.precio_kilo),
@@ -4066,13 +5140,29 @@ class LoteService:
 
         Se calcula SIEMPRE sobre toda la historia, nunca sobre un filtro: para
         saber qué había en bodega un día hay que haber procesado lo de antes.
+
+        CADA EVENTO VIAJA CON LA CLAVE DE SU PRODUCTO, y el reparto le lleva una cola
+        de inventario a cada uno. Antes había UNA cola para todo lo que se pesa, así
+        que la venta de un producto consumía las compras de otro y se le cargaba el
+        costo del producto equivocado (ver el comentario largo en `lotes.py`). Quién es
+        subproducto de quién lo dice el catálogo con `subproducto_de_id`, no el nombre
+        de la fila.
+
+        Y LOS PRODUCTOS DE CADA MOVIMIENTO SALEN DE SU PROPIA FILA, no del catálogo:
+        la compra dice a quién le entregó lo que llegó gratis y el ajuste dice de qué
+        producto salió y a cuál entró. Antes los dos se adivinaban con el ORDEN del
+        catálogo, así que reordenar la lista de productos volvía a repartir toda la
+        historia con otras colas y cambiaba el costo de ventas ya impresas.
         """
+        catalogo = CatalogoReventa(self.db, self.ctx.empresa_id)
         compras = [
             CompraEvento(
                 fecha=fila[0], orden=indice, productor=fila[2],
                 kilos=Decimal(fila[3] or 0), borona_kilos=Decimal(fila[4] or 0),
                 precio_kilo=Decimal(fila[7] or 0),
                 valor_total=Decimal(fila[5] or 0), saldo=Decimal(fila[6] or 0),
+                producto=fila[8] or TIPO_QUESO,
+                subproducto=fila[9],
             )
             for indice, fila in enumerate(self.compras.eventos_para_lotes())
         ]
@@ -4081,12 +5171,16 @@ class LoteService:
                 fecha=fila[0], orden=indice, cliente=fila[6], tipo=fila[2],
                 kilos=Decimal(fila[3] or 0), precio_kilo=Decimal(fila[7] or 0),
                 valor_total=Decimal(fila[4] or 0), gasto_monto=Decimal(fila[5] or 0),
+                es_subproducto=catalogo.es_subproducto(fila[2]),
             )
             for indice, fila in enumerate(self.ventas.eventos_para_lotes())
         ]
         ajustes = [
             AjusteEvento(
-                fecha=fila[0], orden=indice, kilos=Decimal(fila[2] or 0), destino=fila[3]
+                fecha=fila[0], orden=indice, kilos=Decimal(fila[2] or 0),
+                destino=fila[3],
+                producto=fila[4] or TIPO_QUESO,
+                subproducto=fila[5],
             )
             for indice, fila in enumerate(self.ajustes.eventos_para_lotes())
         ]

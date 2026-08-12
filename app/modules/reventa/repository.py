@@ -2,7 +2,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import and_, case, func, literal, not_, select
+from sqlalchemy import and_, case, func, literal, not_, or_, select
 
 from app.common.repository import BaseRepository
 from app.modules.reventa.models import (
@@ -10,7 +10,6 @@ from app.modules.reventa.models import (
     DESTINO_MERMA,
     TIPO_DOC_COMPRA,
     TIPO_DOC_VENTA,
-    TIPO_MOZZARELLA,
     UNIDAD_UNIDAD,
     AdjuntoReventa,
     CompraQueso,
@@ -54,10 +53,19 @@ def _claves_que_se_cuentan(empresa_id):
       unidad que YA SE QUITÓ del catálogo de la otra quesera seguía decidiendo la
       unidad de las filas de esta.
 
-    Un producto solo se puede quitar del catálogo si NO tiene movimientos (lo
-    exige `ProductoReventaService.validar_eliminar`), así que agregar el filtro de
-    borrados no puede reclasificar ninguna fila de plata de su propia empresa: no
-    existen filas que hablen de un producto borrado.
+    Un producto solo se puede quitar del catálogo si NO tiene movimientos —ni
+    compras, ni ventas, ni ajustes, ni kilos que le hayan llegado gratis encima de
+    la compra de otro (lo exige `ProductoReventaService.validar_eliminar`)—, así que
+    agregar el filtro de borrados no puede reclasificar ninguna fila de plata que ya
+    exista.
+
+    LA ÚNICA FILA QUE PUEDE NOMBRAR A UN PRODUCTO BORRADO ES UNA NUEVA, y no
+    reclasifica nada: cuando el catálogo no tiene a quién darle los kilos que
+    llegaron gratis, la compra los anota a nombre del producto de siempre aunque no
+    esté en la lista (ver `quien_recibe_lo_gratis`). Esa fila los nombra en
+    `subproducto_tipo`, no en `tipo`, y esta subconsulta clasifica por `tipo`; además
+    el destinatario de lo que llega gratis siempre se pesa, así que nunca puede ser
+    una de las claves que esto devuelve.
     """
     return select(ProductoReventa.clave).where(
         ProductoReventa.empresa_id == empresa_id,
@@ -293,6 +301,189 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
         ).one()
         return Decimal(fila[0]), Decimal(fila[1])
 
+    # ------------------------------------------------- las mismas cifras, POR PRODUCTO
+    # LAS TRES DE ABAJO SON LA VERSIÓN POR PRODUCTO de `totales_periodo`,
+    # `totales_periodo_barras` y `acumulados`, y son las que dejan de repartir la
+    # plata de un producto entre los destinos de otro.
+    #
+    # POR QUÉ SON CONSULTAS APARTE Y NO UN `group_by` AGREGADO A LAS DE ARRIBA. Porque
+    # las de arriba devuelven UNA cifra y las llaman las tarjetas del encabezado, el
+    # panel de temporadas y los guardias; cambiarles la forma obligaría a tocar todos
+    # esos sitios en el mismo commit en que se cambia la cuenta. Con dos juegos de
+    # consultas, el encabezado sigue saliendo por donde salía —y las 1.600 pruebas que
+    # lo miden siguen midiendo lo mismo— y el desglose por producto se arma con estas.
+    #
+    # Y POR QUÉ SIGUEN SIENDO DOS POR UNIDAD (kilos y barras) en vez de una con las
+    # dos: por lo mismo que está escrito en `totales_periodo_barras`. Cada una filtra
+    # por su clasificación y lo que suma es homogéneo, así que ninguna puede devolver
+    # una cantidad contaminada con la otra unidad.
+    def totales_periodo_por_tipo(
+        self, desde: date, hasta: date
+    ) -> list[tuple[str, Decimal, Decimal, Decimal]]:
+        """(tipo, kilos netos, plata, borona que llegó gratis) de las compras EN
+        KILOS del período, UNA FILA POR PRODUCTO.
+
+        La suma de las columnas de todas las filas da EXACTAMENTE lo que devuelve
+        `totales_periodo`, porque el filtro es el mismo: es la misma plata, abierta
+        por producto. De eso depende que el desglose siga sumando el encabezado.
+        """
+        filas = self.db.execute(
+            select(
+                func.coalesce(CompraQueso.tipo, ""),
+                func.coalesce(func.sum(CompraQueso.kilos_netos), 0),
+                func.coalesce(func.sum(CompraQueso.valor_total), 0),
+                func.coalesce(func.sum(CompraQueso.borona_kilos), 0),
+            )
+            .where(
+                CompraQueso.empresa_id == self.empresa_id,
+                CompraQueso.deleted_at.is_(None),
+                CompraQueso.estado != "anulada",
+                CompraQueso.fecha.between(desde, hasta),
+                se_mide_en_kilos(CompraQueso, self.empresa_id),
+            )
+            .group_by(func.coalesce(CompraQueso.tipo, ""))
+        ).all()
+        return [(f[0], Decimal(f[1]), Decimal(f[2]), Decimal(f[3])) for f in filas]
+
+    def totales_periodo_barras_por_tipo(
+        self, desde: date, hasta: date
+    ) -> list[tuple[str, Decimal, Decimal]]:
+        """(tipo, unidades, plata) de las compras QUE SE CUENTAN, una fila por
+        producto. El espejo de la de arriba, y suma exacto `totales_periodo_barras`.
+
+        Es la consulta que le da su propio renglón a cada producto por unidad: antes
+        todos caían en la misma canasta llamada 'mozzarella', y el "precio promedio
+        por barra" promediaba panelas de $3.000 con barras de $12.000.
+        """
+        filas = self.db.execute(
+            select(
+                func.coalesce(CompraQueso.tipo, ""),
+                func.coalesce(func.sum(CompraQueso.barras), 0),
+                func.coalesce(func.sum(CompraQueso.valor_total), 0),
+            )
+            .where(
+                CompraQueso.empresa_id == self.empresa_id,
+                CompraQueso.deleted_at.is_(None),
+                CompraQueso.estado != "anulada",
+                CompraQueso.fecha.between(desde, hasta),
+                se_mide_en_unidades(CompraQueso, self.empresa_id),
+            )
+            .group_by(func.coalesce(CompraQueso.tipo, ""))
+        ).all()
+        return [(f[0], Decimal(f[1]), Decimal(f[2])) for f in filas]
+
+    def acumulados_por_tipo(self) -> list[tuple[str, Decimal, Decimal, Decimal]]:
+        """(tipo, kilos netos, borona gratis, unidades) HISTÓRICOS por producto, para
+        el inventario de cada uno.
+
+        VA SIN FILTRO DE CLASIFICACIÓN a propósito, y de las tres columnas de
+        cantidad quien pregunta usa LA DE LA UNIDAD DE SU PRODUCTO. Es lo mismo que
+        hace `acumulados()`, que tampoco filtra: una compra que se cuenta tiene los
+        kilos en cero y una que se pesa tiene las unidades en cero, así que ninguna
+        columna se contamina. Filtrar aquí sería peor: una fila rara —con kilos Y
+        unidades, que hoy ya nada escribe pero la base admite desde que se quitaron
+        los CHECK— desaparecería de los dos inventarios en vez de aparecer en uno.
+        """
+        filas = self.db.execute(
+            select(
+                func.coalesce(CompraQueso.tipo, ""),
+                func.coalesce(func.sum(CompraQueso.kilos_netos), 0),
+                func.coalesce(func.sum(CompraQueso.borona_kilos), 0),
+                func.coalesce(func.sum(CompraQueso.barras), 0),
+            )
+            .where(
+                CompraQueso.empresa_id == self.empresa_id,
+                CompraQueso.deleted_at.is_(None),
+                CompraQueso.estado != "anulada",
+            )
+            .group_by(func.coalesce(CompraQueso.tipo, ""))
+        ).all()
+        return [(f[0], Decimal(f[1]), Decimal(f[2]), Decimal(f[3])) for f in filas]
+
+    def gratis_periodo_por_subproducto(
+        self, desde: date, hasta: date
+    ) -> list[tuple[str, Decimal]]:
+        """(producto que los recibe, kilos que llegaron GRATIS) DEL PERÍODO.
+
+        Es el mismo agrupamiento que `gratis_por_subproducto` pero acotado a las
+        fechas, y lo necesita el desglose: los kilos que llegaron sin pagarse NO
+        consumen pozo —no costaron nada—, así que hay que poder descontarlos de lo
+        vendido antes de repartir el costo de las compras del subproducto.
+        """
+        return self._gratis([CompraQueso.fecha.between(desde, hasta)])
+
+    def gratis_por_subproducto(self) -> list[tuple[str, Decimal]]:
+        """(producto que los recibe, kilos que llegaron GRATIS) HISTÓRICOS.
+
+        Los kilos que llegan encima de una compra sin pagarse (`borona_kilos`) se
+        cuentan a favor del producto QUE LA COMPRA NOMBRÓ, y de ningún otro. Antes se
+        sumaban todos y se le acreditaban al subproducto que el catálogo dijera "de
+        primero", así que crear un producto nuevo con `orden = 0` le vaciaba el
+        inventario a la borona (ver `CompraQueso.subproducto_tipo`).
+
+        Las filas sin destinatario no salen: son las compras que no trajeron nada
+        gratis. Se agrupa aunque `borona_kilos` sea 0 en alguna fila marcada; sumar
+        ceros no cambia nada y evita una condición más que mantener.
+        """
+        return self._gratis([])
+
+    def _gratis(self, extra: list) -> list[tuple[str, Decimal]]:
+        filas = self.db.execute(
+            select(
+                CompraQueso.subproducto_tipo,
+                func.coalesce(func.sum(CompraQueso.borona_kilos), 0),
+            )
+            .where(
+                CompraQueso.empresa_id == self.empresa_id,
+                CompraQueso.deleted_at.is_(None),
+                CompraQueso.estado != "anulada",
+                CompraQueso.subproducto_tipo.is_not(None),
+                *extra,
+            )
+            .group_by(CompraQueso.subproducto_tipo)
+        ).all()
+        return [(f[0], Decimal(f[1])) for f in filas]
+
+    def por_productor_y_tipo(
+        self, desde: date, hasta: date
+    ) -> list[tuple[str, str, int, Decimal, Decimal, Decimal]]:
+        """Compras del período por (productor, producto):
+        (productor, tipo, cuántas, kilos netos, unidades, plata).
+
+        ES LA BASE DEL REPARTO DE LA GANANCIA ENTRE PRODUCTORES, y tiene que ser por
+        producto porque el reparto es por producto: el neto que dejaron las ventas de
+        un producto se reparte entre las cantidades compradas DE ESE PRODUCTO. Con una
+        sola cifra por productor, la plata de la mozzarella se les acreditaba a los
+        kilos y el ranking decía que el mejor negocio lo hizo alguien que no vendió una
+        sola barra.
+
+        Sin filtro de clasificación, por lo mismo que en `acumulados_por_tipo`: quien
+        pregunta toma la columna de la unidad de su producto. Así la suma de la
+        columna `plata` de todas las filas es EXACTAMENTE la plata comprada del
+        período, y de eso depende que la columna del ranking sume la tarjeta.
+        """
+        filas = self.db.execute(
+            select(
+                CompraQueso.productor,
+                func.coalesce(CompraQueso.tipo, ""),
+                func.count(CompraQueso.id),
+                func.coalesce(func.sum(CompraQueso.kilos_netos), 0),
+                func.coalesce(func.sum(CompraQueso.barras), 0),
+                func.coalesce(func.sum(CompraQueso.valor_total), 0),
+            )
+            .where(
+                CompraQueso.empresa_id == self.empresa_id,
+                CompraQueso.deleted_at.is_(None),
+                CompraQueso.estado != "anulada",
+                CompraQueso.fecha.between(desde, hasta),
+            )
+            .group_by(CompraQueso.productor, func.coalesce(CompraQueso.tipo, ""))
+        ).all()
+        return [
+            (f[0], f[1], int(f[2]), Decimal(f[3]), Decimal(f[4]), Decimal(f[5]))
+            for f in filas
+        ]
+
     def pendiente_periodo(self, desde: date, hasta: date) -> Decimal:
         """Lo que falta pagar SOLO por las compras de este rango de fechas.
 
@@ -329,7 +520,15 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
         sin razón. El filtro de fechas se aplica al final, a qué lotes se MUESTRAN.
 
         Devuelve (fecha, created_at, productor, kilos_netos, borona_kilos,
-        valor_total, saldo acotado en cero, precio_kilo).
+        valor_total, saldo acotado en cero, precio_kilo, tipo, subproducto_tipo).
+
+        EL `tipo` es la clave del producto, y es lo que deja que el reparto le lleve
+        una cola de inventario a cada uno. Sin él, la venta de un producto consumía
+        las compras de otro (ver `lotes.py`).
+
+        EL `subproducto_tipo` DICE A QUIÉN LE ENTRA LO QUE LLEGÓ GRATIS, y sale de la
+        fila y no del catálogo: así reordenar la lista de productos no le puede mover
+        esos kilos a otro (ver `CompraQueso.subproducto_tipo`).
 
         LA MOZZARELLA NO ENTRA AQUÍ, y es a propósito. El motor de lotes está
         escrito en kilos de punta a punta: un lote son las compras de una fecha
@@ -352,6 +551,8 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
                     CompraQueso.valor_total,
                     saldo_pendiente(CompraQueso.valor_total, CompraQueso.abonado),
                     CompraQueso.precio_kilo,
+                    func.coalesce(CompraQueso.tipo, ""),
+                    CompraQueso.subproducto_tipo,
                 )
                 .where(
                     CompraQueso.empresa_id == self.empresa_id,
@@ -383,17 +584,18 @@ class CompraQuesoRepository(BaseRepository[CompraQueso]):
     def acumulados(self) -> tuple[Decimal, Decimal, Decimal]:
         """(kilos netos históricos, borona de compras, saldo por pagar).
 
-        El saldo va acotado en cero fila por fila (ver `saldo_pendiente`): una
-        compra pagada de más no puede rebajar lo que se les debe a los demás.
+        DE LAS TRES, LA QUE IMPORTA HOY ES EL SALDO: es la tarjeta "Por pagar a
+        productores", y va acotada en cero fila por fila (ver `saldo_pendiente`) porque
+        una compra pagada de más no puede rebajar lo que se les debe a los demás. El
+        saldo suma TODAS las compras, sin filtro de unidad, y tiene que sumarlas: lo que
+        se le debe a un productor por unas unidades es plata que se le debe igual.
 
-        NO LLEVA FILTRO DE TIPO, Y ESO ES CORRECTO EN LAS TRES CIFRAS:
-        - los kilos y la borona de una compra de mozzarella están en CERO (lo
-          exige el CHECK de la tabla), así que no pueden contaminar esas sumas
-          ni por descuido;
-        - el saldo SÍ tiene que incluirlas: lo que se le debe a un productor por
-          unas barras es plata que se le debe igual, y la tarjeta "Por pagar a
-          productores" es de pesos, no de kilos.
-        Las barras se piden con `barras_acumuladas()`.
+        LAS DOS PRIMERAS SON HISTORIA, y ya no las lee el inventario. El inventario es
+        POR PRODUCTO y sale de `acumulados_por_tipo()`: sumar "todos los kilos
+        comprados" contra "los kilos vendidos de un tipo" era exactamente el defecto que
+        dejaba despachar seis veces la misma mercancía. Se conservan porque son la misma
+        suma de siempre y no cuestan nada, pero quien necesite existencias tiene que
+        preguntarle a `ExistenciasReventa`.
         """
         fila = self.db.execute(
             select(
@@ -693,6 +895,91 @@ class VentaQuesoRepository(BaseRepository[VentaQueso]):
         ).one()
         return Decimal(fila[0]), Decimal(fila[1]), Decimal(fila[2])
 
+    # ------------------------------------------------- las mismas cifras, POR PRODUCTO
+    # La versión por producto de `totales_periodo`, `totales_periodo_barras`,
+    # `gastos_periodo` y `acumulados`. El porqué de que sean consultas aparte y de que
+    # sigan siendo dos por unidad está escrito en el bloque gemelo de las compras.
+    #
+    # ACÁ ESTÁ EL DEFECTO QUE ESTAS CONSULTAS CIERRAN, y era el más caro: el resumen
+    # sacaba la borona POR DIFERENCIA (kilos de todas las ventas en kilos − kilos de
+    # las de tipo 'queso'), así que TODA venta que se pesara y no se llamara 'queso'
+    # caía en la canasta de la borona. 250 kg de panela vendidos salían como "borona
+    # vendida" —el dueño no tiene borona— y con la ganancia inflada, porque la borona
+    # es subproducto sin costo. Con la plata abierta por producto no hay ninguna resta
+    # que le acredite a un producto lo que vendió otro.
+    def totales_periodo_por_tipo(
+        self, desde: date, hasta: date
+    ) -> list[tuple[str, Decimal, Decimal, Decimal]]:
+        """(tipo, kilos, plata, gastos en pesos) de las ventas EN KILOS del período,
+        una fila por producto. Suma exacto lo que devuelven `totales_periodo` y
+        `gastos_periodo` sin tipo, porque el filtro es el mismo."""
+        filas = self.db.execute(
+            select(
+                func.coalesce(VentaQueso.tipo, ""),
+                func.coalesce(func.sum(VentaQueso.kilos), 0),
+                func.coalesce(func.sum(VentaQueso.valor_total), 0),
+                func.coalesce(func.sum(VentaQueso.gasto_monto), 0),
+            )
+            .where(
+                VentaQueso.empresa_id == self.empresa_id,
+                VentaQueso.deleted_at.is_(None),
+                VentaQueso.estado != "anulada",
+                VentaQueso.fecha.between(desde, hasta),
+                se_mide_en_kilos(VentaQueso, self.empresa_id),
+            )
+            .group_by(func.coalesce(VentaQueso.tipo, ""))
+        ).all()
+        return [(f[0], Decimal(f[1]), Decimal(f[2]), Decimal(f[3])) for f in filas]
+
+    def totales_periodo_barras_por_tipo(
+        self, desde: date, hasta: date
+    ) -> list[tuple[str, Decimal, Decimal, Decimal]]:
+        """(tipo, unidades, plata, gastos en pesos) de las ventas QUE SE CUENTAN.
+
+        Lo que se suma de gastos es `gasto_monto` (pesos) y nunca `gasto_por_barra`:
+        sumar "$500 por barra" con "$700 por barra" no son $1.200 de nada.
+        """
+        filas = self.db.execute(
+            select(
+                func.coalesce(VentaQueso.tipo, ""),
+                func.coalesce(func.sum(VentaQueso.barras), 0),
+                func.coalesce(func.sum(VentaQueso.valor_total), 0),
+                func.coalesce(func.sum(VentaQueso.gasto_monto), 0),
+            )
+            .where(
+                VentaQueso.empresa_id == self.empresa_id,
+                VentaQueso.deleted_at.is_(None),
+                VentaQueso.estado != "anulada",
+                VentaQueso.fecha.between(desde, hasta),
+                se_mide_en_unidades(VentaQueso, self.empresa_id),
+            )
+            .group_by(func.coalesce(VentaQueso.tipo, ""))
+        ).all()
+        return [(f[0], Decimal(f[1]), Decimal(f[2]), Decimal(f[3])) for f in filas]
+
+    def acumulados_por_tipo(self) -> list[tuple[str, Decimal, Decimal]]:
+        """(tipo, kilos, unidades) VENDIDOS HISTÓRICOS por producto: el sustraendo del
+        inventario de cada uno.
+
+        Sin filtro de clasificación y con las dos columnas, por lo mismo que en
+        `CompraQuesoRepository.acumulados_por_tipo`: quien pregunta toma la de la
+        unidad de su producto.
+        """
+        filas = self.db.execute(
+            select(
+                func.coalesce(VentaQueso.tipo, ""),
+                func.coalesce(func.sum(VentaQueso.kilos), 0),
+                func.coalesce(func.sum(VentaQueso.barras), 0),
+            )
+            .where(
+                VentaQueso.empresa_id == self.empresa_id,
+                VentaQueso.deleted_at.is_(None),
+                VentaQueso.estado != "anulada",
+            )
+            .group_by(func.coalesce(VentaQueso.tipo, ""))
+        ).all()
+        return [(f[0], Decimal(f[1]), Decimal(f[2])) for f in filas]
+
     def pendiente_periodo(self, desde: date, hasta: date) -> Decimal:
         """Lo que falta cobrar SOLO por las ventas de este rango de fechas.
 
@@ -895,40 +1182,6 @@ class ProductoReventaRepository(BaseRepository[ProductoReventa]):
             stmt = stmt.where(ProductoReventa.deleted_at.is_(None))
         return self.db.execute(stmt).unique().scalars().first()
 
-    def unidades_por_clave(self, claves) -> dict[str, str]:
-        """{clave: unidad} de los productos VIVOS DE ESTA EMPRESA que se piden.
-
-        Es la contraparte de escritura de `se_mide_en_unidades`: la lectura decide
-        en qué unidad está una fila que ya está guardada, y esto decide si la fila
-        que va a entrar trae los campos de su unidad. Las dos preguntas tienen que
-        responderse con el MISMO conjunto de productos, y por eso las dos filtran
-        empresa y borrados.
-
-        Lo que había antes recorría los productos de TODAS las empresas y armaba el
-        diccionario con `{p.clave: p.unidad}`: dos claves iguales de queseras
-        distintas se pisaban, y cuál quedaba de última lo decidía el orden en que la
-        base devolviera las filas. La misma compra podía aceptarse o rechazarse en
-        dos intentos idénticos, y el mensaje de error hablaba de una unidad que en
-        el catálogo del dueño no existe.
-
-        Una clave que no está en el catálogo de esta empresa NO aparece en el
-        diccionario, y quien pregunta la trata como kilos. Eso es a propósito y es
-        lo mismo que hace la lectura (`se_mide_en_kilos` cuenta como kilos todo lo
-        que no reconoce), así que una fila no puede entrar validada como una unidad
-        y quedar leída como la otra.
-        """
-        claves = [c for c in claves if c]
-        if not claves:
-            return {}
-        filas = self.db.execute(
-            select(ProductoReventa.clave, ProductoReventa.unidad).where(
-                ProductoReventa.empresa_id == self.empresa_id,
-                ProductoReventa.deleted_at.is_(None),
-                ProductoReventa.clave.in_(claves),
-            )
-        ).all()
-        return {fila[0]: fila[1] for fila in filas}
-
     def siguiente_orden(self) -> int:
         """El puesto que le toca a un producto nuevo: al final de la lista.
 
@@ -953,20 +1206,54 @@ class ProductoReventaRepository(BaseRepository[ProductoReventa]):
             .scalars()
         )
 
-    def movimientos(self, clave: str) -> tuple[int, int]:
-        """(compras, ventas) de ese producto en esta empresa.
+    def movimientos(self, clave: str) -> tuple[int, int, int]:
+        """(compras suyas, ventas suyas, compras que le trajeron kilos) en esta empresa.
 
         EL VÍNCULO ES LA CLAVE, el mismo puente que está explicado en el modelo:
         `compras_queso.tipo` y `ventas_queso.tipo` guardan justamente esa cadena.
         O sea que esto no es una aproximación mientras llega un `producto_id`: es
         exactamente el conjunto de filas que hablan de este producto, hoy.
 
+        UNA COMPRA HABLA DE DOS PRODUCTOS, Y ESTE ES EL ARREGLO. La columna `tipo`
+        dice qué se compró, pero `subproducto_tipo` dice A QUIÉN LE ENTRARON LOS
+        KILOS QUE LLEGARON GRATIS encima de esa compra (ver `CompraQueso`), y esos
+        kilos son mercancía de verdad que queda en la bodega del que la fila nombró.
+        Mirando solo `tipo`, un producto que solo hubiera recibido kilos gratis no
+        tenía "movimientos" para el catálogo: se le podía cambiar de padre y se le
+        podía QUITAR de la lista teniendo 25,36 kg en bodega —los mismos que el
+        resumen reportaba en existencias en esa misma respuesta—. Es la misma
+        lección de siempre con otra columna: la fila ya nombró a su producto, y quien
+        pregunte por la historia de un producto tiene que mirar los dos sitios donde
+        una fila lo puede nombrar.
+
         Se cuentan las ANULADAS también. Una compra anulada no suma plata, pero es
         historia registrada de ese producto: quitarlo del catálogo dejaría una fila
         del cuaderno hablando de algo que ya no aparece en la lista.
         """
+        # Una compra nombra al producto en su `tipo` (lo que se compró) o en su
+        # `subproducto_tipo` (lo que llegó gratis encima). Las dos cosas son historia
+        # suya, y van en conteos SEPARADOS para que el mensaje del rechazo diga la
+        # verdad: "2 compras" mandaría al dueño a buscar dos compras de borona que no
+        # existen, cuando lo que hay son dos compras de queso que le trajeron kilos.
+        #
+        # Las que le trajeron kilos EXCLUYEN las suyas propias, y no es por gusto: una
+        # compra de borona que además traiga borona gratis encima se nombra a sí misma
+        # en las dos columnas, y sin esto esa única fila se contaría dos veces.
+        #
+        # La venta solo lo puede nombrar en `tipo`: una venta no trae nada encima.
+        criterios = (
+            (CompraQueso, CompraQueso.tipo == clave),
+            (VentaQueso, VentaQueso.tipo == clave),
+            (
+                CompraQueso,
+                and_(
+                    CompraQueso.subproducto_tipo == clave,
+                    func.coalesce(CompraQueso.tipo, "") != clave,
+                ),
+            ),
+        )
         conteos = []
-        for modelo in (CompraQueso, VentaQueso):
+        for modelo, nombra_al_producto in criterios:
             conteos.append(
                 int(
                     self.db.scalar(
@@ -975,13 +1262,43 @@ class ProductoReventaRepository(BaseRepository[ProductoReventa]):
                         .where(
                             modelo.empresa_id == self.empresa_id,
                             modelo.deleted_at.is_(None),
-                            modelo.tipo == clave,
+                            nombra_al_producto,
                         )
                     )
                     or 0
                 )
             )
-        return conteos[0], conteos[1]
+        return conteos[0], conteos[1], conteos[2]
+
+    def ajustes(self, clave: str) -> int:
+        """Cuántos ajustes NOMBRAN a este producto, de origen o de destino.
+
+        HACE FALTA PARA QUE EL CATÁLOGO NO PUEDA MOVER PLATA REGISTRADA. Un ajuste
+        guarda de qué producto salieron los kilos y a cuál le entraron (ver
+        `ConversionBorona`); si al producto se le pudiera cambiar de padre después,
+        esos ajustes quedarían cruzando dos grupos de costeo y el desglose le
+        acreditaría a un grupo el costo de kilos que salieron de otro. Con esto, el
+        servicio lo rechaza igual que ya rechaza mover un producto con compras o
+        ventas encima.
+
+        Se cuentan también los anulados y los que no están activos: son historia
+        registrada de ese producto igual que una compra anulada.
+        """
+        return int(
+            self.db.scalar(
+                select(func.count())
+                .select_from(ConversionBorona)
+                .where(
+                    ConversionBorona.empresa_id == self.empresa_id,
+                    ConversionBorona.deleted_at.is_(None),
+                    or_(
+                        ConversionBorona.producto_origen == clave,
+                        ConversionBorona.producto_destino == clave,
+                    ),
+                )
+            )
+            or 0
+        )
 
 
 class DocumentoReventaRepository(BaseRepository[DocumentoReventa]):
@@ -1284,7 +1601,12 @@ class ConversionBoronaRepository(BaseRepository[ConversionBorona]):
         """Todos los ajustes vigentes en orden cronológico, para el reparto FIFO.
         Sin filtro de fechas, por lo mismo que en las compras.
 
-        Devuelve (fecha, created_at, kilos, destino).
+        Devuelve (fecha, created_at, kilos, destino, producto_origen,
+        producto_destino).
+
+        LOS DOS PRODUCTOS SALEN DE LA FILA Y NO DEL CATÁLOGO, y eso es lo que hace
+        que reordenar la lista de productos no le mueva un kilo al reparto: cada
+        ajuste dice de qué producto salió y a cuál entró (ver `ConversionBorona`).
         """
         return list(
             self.db.execute(
@@ -1293,6 +1615,8 @@ class ConversionBoronaRepository(BaseRepository[ConversionBorona]):
                     ConversionBorona.created_at,
                     ConversionBorona.kilos,
                     ConversionBorona.destino,
+                    func.coalesce(ConversionBorona.producto_origen, ""),
+                    ConversionBorona.producto_destino,
                 )
                 .where(
                     ConversionBorona.empresa_id == self.empresa_id,
@@ -1303,15 +1627,64 @@ class ConversionBoronaRepository(BaseRepository[ConversionBorona]):
             ).all()
         )
 
-    # Los tres siguientes son HISTÓRICOS (sin filtro de fechas): sirven para el
-    # inventario disponible hoy. NO usarlos en cálculos de un período: para eso
-    # está totales_periodo, o se mezclan kilos de temporadas distintas.
+    # ------------------------------------------------- abiertos POR PRODUCTO
+    def _por_producto(self, criterios: list) -> list[tuple[str, str | None, Decimal]]:
+        """(producto de origen, producto de destino, kilos) agrupados.
+
+        El destino EN NULO significa merma: esos kilos salieron del origen y no le
+        entraron a nadie. Se agrupa por las dos columnas y no por `destino` porque lo
+        que necesitan quien calcula el inventario y quien arma el desglose es
+        exactamente eso: cuánto salió de cada producto y cuánto le entró a cada uno.
+        """
+        filas = self.db.execute(
+            select(
+                func.coalesce(ConversionBorona.producto_origen, ""),
+                ConversionBorona.producto_destino,
+                func.coalesce(func.sum(ConversionBorona.kilos), 0),
+            )
+            .where(*criterios)
+            .group_by(
+                func.coalesce(ConversionBorona.producto_origen, ""),
+                ConversionBorona.producto_destino,
+            )
+        ).all()
+        return [(f[0], f[1], Decimal(f[2])) for f in filas]
+
+    def _criterios(self) -> list:
+        return [
+            ConversionBorona.empresa_id == self.empresa_id,
+            ConversionBorona.deleted_at.is_(None),
+            ConversionBorona.estado == "activo",
+        ]
+
+    def totales_periodo_por_producto(
+        self, desde: date, hasta: date
+    ) -> list[tuple[str, str | None, Decimal]]:
+        """Los ajustes DEL PERÍODO, abiertos por (origen, destino).
+
+        La suma de la columna de kilos es EXACTAMENTE la misma que devuelve
+        `totales_periodo` sumando sus dos cifras, porque el filtro es el mismo: son
+        los mismos kilos, abiertos por producto. De eso depende que el desglose siga
+        sumando el encabezado.
+        """
+        return self._por_producto(
+            [*self._criterios(), ConversionBorona.fecha.between(desde, hasta)]
+        )
+
+    def acumulados_por_producto(self) -> list[tuple[str, str | None, Decimal]]:
+        """Lo mismo pero HISTÓRICO (sin filtro de fechas), para el inventario de hoy."""
+        return self._por_producto(self._criterios())
+
+    # Los dos siguientes son HISTÓRICOS (sin filtro de fechas) y hablan de TODOS los
+    # productos juntos: son las dos cifras del encabezado del resumen. NO usarlos
+    # para el inventario de un producto —para eso está `acumulados_por_producto`— ni
+    # en cálculos de un período, que para eso está `totales_periodo`.
     def total_convertido(self) -> Decimal:
-        """Todo lo que sale del queso disponible (borona + merma), histórico."""
+        """Todo lo que sale de los inventarios (a subproducto + merma), histórico."""
         return self._total()
 
     def total_a_borona(self) -> Decimal:
-        """Solo lo que se pasó a borona (suma al inventario de borona), histórico."""
+        """Solo lo que pasó a un subproducto (le suma a su inventario), histórico."""
         return self._total(DESTINO_BORONA)
 
 

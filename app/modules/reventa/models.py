@@ -442,11 +442,23 @@ class CompraQueso(HoraDeRegistroMixin, TenantMixin, AuditMixin, Base):
     orden: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0", nullable=False
     )
-    # Qué se le compró: queso (se pesa) o mozzarella (se cuenta por barras).
+    # QUÉ SE LE COMPRÓ: la CLAVE de su producto en `productos_reventa` (ver el
+    # docstring de `ProductoReventa`: la clave es el puente, y es la misma cadena).
+    #
+    # EL ANCHO ES EL DE LA CLAVE, y eso costó una migración. Esta columna era
+    # varchar(20) de cuando los productos eran tres y todos cortos, mientras
+    # `productos_reventa.clave` es varchar(80): un producto que el dueño llamara
+    # "Queso costeño artesanal" generaba la clave 'queso_costeno_artesanal' (23
+    # caracteres) que NO CABÍA aquí. En SQLite —donde corren las pruebas— el ancho no
+    # se valida y no se veía; en Postgres —la base del cliente— el INSERT se caía con
+    # 'value too long' y el dueño veía un 500 al registrar la compra. O sea: un
+    # producto que se podía crear pero no se podía comprar. Lo ensancha la migración
+    # `b1c2d3e4f5a6`, y los dos anchos tienen que seguir siendo el mismo.
+    #
     # server_default 'queso' a propósito: TODAS las filas que ya existen son de
     # kilos, y así quedan marcadas como tal y no en un estado ambiguo.
     tipo: Mapped[str] = mapped_column(
-        String(20), default=TIPO_QUESO, server_default=TIPO_QUESO, index=True
+        String(80), default=TIPO_QUESO, server_default=TIPO_QUESO, index=True
     )
     kilos_brutos: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     # Merma en la compra quedó obsoleta: al comprar se paga por todo lo que se
@@ -456,6 +468,18 @@ class CompraQueso(HoraDeRegistroMixin, TenantMixin, AuditMixin, Base):
     # Borona que llega con el lote: no se paga, pero entra al inventario
     # de borona para venderse como subproducto
     borona_kilos: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
+    # A QUÉ PRODUCTO LE ENTRAN ESOS KILOS QUE LLEGARON GRATIS: la clave del
+    # subproducto que los recibe. En nulo cuando la compra no trajo nada gratis.
+    #
+    # POR QUÉ ES UNA COLUMNA Y NO SE DEDUCE DEL CATÁLOGO, que es la misma lección de
+    # `ConversionBorona`: `borona_kilos` decía "llegaron 18,25 kg gratis" sin decir
+    # de QUÉ, y quien leía tenía que adivinar el destinatario. Se adivinaba con el
+    # ORDEN del catálogo, o sea con un campo de presentación: crear un subproducto
+    # con `orden = 0` le quitaba a la borona toda la mercancía que había recibido
+    # gratis durante meses, y desde ahí sus ventas legítimas rebotaban por falta de
+    # existencias. Ahora la compra NOMBRA a su destinatario, se resuelve UNA vez al
+    # registrarla, y ningún cambio del catálogo puede moverla de sitio.
+    subproducto_tipo: Mapped[str | None] = mapped_column(String(80), default=None)
     # Kilos por los que se paga (= kilos_brutos ahora que no hay merma)
     kilos_netos: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     precio_kilo: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
@@ -552,10 +576,10 @@ class VentaQueso(HoraDeRegistroMixin, TenantMixin, AuditMixin, Base):
     orden: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0", nullable=False
     )
-    # Qué se vende: queso entero (kg), borona (kg, subproducto más barato) o
-    # mozzarella (barras). La unidad se deduce del tipo, ver `unidad_de`.
+    # QUÉ SE VENDE: la CLAVE de su producto en `productos_reventa`. Mismo ancho y
+    # mismo porqué que en `CompraQueso.tipo`, incluida la migración que lo ensanchó.
     tipo: Mapped[str] = mapped_column(
-        String(20), default=TIPO_VENTA_QUESO, server_default=TIPO_VENTA_QUESO, index=True
+        String(80), default=TIPO_VENTA_QUESO, server_default=TIPO_VENTA_QUESO, index=True
     )
     kilos: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     precio_kilo: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
@@ -631,17 +655,41 @@ DESTINO_MERMA = "merma"  # pérdida (no se vende ni suma a ningún inventario)
 
 
 class ConversionBorona(HoraDeRegistroMixin, TenantMixin, AuditMixin, Base):
-    """Ajuste que reduce el queso disponible de reventa. Según `destino`:
-    - borona: el queso se pasa a borona (devuelto o ya no vendible como entero)
-      y suma al inventario de borona para venderse como subproducto.
+    """Ajuste que saca kilos del inventario de un producto. Según `destino`:
+    - borona: esos kilos PASAN a un subproducto suyo (queso desmenuzado que ya no
+      se vende entero) y entran al inventario de ese subproducto.
     - merma: pérdida de peso (se pesó menos al vender); no suma a ningún lado.
 
-    SOLO APLICA AL QUESO EN KILOS, y por eso no tiene ni tipo ni barras: pasar a
-    borona es desmenuzar queso, y la merma es peso que se perdió. Una barra de
-    mozzarella no se desmenuza ni pierde peso en el camino —entra como barra y
-    sale como barra—, así que la mozzarella no participa en estos ajustes. Si
-    algún día una barra se daña, eso es otro concepto (una baja de unidades) y
-    tendría que ser su propio movimiento, nunca kilos metidos en esta tabla.
+    SOLO APLICA A LO QUE SE PESA, y por eso no tiene ni barras: pasar a borona es
+    desmenuzar queso, y la merma es peso que se perdió. Una barra de mozzarella no
+    se desmenuza ni pierde peso en el camino —entra como barra y sale como barra—,
+    así que lo que se cuenta no participa en estos ajustes. Si algún día una barra
+    se daña, eso es otro concepto (una baja de unidades) y tendría que ser su
+    propio movimiento, nunca kilos metidos en esta tabla.
+
+    LA FILA DICE DE QUÉ PRODUCTO A QUÉ PRODUCTO, Y ESO ES LO QUE ARREGLÓ EL DEFECTO
+    MÁS CARO DE ESTE MÓDULO. Hasta la migración `c5d9e3a7b1f4` esta tabla no tenía
+    ninguna columna de producto: una fila decía "30 kg pasaron a borona" y nada
+    más, así que alguien tenía que ADIVINAR de cuál producto salieron. Se adivinaba
+    con el catálogo: "el primer subproducto que se pesa, en el ORDEN del catálogo,
+    junto con su padre". Y el orden del catálogo es un campo de PRESENTACIÓN que la
+    API deja cambiar con un PUT.
+
+    Lo que eso costaba, medido: crear un subproducto del queso con `orden = 0` —o
+    simplemente reordenar la lista— le transfería al producto nuevo TODA la
+    historia de conversiones de la borona. La fila de la borona pasaba de 40,40 kg
+    / $498.765,07 a 30,30 kg / $374.073,80, aparecía una fila con $498.765,07 de
+    mercancía que nunca se compró, la existencia de borona quedaba en −30,30 kg
+    mientras el campo viejo decía 50,50 en la MISMA respuesta, y vender un kilo de
+    borona rebotaba con un 422. Una sola llamada al catálogo movía plata ya
+    registrada.
+
+    LA LECCIÓN, escrita donde no se pueda perder: NUNCA se decide plata con un dato
+    de presentación. Y la raíz no era la línea que adivinaba, era que el hecho —de
+    qué producto a qué producto— NO ESTABA GUARDADO. Ahora está: cada fila lo trae,
+    se resuelve UNA vez al registrarla y ninguna lectura vuelve a adivinar. Desde
+    entonces, crear, reordenar, renombrar o desactivar productos no le mueve un kilo
+    ni un peso a lo que ya está anotado.
     """
 
     __tablename__ = "conversiones_borona"
@@ -651,6 +699,21 @@ class ConversionBorona(HoraDeRegistroMixin, TenantMixin, AuditMixin, Base):
     destino: Mapped[str] = mapped_column(
         String(20), default=DESTINO_BORONA, server_default=DESTINO_BORONA, index=True
     )
+    # DE QUÉ PRODUCTO SALEN ESTOS KILOS: la CLAVE de su fila en `productos_reventa`,
+    # la misma cadena que guardan `compras_queso.tipo` y `ventas_queso.tipo`.
+    #
+    # NOT NULL con server_default 'queso' a propósito: todas las filas que ya
+    # existen salieron del queso (era el único producto del que se podía convertir),
+    # así que quedan diciendo exactamente lo que siempre significaron, y ninguna
+    # fila nueva puede entrar sin decir de dónde sale.
+    producto_origen: Mapped[str] = mapped_column(
+        String(80), nullable=False, default=TIPO_QUESO, server_default=TIPO_QUESO,
+        index=True,
+    )
+    # A QUÉ PRODUCTO LE ENTRAN: la clave del subproducto que los recibe. EN NULO
+    # cuando el destino es la merma, y ahí el nulo significa algo preciso: esos
+    # kilos no le entran a nadie, se perdieron. No es "no se sabe".
+    producto_destino: Mapped[str | None] = mapped_column(String(80), default=None)
     # Precio por kilo de la borona (solo aplica cuando destino = borona; la merma
     # es pérdida sin valor). Sirve para valorar la borona generada.
     precio_kilo: Mapped[Decimal] = mapped_column(

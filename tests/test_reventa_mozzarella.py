@@ -242,9 +242,13 @@ def test_no_se_pueden_vender_mas_barras_de_las_que_hay_al_crear(client, h):
     print(f"  vender 11 barras: {de_mas.status_code} · {detalle}")
 
     assert de_mas.status_code == 422, "se vendieron barras que no se compraron"
-    # El mensaje tiene que hablar de BARRAS, no de kg: el dueño lee el error y
-    # tiene que entender de qué inventario le está hablando.
-    assert "barras" in detalle
+    # El mensaje tiene que hablar de PIEZAS y del PRODUCTO, no de kg: el dueño lee el
+    # error y tiene que entender de qué inventario le está hablando. Antes decía
+    # "barras de mozzarella" porque la mozzarella era el único producto que se contaba;
+    # ahora dice las unidades y el nombre del producto, que es lo que sirve también
+    # cuando el que no alcanza es un producto que él agregó.
+    assert "unidades" in detalle
+    assert "mozzarella" in detalle.lower()
     assert "kg" not in detalle
 
     # Y las 10 que sí hay pasan sin problema
@@ -271,7 +275,7 @@ def test_no_se_pueden_inventar_barras_editando_una_venta(client, h):
     print(f"  editarla a 500 barras: {inflada.status_code} · {detalle}")
 
     assert inflada.status_code == 422, "se pudo vender mozzarella que nunca se compró"
-    assert "barras" in detalle
+    assert "unidades" in detalle and "mozzarella" in detalle.lower()
 
     # Y el arreglo no puede volverse un estorbo: subirla a las 20 que hay sí se
     # puede, porque al editar hay que devolverle al inventario la barra que esta
@@ -305,7 +309,7 @@ def test_no_se_pueden_quitar_barras_ya_vendidas_editando_la_compra(client, h):
     print(f"  bajar la compra a 10 barras: {recorte.status_code} · {detalle}")
 
     assert recorte.status_code == 422
-    assert "barras" in detalle
+    assert "unidades" in detalle and "mozzarella" in detalle.lower()
 
     # Hasta 80 sí se puede: es lo que de verdad salió.
     valido = client.put(f"{API}/compras/{compra['id']}", json={"barras": "80"}, headers=h)
@@ -328,7 +332,7 @@ def test_no_se_puede_anular_una_compra_de_barras_ya_vendidas(client, h):
     print("\n===== 6. ANULAR UNA COMPRA DE BARRAS YA VENDIDAS =====")
     print(f"  anular: {r.status_code} · {detalle}")
     assert r.status_code == 422
-    assert "barras" in detalle
+    assert "unidades" in detalle and "mozzarella" in detalle.lower()
 
 
 def test_las_barras_no_admiten_decimales(client, h):

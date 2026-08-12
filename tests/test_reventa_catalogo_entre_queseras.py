@@ -155,6 +155,11 @@ def exigir_regla_de_oro(res, etiqueta):
         )
 
 
+def _solo_cifras(fila):
+    """La fila del desglose sin sus textos: solo lo que es una cifra."""
+    return {k: v for k, v in fila.items() if k not in ("etiqueta", "nota")}
+
+
 def exigir_que_no_se_movio(antes, despues, etiqueta):
     """NI UN CAMPO del encabezado, y el desglose completo igual."""
     movidos = {
@@ -165,8 +170,15 @@ def exigir_que_no_se_movio(antes, despues, etiqueta):
             f"{c}: {v[0]} -> {v[1]}" for c, v in movidos.items()
         )
     )
-    assert antes["por_producto"] == despues["por_producto"], (
-        f"{etiqueta}: lo que hizo la otra quesera cambió el desglose por producto"
+    # EL DESGLOSE SE COMPARA POR SUS CIFRAS Y NO POR SUS RÓTULOS. `etiqueta` y `nota`
+    # son el texto que se le muestra al dueño y salen del NOMBRE del producto en el
+    # catálogo, así que renombrar un producto SÍ los cambia —para eso sirve renombrar—.
+    # Lo que no se puede mover es una cifra, y eso es lo que se compara acá.
+    filas_antes = [_solo_cifras(f) for f in antes["por_producto"]]
+    filas_despues = [_solo_cifras(f) for f in despues["por_producto"]]
+    assert filas_antes == filas_despues, (
+        f"{etiqueta}: lo que hizo la otra quesera cambió las cifras del desglose por "
+        f"producto"
     )
 
 
@@ -224,7 +236,9 @@ def test_la_validacion_de_la_unidad_mira_el_catalogo_de_su_propia_empresa(
         assert r.status_code == 422, (
             f"intento {intento}: la panela de la A se cuenta y le aceptaron kilos"
         )
-        assert "las barras y el precio por barra" in r.text, r.text
+        # El mensaje nombra EL PRODUCTO con el nombre que el dueño le puso en SU catálogo,
+    # y la unidad en la que se mide: es lo que le dice qué corregir.
+    assert "Panela" in r.text and "unidades" in r.text, r.text
     print("\n10 intentos idénticos por quesera: la respuesta fue siempre la misma "
           "y siempre la de SU catálogo")
 
@@ -250,12 +264,21 @@ def test_mismo_nombre_en_unidades_distintas(client, ha, hb):
         "la panela de la B se pesa: no puede tener barras"
     )
 
-    # --- ahora la A estrena SU panela, pero POR UNIDAD, y le mueve movimientos
+    # --- ahora la A estrena SU panela, pero POR UNIDAD, y le mueve movimientos.
+    # Los precios son distintos a los de la B A PROPÓSITO: la comprobación de más
+    # abajo es que ninguna cifra de plata de la A pueda ser la de la B, y con las dos
+    # comprando por $200.000 esa comprobación no probaría nada. (Antes daba lo mismo
+    # porque la compra por unidad de la A se guardaba en CERO: era el defecto.)
     producto(client, ha, "Panela", unidad="unidad")
-    compra_unidades(client, ha, "2026-03-01", "Aurelio", "panela", 100, 2000)
+    compra_unidades(client, ha, "2026-03-01", "Aurelio", "panela", 100, 2500)
     venta_unidades(client, ha, "2026-03-05", "Doña Rosa", "panela", 40, 3000, gasto=10)
     a = resumen(client, ha)
     pintar("A (su panela por unidad)", a)
+    # Y la plata de la A es LA SUYA, completa: 100 unidades a $2.500.
+    assert D(a["total_compras"]) == D("250000.00"), (
+        f"la A compró 100 panelas a $2.500 y su resumen dice {a['total_compras']}"
+    )
+    assert D(a["total_ventas"]) == D("120000.00")
 
     b_despues = resumen(client, hb)
     pintar("B DESPUES de que A estrenara su panela por unidad", b_despues)
@@ -385,6 +408,14 @@ def test_renombrar_con_movimientos_no_mueve_ni_una_cifra(client, ha, hb):
     despues = resumen(client, ha)
     exigir_que_no_se_movio(antes, despues, "renombrar el producto con movimientos encima")
     exigir_regla_de_oro(despues, "A después de renombrar")
+    # LO QUE SÍ CAMBIA ES EL RÓTULO, y para eso es que el dueño renombra: la fila del
+    # desglose lo llama como él lo llama ahora. Antes el nombre nuevo no llegaba a
+    # ninguna parte del dinero y el desglose seguía diciendo la clave vieja.
+    etiquetas = [f["etiqueta"] for f in despues["por_producto"]]
+    print("   etiquetas del desglose:", etiquetas)
+    assert "Vendido como Panela pura de caña" in etiquetas, (
+        f"el nombre nuevo no llegó al desglose: {etiquetas}"
+    )
 
     # Y ahora la B estrena SU 'Panela', por unidad, con el nombre que la A dejó libre
     producto(client, hb, "Panela", unidad="unidad")
@@ -416,10 +447,21 @@ def test_las_dos_queseras_con_todo_chocando(client, ha, hb):
     compra_kilos(client, ha, "2026-03-01", "Patricia", "queso_costeno", 300, 4000, borona=12)
     venta_kilos(client, ha, "2026-03-05", "Don Jose", "queso_costeno", 250, 6000, gasto=45)
     venta_kilos(client, ha, "2026-03-06", "Don Jose", "borona", 8, 900)
+    # UN AJUSTE QUE NO DICE DE DÓNDE SALE, SALE DEL QUESO, y la A no compró queso:
+    # solo su 'queso_costeno', que es OTRO producto. Antes esto pasaba —el ajuste se
+    # validaba contra "todos los kilos comprados", así que los kilos del costeño se
+    # desmenuzaban como si fueran queso y aparecían como borona vendible— y ahora se
+    # rechaza. Si el dueño de verdad quisiera ajustar el costeño, el ajuste lo NOMBRA
+    # (`producto_origen`); ver `ConversionBoronaService.crear`.
     r = client.post(f"{API}/conversiones",
                     json={"fecha": "2026-03-04", "kilos": 10, "destino": "merma"},
                     headers=ha)
-    assert r.status_code == 201, r.text
+    print("\nA intenta una merma de 10 kg sin haber comprado queso ->",
+          r.status_code, r.text[:120])
+    assert r.status_code == 422, (
+        "el ajuste consumió kilos de un producto que no es el del ajuste"
+    )
+    assert D(resumen(client, ha)["kilos_merma"]) == CERO
 
     compra_kilos(client, hb, "2026-03-01", "Patricia", "panela", 700, 2500)
     compra_unidades(client, hb, "2026-03-01", "Aurelio", "queso_costeno", 900, 3000)
@@ -442,16 +484,28 @@ def test_las_dos_queseras_con_todo_chocando(client, ha, hb):
         f"B: kilos_comprados = {b['kilos_comprados']}, esperado 700 "
         f"(solo su panela se pesa)"
     )
-    # OJO: aquí NO se exige que "kilos vendidos" ni "barras compradas" digan la
-    # verdad, y no es un descuido. Las dos salen mal —A vendió 250 kg y su resumen
-    # dice 0,00; B compró 900 unidades y su resumen dice 0 barras— pero eso NO es
-    # una fuga entre empresas: es que el resumen y el inventario solo entienden las
-    # tres claves escritas a mano ('queso', 'borona', 'mozzarella'). Está medido con
-    # cifras y aparte, en `test_zzqa_reventa_defectos_del_catalogo.py`. Esta prueba
-    # es de aislamiento entre queseras y no se le puede pedir que además tape eso.
-    print(f"\n   [otro defecto, medido aparte] A vendió 250 kg y su resumen dice "
-          f"kilos_vendidos = {a['kilos_vendidos']}; B compró 900 unidades y dice "
-          f"barras_compradas = {b['barras_compradas']}")
+    # Y AHORA LAS DOS DICEN LA VERDAD DE LO QUE MOVIERON, que es lo que antes no
+    # pasaba: el resumen y el inventario solo entendían las tres claves escritas a
+    # mano, así que A vendía 250 kg de su queso_costeno y su resumen decía 0,00 (esos
+    # kilos salían contados como borona), y B compraba 900 unidades de su
+    # queso_costeno y su resumen decía 0 barras.
+    assert D(a["kilos_vendidos"]) == D(250), (
+        f"A vendió 250 kg de su queso_costeno y su resumen dice {a['kilos_vendidos']}"
+    )
+    assert D(a["kilos_borona_vendidos"]) == D(8), (
+        "la borona vendida de A son sus 8 kg de borona de verdad, y nada más"
+    )
+    # Las unidades del queso_costeno de B están en SU fila y en SU inventario: los
+    # campos `barras_*` del encabezado hablan de la mozzarella, que B no movió.
+    de_b = next(f for f in b["por_producto"] if f["producto"] == "queso_costeno_pendiente")
+    assert D(de_b["barras"]) == D(900), f"las 900 unidades de B: {de_b}"
+    assert D(de_b["costo"]) == D("2700000.00")
+    en_bodega_b = next(
+        e for e in b["existencias"] if e["producto"] == "queso_costeno"
+    )
+    assert D(en_bodega_b["disponible"]) == D(900)
+    print(f"\n   A: kilos_vendidos={a['kilos_vendidos']} borona={a['kilos_borona_vendidos']}"
+          f" · B: 900 unidades de queso_costeno en su propia fila y su propio inventario")
     # Y las listas tampoco se ven
     for etiqueta, h, esperados in (("A", ha, 2), ("B", hb, 2)):
         lst = client.get(f"{API}/compras", params=PERIODO, headers=h)

@@ -172,16 +172,24 @@ def test_2_venta_sobrepagada_no_rebaja_la_cartera(client, base_datos):
 
 
 # ---------------------------------------------------------------------------
-# 3. El desglose por producto manda el centavo del redondeo en una fila de 0 kg
+# 3. El centavo del redondeo cae en una fila que TIENE cantidad
 # ---------------------------------------------------------------------------
-def test_3_el_residuo_de_cero_kilos_lleva_el_centavo(client, base_datos):
-    """Cuando el lote queda repartido exacto (kilos_pendientes = 0), la fila del
-    residuo se lleva los centavos del redondeo.
+def test_3_el_centavo_del_redondeo_cae_en_una_fila_con_cantidad(client, base_datos):
+    """Con el lote repartido exacto (kilos_pendientes = 0), el centavo del redondeo
+    queda en una de las filas que SÍ movió kilos, y no en la del residuo vacía.
 
-    Es la razón por la que la tabla del frontend NO puede esconder una fila por
-    ser "pequeña": esconderla dejaba las filas visibles sumando un centavo
-    distinto del Total de su propio pie. Solo se puede esconder la que no aporta
-    nada: 0 kilos Y ganancia exactamente 0.
+    POR QUÉ CAMBIÓ DE FILA, que es lo único que cambió acá. El costo de cada destino
+    se reparte ahora al RESTO MAYOR (`repartir_al_resto_mayor`) entre todos los
+    destinos del grupo, y el centavo que falta para llegar a la plata comprada se le
+    da a la fila cuya fracción quedó más grande. Antes el residuo se calculaba como
+    "lo comprado menos las otras tres filas", así que absorbía el centavo aunque no
+    tuviera un solo kilo: quedaba una fila de 0 kg con $0,01 de ganancia, que es una
+    cifra que el dueño no puede explicar con ninguna multiplicación suya.
+
+    LO QUE NO CAMBIÓ, Y ES LO QUE IMPORTA: la columna sigue sumando EXACTO el pie.
+    Y ahora, además, la fila del residuo vacía es de verdad vacía (0 kilos y $0), así
+    que la pantalla la puede esconder sin que la columna deje de cuadrar — que es
+    justo lo que antes no se podía hacer.
     """
     h = auth_headers(client, "admin.a")
     compra(client, h, fecha="2026-07-02", productor="Centavos",
@@ -204,18 +212,29 @@ def test_3_el_residuo_de_cero_kilos_lleva_el_centavo(client, base_datos):
     assert D(datos["total_compras"]) == D("10000.01")
     assert D(datos["kilos_pendientes"]) == 0
     assert D(datos["ganancia_estimada"]) == D("-5000.01")
+    # La fila del residuo está VACÍA de verdad: sin kilos y sin un centavo pegado.
     residuo = [f for f in datos["por_producto"] if f["producto"] == "pendiente"]
     assert len(residuo) == 1
-    assert D(residuo[0]["kilos"]) == 0 and D(residuo[0]["ganancia"]) == D("0.01")
-    # Las cuatro filas suman EXACTO la cifra grande: si la pantalla esconde la
-    # del centavo, deja de sumar su pie.
+    assert D(residuo[0]["kilos"]) == 0
+    assert D(residuo[0]["ganancia"]) == 0, (
+        f"la fila del residuo quedó con {residuo[0]['ganancia']} sin tener un solo "
+        f"kilo: ese centavo no se puede explicar con ninguna multiplicación"
+    )
+    # EL CENTAVO ESTÁ EN UNA FILA QUE SÍ MOVIÓ KILOS.
+    con_cantidad = [f for f in datos["por_producto"] if D(f["kilos"]) > 0]
+    assert suma(con_cantidad, "ganancia") == D(datos["ganancia_estimada"]), (
+        "las filas que movieron kilos ya suman el pie completo"
+    )
+    # Y las cuatro suman EXACTO la cifra grande, con residuo o sin él.
     assert suma(datos["por_producto"], "ganancia") == D(datos["ganancia_estimada"])
-    sin_el_centavo = suma(
+    sin_el_residuo = suma(
         [f for f in datos["por_producto"] if f["producto"] != "pendiente"], "ganancia"
     )
-    print(f"    sin la fila del residuo la columna daría {sin_el_centavo} "
+    print(f"    escondiendo la fila vacía del residuo la columna da {sin_el_residuo} "
           f"contra un pie de {datos['ganancia_estimada']}")
-    assert sin_el_centavo != D(datos["ganancia_estimada"])
+    assert sin_el_residuo == D(datos["ganancia_estimada"]), (
+        "una fila de 0 kilos y $0 se tiene que poder esconder sin descuadrar la columna"
+    )
     assert suma(datos["por_productor"], "por_pagar") == D(
         datos["por_pagar_productores"]
     )
