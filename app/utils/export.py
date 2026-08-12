@@ -238,43 +238,25 @@ def build_liquidacion_pdf(
     resumen_rows: Sequence[tuple[str, str, bool]],
     notas_resumen: Sequence[str] = (),
     anticipos_rows: Sequence[Sequence[Any]] = (),
+    pagos_rows: Sequence[Sequence[Any]] = (),
     observaciones: str | None = None,
 ) -> bytes:
-    """Comprobante de liquidación con membrete, resumen, anticipos y firmas.
-
-    `detalle_col_widths`: ancho de cada columna del detalle EN CENTÍMETROS. Si no
-    viene, la tabla se mide sola como siempre. Hace falta desde que el comprobante
-    del transportador lleva una columna de texto (la ruta): con el ancho automático
-    un nombre largo empujaba las cifras fuera de la hoja.
-
-    `detalle_wrap_cols`: los índices de las columnas del detalle que son TEXTO
-    LIBRE. Esas se imprimen envueltas (parten en varias líneas en vez de
-    desbordarse) y alineadas a la izquierda. Por omisión ninguna, así que el
-    comprobante del proveedor sale idéntico a como salía.
-
-    `notas_resumen`: renglones de letra chica DEBAJO del resumen, para explicar de
-    dónde salió una cifra que no se puede deducir de este papel. Hoy son las dos
-    puntas de la deuda que se arrastra entre quincenas: "esta deuda se le cobró en la
-    liquidación del 16/06 al 30/06" en la que la dejó, y "este descuento viene de la
-    del 01/06 al 15/06" en la que la cobró. Sin ellas el dueño ve un descuento y no
-    tiene manera de saber de dónde salió. Van envueltas en Paragraph, así que un texto
-    largo parte en varias líneas en vez de desbordarse.
+    """Comprobante de liquidación con membrete, resumen, anticipos, pagos y firmas.
+    Ajustado para caber SIEMPRE en una sola hoja.
     """
     buffer = io.BytesIO()
     styles = getSampleStyleSheet()
-    st_company = ParagraphStyle("Company", parent=styles["Title"], fontSize=16, textColor=BRAND, spaceAfter=0, leading=18, alignment=0)
-    st_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=8, textColor=GREY, leading=11)
-    st_doctitle = ParagraphStyle("DocT", parent=styles["Normal"], fontSize=12.5, textColor=BRAND, fontName="Helvetica-Bold", alignment=TA_RIGHT, leading=15)
-    st_docmeta = ParagraphStyle("DocM", parent=styles["Normal"], fontSize=8.5, textColor=GREY, alignment=TA_RIGHT, leading=12)
-    st_head = ParagraphStyle("Sec", parent=styles["Heading3"], fontSize=10.5, textColor=BRAND, spaceBefore=2, spaceAfter=4)
-    st_lbl = ParagraphStyle("Lbl", parent=styles["Normal"], fontSize=7.5, textColor=GREY)
-    st_val = ParagraphStyle("Val", parent=styles["Normal"], fontSize=9.5, fontName="Helvetica-Bold")
-    st_obs = ParagraphStyle("Obs", parent=styles["Normal"], fontSize=9, leading=13)
-    st_sign = ParagraphStyle("Sign", parent=styles["Normal"], fontSize=8.5, alignment=TA_CENTER, textColor=GREY, leading=12)
+    st_company = ParagraphStyle("Company", parent=styles["Title"], fontSize=14, textColor=BRAND, spaceAfter=0, leading=16, alignment=0)
+    st_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=7.5, textColor=GREY, leading=9.5)
+    st_doctitle = ParagraphStyle("DocT", parent=styles["Normal"], fontSize=11, textColor=BRAND, fontName="Helvetica-Bold", alignment=TA_RIGHT, leading=13)
+    st_docmeta = ParagraphStyle("DocM", parent=styles["Normal"], fontSize=8, textColor=GREY, alignment=TA_RIGHT, leading=10.5)
+    st_head = ParagraphStyle("Sec", parent=styles["Heading3"], fontSize=9.5, textColor=BRAND, spaceBefore=1, spaceAfter=2)
+    st_lbl = ParagraphStyle("Lbl", parent=styles["Normal"], fontSize=7, textColor=GREY)
+    st_val = ParagraphStyle("Val", parent=styles["Normal"], fontSize=8.5, fontName="Helvetica-Bold")
+    st_obs = ParagraphStyle("Obs", parent=styles["Normal"], fontSize=8, leading=10)
+    st_sign = ParagraphStyle("Sign", parent=styles["Normal"], fontSize=8, alignment=TA_CENTER, textColor=GREY, leading=10)
 
     # --- Encabezado: logo + empresa + datos del comprobante
-    # Todo texto libre va escapado con _texto: un '<' en el nombre de la empresa
-    # o del tercero borraría texto del recibo o tumbaría la generación.
     company_block: list[Any] = [Paragraph(_texto(empresa_nombre), st_company)]
     sub = " · ".join(
         p
@@ -293,9 +275,9 @@ def build_liquidacion_pdf(
         Paragraph(f"Emitido: {_texto(emitido)}", st_docmeta),
     ]
     logo_cell: Any = (
-        RLImage(str(LOGO_PATH), width=1.4 * cm, height=1.4 * cm) if LOGO_PATH.exists() else ""
+        RLImage(str(LOGO_PATH), width=1.2 * cm, height=1.2 * cm) if LOGO_PATH.exists() else ""
     )
-    header = Table([[logo_cell, company_block, doc_block]], colWidths=[1.7 * cm, 8.6 * cm, 7.0 * cm])
+    header = Table([[logo_cell, company_block, doc_block]], colWidths=[1.5 * cm, 10.5 * cm, 7.5 * cm])
     header.setStyle(
         TableStyle(
             [
@@ -308,7 +290,7 @@ def build_liquidacion_pdf(
     )
     elements: list[Any] = [
         header,
-        HRFlowable(width="100%", thickness=1.2, color=BRAND, spaceBefore=6, spaceAfter=10),
+        HRFlowable(width="100%", thickness=1.0, color=BRAND, spaceBefore=3, spaceAfter=5),
     ]
 
     # --- Datos del tercero
@@ -321,26 +303,23 @@ def build_liquidacion_pdf(
             [Paragraph("Ruta / vereda", st_lbl), Paragraph(_texto(tercero_detalle), st_val),
              Paragraph("Comprobante", st_lbl), Paragraph(f"N.º {_texto(folio)}", st_val)]
         )
-    info = Table(info_rows, colWidths=[2.6 * cm, 6.2 * cm, 2.6 * cm, 5.9 * cm])
+    info = Table(info_rows, colWidths=[2.5 * cm, 7.3 * cm, 2.5 * cm, 7.2 * cm])
     info.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), BRAND_LIGHT),
                 ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D6E0EA")),
-                ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ]
         )
     )
-    elements += [info, Spacer(1, 12)]
+    elements += [info, Spacer(1, 5)]
 
     # --- Detalle diario
     elements.append(Paragraph("Detalle diario", st_head))
-    # El texto libre del detalle (hoy: el nombre de la ruta) va en Paragraph para
-    # que se envuelva dentro de su celda. Y va escapado con _texto por lo mismo que
-    # todo lo demás: una ruta llamada "La Y <arriba>" borraría texto del recibo.
-    st_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=8, leading=9.5)
+    st_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=7.5, leading=8.5)
     envuelven = set(detalle_wrap_cols)
     det_data = [list(detalle_headers)] + [
         [
@@ -361,38 +340,29 @@ def build_liquidacion_pdf(
         ("BACKGROUND", (0, 0), (-1, 0), BRAND),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
         ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 0.8), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.8),
     ]
-    # Las columnas de texto van a la izquierda, encabezado incluido: la regla de
-    # arriba alinea a la derecha todo lo que no sea la primera columna, y un
-    # "Ruta / Nápoles" pegado a las cifras se lee como si fuera una cifra más.
     for columna in sorted(envuelven):
         det_style.append(("ALIGN", (columna, 0), (columna, -1), "LEFT"))
     det.setStyle(TableStyle(det_style))
-    elements += [det, Spacer(1, 12)]
+    elements += [det, Spacer(1, 3)]
 
     # --- Resumen (con VALOR TOTAL y SALDO destacados)
     elements.append(Paragraph("Resumen de liquidación", st_head))
-    # LA COLUMNA DEL RÓTULO MIDE 7,6 cm Y NO 6, y el centímetro y medio es por un
-    # rótulo concreto: "Lo que quedó debiendo de la quincena pasada" mide 187 pt en
-    # Helvetica 9 y en una celda de 6 cm (154 pt útiles) se desbordaba encima de la
-    # cifra. Los rótulos van en texto plano —no en Paragraph— porque el resaltado de
-    # VALOR TOTAL y del SALDO se pone con FONTNAME/TEXTCOLOR de la tabla, y eso no
-    # alcanza a un Paragraph: quedarían los dos renglones grandes sin negrita.
     res = Table(
-        [[c, v] for (c, v, _) in resumen_rows], colWidths=[7.6 * cm, 5 * cm], hAlign="RIGHT"
+        [[c, v] for (c, v, _) in resumen_rows], colWidths=[11.5 * cm, 8.0 * cm], hAlign="RIGHT"
     )
     res_style = [
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#E6E6E6")),
-        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 1.2), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.2),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
     ]
     for i, (_, _, resaltado) in enumerate(resumen_rows):
         if resaltado:
@@ -400,19 +370,19 @@ def build_liquidacion_pdf(
                 ("BACKGROUND", (0, i), (-1, i), BRAND_LIGHT),
                 ("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"),
                 ("TEXTCOLOR", (0, i), (-1, i), BRAND),
-                ("FONTSIZE", (0, i), (-1, i), 10),
+                ("FONTSIZE", (0, i), (-1, i), 9.0),
             ]
     res.setStyle(TableStyle(res_style))
-    elements += [res, Spacer(1, 12)]
+    elements += [res, Spacer(1, 3)]
 
     # --- Las notas al pie del resumen (de dónde salió una cifra que se arrastra)
     if notas_resumen:
         st_nota = ParagraphStyle(
-            "NotaResumen", parent=styles["Normal"], fontSize=8, textColor=GREY, leading=11
+            "NotaResumen", parent=styles["Normal"], fontSize=7.5, textColor=GREY, leading=9.0
         )
         for nota in notas_resumen:
             elements.append(Paragraph(_texto(nota), st_nota))
-        elements.append(Spacer(1, 12))
+        elements.append(Spacer(1, 4))
 
     # --- Anticipos aplicados
     if anticipos_rows:
@@ -420,61 +390,83 @@ def build_liquidacion_pdf(
         ant_data = [["Fecha", "Valor", "Observaciones"]] + [
             [str(_cell_value(v)) if v is not None else "" for v in row] for row in anticipos_rows
         ]
-        ant = Table(ant_data, colWidths=[3 * cm, 3 * cm, 10.9 * cm], repeatRows=1, hAlign="LEFT")
+        ant = Table(ant_data, colWidths=[2.5 * cm, 3.0 * cm, 14.0 * cm], repeatRows=1, hAlign="LEFT")
         ant.setStyle(
             TableStyle(
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), BRAND),
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                     ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7.5),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
                     ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
                     ("ALIGN", (1, 1), (1, -1), "RIGHT"),
                     ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
                 ]
             )
         )
-        elements += [ant, Spacer(1, 12)]
+        elements += [ant, Spacer(1, 5)]
+
+    # --- Pagos / Giros realizados
+    if pagos_rows:
+        elements.append(Paragraph("Pagos y giros realizados", st_head))
+        pag_data = [["Fecha", "Valor", "Girado a / Destinatario", "Observaciones"]] + [
+            [str(_cell_value(v)) if v is not None else "" for v in row] for row in pagos_rows
+        ]
+        pag = Table(pag_data, colWidths=[2.5 * cm, 3.0 * cm, 5.5 * cm, 8.5 * cm], repeatRows=1, hAlign="LEFT")
+        pag.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), BRAND),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
+                    ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+                ]
+            )
+        )
+        elements += [pag, Spacer(1, 5)]
 
     # --- Observaciones
     if observaciones:
         elements.append(Paragraph("Observaciones", st_head))
-        box = Table([[Paragraph(_texto(observaciones), st_obs)]], colWidths=[16.9 * cm])
+        box = Table([[Paragraph(_texto(observaciones), st_obs)]], colWidths=[19.5 * cm])
         box.setStyle(
             TableStyle(
                 [
                     ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D6E0EA")),
                     ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                    ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
                 ]
             )
         )
-        elements += [box]
+        elements += [box, Spacer(1, 5)]
 
     # --- Firmas
-    elements.append(Spacer(1, 28))
+    elements.append(Spacer(1, 10))
     firma = Table(
         [
             ["", ""],
             [
-                # El <br/> es marcado nuestro y se deja tal cual; los nombres van
-                # escapados porque son texto libre.
                 Paragraph(f"Entregué conforme<br/>{_texto(empresa_nombre)}", st_sign),
                 Paragraph(f"Recibí conforme<br/>{_texto(tercero_nombre)}", st_sign),
             ],
         ],
-        colWidths=[8.4 * cm, 8.4 * cm],
-        rowHeights=[0.9 * cm, None],
+        colWidths=[9.7 * cm, 9.7 * cm],
+        rowHeights=[0.5 * cm, None],
     )
     firma.setStyle(
         TableStyle(
             [
                 ("LINEABOVE", (0, 1), (0, 1), 0.6, colors.black),
                 ("LINEABOVE", (1, 1), (1, 1), 0.6, colors.black),
-                ("TOPPADDING", (0, 1), (-1, 1), 4),
+                ("TOPPADDING", (0, 1), (-1, 1), 2),
                 ("ALIGN", (0, 0), (-1, -1), "CENTER"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 20), ("RIGHTPADDING", (0, 0), (-1, -1), 20),
             ]
@@ -486,16 +478,16 @@ def build_liquidacion_pdf(
         canvas.saveState()
         canvas.setStrokeColor(colors.HexColor("#D6E0EA"))
         canvas.setLineWidth(0.5)
-        canvas.line(1.5 * cm, 1.3 * cm, letter[0] - 1.5 * cm, 1.3 * cm)
+        canvas.line(1.0 * cm, 1.0 * cm, letter[0] - 1.0 * cm, 1.0 * cm)
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(GREY)
-        canvas.drawString(1.5 * cm, 1.0 * cm, f"Generado por Lactis · {emitido}")
-        canvas.drawRightString(letter[0] - 1.5 * cm, 1.0 * cm, f"Página {doc_.page}")
+        canvas.drawString(1.0 * cm, 0.7 * cm, f"Generado por Lactis · {emitido}")
+        canvas.drawRightString(letter[0] - 1.0 * cm, 0.7 * cm, f"Página {doc_.page}")
         canvas.restoreState()
 
     doc = SimpleDocTemplate(
-        buffer, pagesize=letter, topMargin=1.4 * cm, bottomMargin=1.8 * cm,
-        leftMargin=1.5 * cm, rightMargin=1.5 * cm, title=f"Liquidación {folio}",
+        buffer, pagesize=letter, topMargin=0.6 * cm, bottomMargin=0.8 * cm,
+        leftMargin=1.0 * cm, rightMargin=1.0 * cm, title=f"Liquidación {folio}",
     )
     doc.build(elements, onFirstPage=_footer, onLaterPages=_footer)
     return buffer.getvalue()

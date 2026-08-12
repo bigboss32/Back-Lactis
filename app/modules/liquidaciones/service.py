@@ -2330,11 +2330,13 @@ class LiquidacionService(BaseService[Liquidacion]):
                 f"El pago ({pesos(valor)}) supera el saldo pendiente ({pesos(pendiente)})"
             )
 
+        destinatario = payload.destinatario.strip() if getattr(payload, "destinatario", None) else None
         self.db.add(
             PagoLiquidacion(
                 liquidacion_id=liquidacion.id,
                 fecha=payload.fecha,
                 valor=valor,
+                destinatario=destinatario,
                 observaciones=payload.observaciones,
                 created_by=self.ctx.user_id,
             )
@@ -2748,6 +2750,15 @@ class LiquidacionService(BaseService[Liquidacion]):
             [a.fecha.strftime("%d/%m/%Y"), pesos(a.valor), a.observaciones or "—"]
             for a in anticipos
         ]
+        pagos_rows: list[list[Any]] = [
+            [
+                p.fecha.strftime("%d/%m/%Y"),
+                pesos(p.valor),
+                p.destinatario or tercero,
+                p.observaciones or "—",
+            ]
+            for p in liquidacion.pagos
+        ]
 
         periodo = liquidacion.periodo_texto
         pdf = build_liquidacion_pdf(
@@ -2768,6 +2779,7 @@ class LiquidacionService(BaseService[Liquidacion]):
             resumen_rows=resumen_rows,
             notas_resumen=self._notas_de_la_deuda(liquidacion),
             anticipos_rows=anticipos_rows,
+            pagos_rows=pagos_rows,
             observaciones=liquidacion.observaciones,
         )
         filename = f"liquidacion_{tercero}_{liquidacion.periodo_inicio.isoformat()}.pdf".replace(" ", "_")

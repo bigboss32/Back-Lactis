@@ -355,6 +355,7 @@ class PagoLiquidacion(AuditMixin, Base):
     )
     fecha: Mapped[date] = mapped_column(Date, nullable=False)
     valor: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    destinatario: Mapped[str | None] = mapped_column(String(150))
     observaciones: Mapped[str | None] = mapped_column(String(300))
 
     liquidacion: Mapped[Liquidacion] = relationship(back_populates="pagos")

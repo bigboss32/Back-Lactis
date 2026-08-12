@@ -173,20 +173,16 @@ class PagoLiquidacionRead(BaseSchema):
     id: uuid.UUID
     fecha: date
     valor: Decimal
-    observaciones: str | None
+    destinatario: str | None = None
+    observaciones: str | None = None
 
 
 class PagoLiquidacionCreate(BaseSchema):
-    """Un pago parcial contra una liquidación aprobada.
-
-    Mismos campos que el abono de reventa (fecha, valor, observaciones) para que
-    registrar un pago se sienta igual en todo el sistema. El tope real —que no
-    se pueda abonar más que el saldo— lo pone el servicio, que es el único que
-    sabe cuánto queda debiendo en ese instante.
-    """
+    """Un pago parcial contra una liquidación aprobada."""
 
     fecha: date
     valor: Decimal = plata(gt=0)
+    destinatario: str | None = Field(default=None, max_length=150)
     observaciones: str | None = None
 
 
