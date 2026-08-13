@@ -246,15 +246,15 @@ def build_liquidacion_pdf(
     """
     buffer = io.BytesIO()
     styles = getSampleStyleSheet()
-    st_company = ParagraphStyle("Company", parent=styles["Title"], fontSize=14, textColor=BRAND, spaceAfter=0, leading=16, alignment=0)
-    st_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=7.5, textColor=GREY, leading=9.5)
-    st_doctitle = ParagraphStyle("DocT", parent=styles["Normal"], fontSize=11, textColor=BRAND, fontName="Helvetica-Bold", alignment=TA_RIGHT, leading=13)
-    st_docmeta = ParagraphStyle("DocM", parent=styles["Normal"], fontSize=8, textColor=GREY, alignment=TA_RIGHT, leading=10.5)
-    st_head = ParagraphStyle("Sec", parent=styles["Heading3"], fontSize=9.5, textColor=BRAND, spaceBefore=1, spaceAfter=2)
-    st_lbl = ParagraphStyle("Lbl", parent=styles["Normal"], fontSize=7, textColor=GREY)
-    st_val = ParagraphStyle("Val", parent=styles["Normal"], fontSize=8.5, fontName="Helvetica-Bold")
-    st_obs = ParagraphStyle("Obs", parent=styles["Normal"], fontSize=8, leading=10)
-    st_sign = ParagraphStyle("Sign", parent=styles["Normal"], fontSize=8, alignment=TA_CENTER, textColor=GREY, leading=10)
+    st_company = ParagraphStyle("Company", parent=styles["Title"], fontSize=12, textColor=BRAND, spaceAfter=0, leading=14, alignment=0)
+    st_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=7, textColor=GREY, leading=8.5)
+    st_doctitle = ParagraphStyle("DocT", parent=styles["Normal"], fontSize=10, textColor=BRAND, fontName="Helvetica-Bold", alignment=TA_RIGHT, leading=11)
+    st_docmeta = ParagraphStyle("DocM", parent=styles["Normal"], fontSize=7, textColor=GREY, alignment=TA_RIGHT, leading=8.5)
+    st_head = ParagraphStyle("Sec", parent=styles["Heading3"], fontSize=8, textColor=BRAND, spaceBefore=1, spaceAfter=1)
+    st_lbl = ParagraphStyle("Lbl", parent=styles["Normal"], fontSize=6.5, textColor=GREY)
+    st_val = ParagraphStyle("Val", parent=styles["Normal"], fontSize=7.5, fontName="Helvetica-Bold")
+    st_obs = ParagraphStyle("Obs", parent=styles["Normal"], fontSize=7, leading=8.5)
+    st_sign = ParagraphStyle("Sign", parent=styles["Normal"], fontSize=7, alignment=TA_CENTER, textColor=GREY, leading=8)
 
     # --- Encabezado: logo + empresa + datos del comprobante
     company_block: list[Any] = [Paragraph(_texto(empresa_nombre), st_company)]
@@ -290,7 +290,7 @@ def build_liquidacion_pdf(
     )
     elements: list[Any] = [
         header,
-        HRFlowable(width="100%", thickness=1.0, color=BRAND, spaceBefore=3, spaceAfter=5),
+        HRFlowable(width="100%", thickness=0.8, color=BRAND, spaceBefore=2, spaceAfter=3),
     ]
 
     # --- Datos del tercero
@@ -303,23 +303,23 @@ def build_liquidacion_pdf(
             [Paragraph("Ruta / vereda", st_lbl), Paragraph(_texto(tercero_detalle), st_val),
              Paragraph("Comprobante", st_lbl), Paragraph(f"N.º {_texto(folio)}", st_val)]
         )
-    info = Table(info_rows, colWidths=[2.5 * cm, 7.3 * cm, 2.5 * cm, 7.2 * cm])
+    info = Table(info_rows, colWidths=[2.2 * cm, 7.8 * cm, 2.2 * cm, 7.3 * cm])
     info.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), BRAND_LIGHT),
                 ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D6E0EA")),
-                ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ]
         )
     )
-    elements += [info, Spacer(1, 5)]
+    elements += [info, Spacer(1, 3)]
 
     # --- Detalle diario
     elements.append(Paragraph("Detalle diario", st_head))
-    st_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=7.5, leading=8.5)
+    st_celda = ParagraphStyle("Celda", parent=styles["Normal"], fontSize=6.5, leading=7.5)
     envuelven = set(detalle_wrap_cols)
     det_data = [list(detalle_headers)] + [
         [
@@ -340,12 +340,12 @@ def build_liquidacion_pdf(
         ("BACKGROUND", (0, 0), (-1, 0), BRAND),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
+        ("FONTSIZE", (0, 0), (-1, -1), 6.5),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D6E0EA")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
         ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 0.8), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.8),
+        ("TOPPADDING", (0, 0), (-1, -1), 0.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 0.5),
     ]
     for columna in sorted(envuelven):
         det_style.append(("ALIGN", (columna, 0), (columna, -1), "LEFT"))
