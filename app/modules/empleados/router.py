@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.common.crud_router import build_crud_router
 from app.core.context import RequestContext
@@ -64,3 +64,17 @@ def eliminar_pago(
     ctx: RequestContext = Depends(require_permission("empleados", "eliminar")),
 ) -> None:
     PagoEmpleadoService(db, ctx).eliminar(entity_id)
+
+
+@pagos_router.get("/{entity_id}/pdf", summary="Descargar recibo de pago de nómina en PDF")
+def descargar_pdf_pago(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("empleados", "consultar")),
+) -> Response:
+    contenido, filename = PagoEmpleadoService(db, ctx).generar_pdf(entity_id)
+    return Response(
+        content=contenido,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

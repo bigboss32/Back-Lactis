@@ -1,3 +1,4 @@
+import uuid
 from decimal import Decimal
 from typing import Any
 
@@ -67,3 +68,61 @@ class PagoEmpleadoService(BaseService[PagoEmpleado]):
         if aplicados:
             self.db.flush()
         return pago
+
+    def generar_pdf(self, entity_id: uuid.UUID) -> tuple[bytes, str]:
+        import uuid
+        from datetime import datetime
+        from app.modules.empresas.repository import EmpresaRepository
+        from app.modules.liquidaciones.models import Anticipo
+        from app.utils.export import build_recibo_empleado_pdf, pesos
+        from sqlalchemy import select
+
+        pago = self.repo.get_or_fail(entity_id)
+        empresa = EmpresaRepository(self.db).get(self.ctx.empresa_id)
+        nombre_empresa = empresa.nombre if empresa else "Quesera"
+        nit = empresa.nit if empresa else None
+        ubicacion = (
+            ", ".join(p for p in [empresa.ciudad, empresa.departamento] if p) or None
+            if empresa
+            else None
+        )
+
+        empleado = pago.empleado
+        empleado_nombre = f"{empleado.nombre} {empleado.apellido}".strip() if empleado else "Empleado"
+        empleado_documento = empleado.documento if empleado else None
+        empleado_cargo = empleado.cargo if empleado else None
+
+        bruto = Decimal(pago.dias_trabajados) * Decimal(pago.valor_dia)
+
+        # Anticipos descontados
+        stmt = select(Anticipo).where(Anticipo.pago_empleado_id == pago.id, Anticipo.deleted_at.is_(None))
+        anticipos_pago = list(self.db.scalars(stmt).all())
+        anticipos_rows = [
+            [a.fecha.strftime("%d/%m/%Y"), pesos(a.valor), a.observaciones or "—"]
+            for a in anticipos_pago
+        ]
+
+        folio = str(pago.id)[:8].upper()
+        emitido = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+        pdf = build_recibo_empleado_pdf(
+            empresa_nombre=nombre_empresa,
+            empresa_nit=nit,
+            empresa_ubicacion=ubicacion,
+            folio=folio,
+            emitido=emitido,
+            empleado_nombre=empleado_nombre,
+            empleado_documento=empleado_documento,
+            empleado_cargo=empleado_cargo,
+            fecha=pago.fecha.strftime("%d/%m/%Y"),
+            periodo=pago.periodo,
+            dias_trabajados=str(pago.dias_trabajados),
+            valor_dia=pesos(pago.valor_dia),
+            valor_bruto=pesos(bruto),
+            anticipos_monto=pesos(pago.anticipos),
+            total_pagado=pesos(pago.total),
+            anticipos_rows=anticipos_rows,
+            observaciones=pago.observaciones,
+        )
+        filename = f"recibo_nomina_{empleado_nombre}_{pago.fecha.isoformat()}.pdf".replace(" ", "_")
+        return pdf, filename

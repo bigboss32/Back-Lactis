@@ -128,3 +128,26 @@ def test_anticipo_empleado_se_descuenta_en_la_nomina(client, base_datos):
     ).json()
     assert float(pago2["anticipos"]) == 0
     assert float(pago2["total"]) == 250000
+
+
+def test_descargar_pdf_recibo_nomina(client, base_datos):
+    """Verifica que se pueda descargar el recibo de nómina en PDF en 1 sola hoja."""
+    from pypdf import PdfReader
+    import io
+
+    headers = auth_headers(client, "admin.a")
+    emp = _crear_empleado(client, headers, valor_dia="50000")
+    pago = client.post(
+        "/api/v1/nomina",
+        json={"empleado_id": emp["id"], "fecha": "2026-07-15", "dias_trabajados": "5", "periodo": "1ra quincena Julio"},
+        headers=headers,
+    ).json()
+
+    res = client.get(f"/api/v1/nomina/{pago['id']}/pdf", headers=headers)
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/pdf"
+    assert "attachment; filename=" in res.headers["content-disposition"]
+
+    reader = PdfReader(io.BytesIO(res.content))
+    assert len(reader.pages) == 1
+

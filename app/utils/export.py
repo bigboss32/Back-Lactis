@@ -493,6 +493,227 @@ def build_liquidacion_pdf(
     return buffer.getvalue()
 
 
+def build_recibo_empleado_pdf(
+    *,
+    empresa_nombre: str,
+    empresa_nit: str | None,
+    empresa_ubicacion: str | None,
+    folio: str,
+    emitido: str,
+    empleado_nombre: str,
+    empleado_documento: str | None,
+    empleado_cargo: str | None,
+    fecha: str,
+    periodo: str | None,
+    dias_trabajados: str,
+    valor_dia: str,
+    valor_bruto: str,
+    anticipos_monto: str,
+    total_pagado: str,
+    anticipos_rows: Sequence[Sequence[Any]] = (),
+    observaciones: str | None = None,
+) -> bytes:
+    """Comprobante / Recibo de pago de nómina para un empleado en 1 sola hoja."""
+    buffer = io.BytesIO()
+    styles = getSampleStyleSheet()
+    st_company = ParagraphStyle("Company", parent=styles["Title"], fontSize=12, textColor=BRAND, spaceAfter=0, leading=14, alignment=0)
+    st_sub = ParagraphStyle("Sub", parent=styles["Normal"], fontSize=7, textColor=GREY, leading=8.5)
+    st_doctitle = ParagraphStyle("DocT", parent=styles["Normal"], fontSize=10, textColor=BRAND, fontName="Helvetica-Bold", alignment=TA_RIGHT, leading=11)
+    st_docmeta = ParagraphStyle("DocM", parent=styles["Normal"], fontSize=7.5, textColor=GREY, alignment=TA_RIGHT, leading=9.5)
+    st_head = ParagraphStyle("Sec", parent=styles["Heading3"], fontSize=8.5, textColor=BRAND, spaceBefore=2, spaceAfter=2)
+    st_lbl = ParagraphStyle("Lbl", parent=styles["Normal"], fontSize=6.5, textColor=GREY)
+    st_val = ParagraphStyle("Val", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Bold")
+    st_obs = ParagraphStyle("Obs", parent=styles["Normal"], fontSize=7.5, leading=9.5)
+    st_sign = ParagraphStyle("Sign", parent=styles["Normal"], fontSize=7.5, alignment=TA_CENTER, textColor=GREY, leading=9)
+
+    # --- Header
+    company_block: list[Any] = [Paragraph(_texto(empresa_nombre), st_company)]
+    sub = " · ".join(
+        p
+        for p in [
+            f"NIT {_texto(empresa_nit)}" if empresa_nit else None,
+            _texto(empresa_ubicacion) if empresa_ubicacion else None,
+        ]
+        if p
+    )
+    if sub:
+        company_block.append(Paragraph(sub, st_sub))
+    doc_block = [
+        Paragraph("RECIBO DE NÓMINA", st_doctitle),
+        Paragraph(f"N.º {_texto(folio)}", st_docmeta),
+        Paragraph("Estado: <b>PAGADO</b>", st_docmeta),
+        Paragraph(f"Emitido: {_texto(emitido)}", st_docmeta),
+    ]
+    logo_cell: Any = (
+        RLImage(str(LOGO_PATH), width=1.2 * cm, height=1.2 * cm) if LOGO_PATH.exists() else ""
+    )
+    header = Table([[logo_cell, company_block, doc_block]], colWidths=[1.5 * cm, 10.5 * cm, 7.5 * cm])
+    header.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (0, 0), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    elements: list[Any] = [
+        header,
+        HRFlowable(width="100%", thickness=1.0, color=BRAND, spaceBefore=3, spaceAfter=5),
+    ]
+
+    # --- Info Empleado
+    info_rows = [
+        [
+            Paragraph("Empleado", st_lbl), Paragraph(_texto(empleado_nombre), st_val),
+            Paragraph("Fecha pago", st_lbl), Paragraph(_texto(fecha), st_val),
+        ],
+        [
+            Paragraph("Documento C.C.", st_lbl), Paragraph(_texto(empleado_documento or "—"), st_val),
+            Paragraph("Período / Nota", st_lbl), Paragraph(_texto(periodo or "—"), st_val),
+        ],
+    ]
+    if empleado_cargo:
+        info_rows.append([
+            Paragraph("Cargo", st_lbl), Paragraph(_texto(empleado_cargo), st_val),
+            Paragraph("Comprobante", st_lbl), Paragraph(f"N.º {_texto(folio)}", st_val),
+        ])
+    info = Table(info_rows, colWidths=[2.5 * cm, 7.3 * cm, 2.5 * cm, 7.2 * cm])
+    info.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), BRAND_LIGHT),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D6E0EA")),
+                ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+        )
+    )
+    elements += [info, Spacer(1, 6)]
+
+    # --- Resumen del Pago
+    elements.append(Paragraph("Liquidación de días trabajados", st_head))
+    resumen_rows = [
+        ("Días trabajados", str(dias_trabajados), False),
+        ("Valor día (Jornal)", str(valor_dia), False),
+        ("Subtotal devengado", str(valor_bruto), False),
+        ("Descuento anticipos", f"- {anticipos_monto}", False),
+        ("TOTAL PAGADO", str(total_pagado), True),
+    ]
+    res = Table(
+        [[c, v] for (c, v, _) in resumen_rows], colWidths=[11.5 * cm, 8.0 * cm], hAlign="RIGHT"
+    )
+    res_style = [
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#E6E6E6")),
+        ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+    ]
+    for i, (_, _, resaltado) in enumerate(resumen_rows):
+        if resaltado:
+            res_style += [
+                ("BACKGROUND", (0, i), (-1, i), BRAND_LIGHT),
+                ("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"),
+                ("TEXTCOLOR", (0, i), (-1, i), BRAND),
+                ("FONTSIZE", (0, i), (-1, i), 9.5),
+            ]
+    res.setStyle(TableStyle(res_style))
+    elements += [res, Spacer(1, 6)]
+
+    # --- Anticipos aplicados (si los hay)
+    if anticipos_rows:
+        elements.append(Paragraph("Anticipos descontados", st_head))
+        st_cell_tb = ParagraphStyle("CellTb", parent=styles["Normal"], fontSize=7, leading=8.5)
+        ant_data = [["Fecha", "Valor", "Observaciones"]] + [
+            [
+                str(_cell_value(row[0])) if len(row) > 0 and row[0] is not None else "",
+                str(_cell_value(row[1])) if len(row) > 1 and row[1] is not None else "",
+                Paragraph(_texto(str(row[2])).replace("\n", " · "), st_cell_tb) if len(row) > 2 and row[2] else "",
+            ]
+            for row in anticipos_rows
+        ]
+        ant = Table(ant_data, colWidths=[2.5 * cm, 3.0 * cm, 14.0 * cm], repeatRows=1, hAlign="LEFT")
+        ant.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), BRAND),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
+                    ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                ]
+            )
+        )
+        elements += [ant, Spacer(1, 6)]
+
+    # --- Observaciones
+    if observaciones:
+        elements.append(Paragraph("Observaciones", st_head))
+        box = Table([[Paragraph(_texto(observaciones), st_obs)]], colWidths=[19.5 * cm])
+        box.setStyle(
+            TableStyle(
+                [
+                    ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D6E0EA")),
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        elements += [box, Spacer(1, 6)]
+
+    # --- Firmas
+    elements.append(Spacer(1, 10))
+    firma = Table(
+        [
+            ["", ""],
+            [
+                Paragraph(f"Entregué conforme<br/>{_texto(empresa_nombre)}", st_sign),
+                Paragraph(f"Recibí conforme<br/>{_texto(empleado_nombre)}", st_sign),
+            ],
+        ],
+        colWidths=[9.7 * cm, 9.7 * cm],
+        rowHeights=[0.4 * cm, None],
+    )
+    firma.setStyle(
+        TableStyle(
+            [
+                ("LINEABOVE", (0, 1), (0, 1), 0.5, colors.black),
+                ("LINEABOVE", (1, 1), (1, 1), 0.5, colors.black),
+                ("TOPPADDING", (0, 1), (-1, 1), 2),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 20), ("RIGHTPADDING", (0, 0), (-1, -1), 20),
+            ]
+        )
+    )
+    elements.append(firma)
+
+    def _footer(canvas: Any, doc_: Any) -> None:
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#D6E0EA"))
+        canvas.setLineWidth(0.5)
+        canvas.line(1.0 * cm, 0.9 * cm, letter[0] - 1.0 * cm, 0.9 * cm)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(GREY)
+        canvas.drawString(1.0 * cm, 0.6 * cm, f"Generado por Lactis · {emitido}")
+        canvas.drawRightString(letter[0] - 1.0 * cm, 0.6 * cm, f"Página {doc_.page}")
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        buffer, pagesize=letter, topMargin=0.6 * cm, bottomMargin=0.8 * cm,
+        leftMargin=1.0 * cm, rightMargin=1.0 * cm, title=f"Recibo_Nomina_{folio}",
+    )
+    doc.build(elements, onFirstPage=_footer, onLaterPages=_footer)
+    return buffer.getvalue()
+
+
 def build_estado_cuenta_pdf(
     *,
     empresa_nombre: str,
