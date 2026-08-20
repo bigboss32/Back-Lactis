@@ -1,12 +1,25 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, ForeignKey, Index, Numeric, String
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    UniqueConstraint,
+    Uuid,
+    false,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.common.models import AuditMixin, TenantMixin
 from app.core.database import Base
+from app.modules.transportadores.models import MODO_DIA_FIJO, MODO_POR_LITRO
 
 TIPO_PROVEEDOR = "proveedor"
 TIPO_TRANSPORTADOR = "transportador"
@@ -149,6 +162,22 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
         back_populates="liquidacion", lazy="selectin", cascade="all, delete-orphan",
         order_by="PagoLiquidacion.fecha",
     )
+    # LA MEMORIA DEL PAPEL: cómo cobró este comprobante CADA RUTA. Ver
+    # `LiquidacionRuta`, que es donde está escrito el porqué con las cifras.
+    #
+    # lazy="select" (carga diferida) y NO "selectin", que es lo que usan los
+    # renglones y los pagos. La razón es que esto no lo lee ninguna pantalla: lo
+    # lee UN camino, el que rearma el comprobante del flete. Con selectin, cada
+    # lectura de CADA liquidación —incluidas las de proveedor, que nunca tienen
+    # rutas— dispararía una consulta más en la lista, el detalle y el tablero, para
+    # traer filas que nadie va a mirar. Y como no es "joined", tampoco le agrega un
+    # LEFT JOIN a la consulta del candado (`SELECT ... FOR UPDATE`), que es lo que
+    # Postgres rechaza con un 0A000; ni se carga sola mientras el candado está
+    # puesto (ver `_bloquear` en el servicio).
+    rutas_cobradas: Mapped[list["LiquidacionRuta"]] = relationship(
+        back_populates="liquidacion", lazy="select", cascade="all, delete-orphan",
+        order_by="LiquidacionRuta.ruta_id",
+    )
 
     @property
     def neto_a_pagar(self) -> Decimal:
@@ -262,6 +291,28 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
         )
 
     @property
+    def tiene_dias_fijos(self) -> bool:
+        """Si este comprobante trae algún día cobrado POR DÍA COMPLETO (tarifa fija).
+
+        Existe para que el `precio_promedio` no mienta. Ese promedio es informativo
+        —"a cómo le salió el litro"— y con un día fijo mezclado no reproduce nada: en un
+        comprobante de $150.000 por el día y $53.273,68 por otro día a $242,76 el litro,
+        dividir el total entre los litros da una cifra que no es la tarifa de ningún
+        renglón y que no se puede verificar con calculadora. Cuando esto es True el
+        promedio se guarda en CERO y la pantalla, viendo esta bandera, escribe "—" en vez
+        de "$0,00 el litro" (que sería la otra forma de mentir).
+
+        Se DEDUCE de los renglones y no se guarda en una columna: dos fuentes para el
+        mismo hecho terminan contradiciéndose, y los renglones son la verdad de este
+        documento.
+        """
+        return any(
+            (detalle.modo_transporte or MODO_POR_LITRO) == MODO_DIA_FIJO
+            for detalle in self.detalles
+            if detalle.deleted_at is None
+        )
+
+    @property
     def deuda_ya_cobrada(self) -> bool:
         """Si lo que esta liquidación dejó debiendo YA se le cobró en otra.
 
@@ -286,11 +337,13 @@ class LiquidacionDetalle(AuditMixin, Base):
     litros × precio no sería el valor. El conductor suma la columna a mano.
 
     La invariante que este renglón tiene que cumplir SIEMPRE:
-      · litros × precio_litro == valor, exacto al centavo;
+      · si se cobró POR LITRO: litros × precio_litro == valor, exacto al centavo;
+        si se cobró POR DÍA FIJO: valor == el fijo de ese día en esa ruta, y los
+        litros van AL LADO como información (multiplicarlos no reproduce nada);
       · la suma de los `valor` de los renglones == liquidacion.valor_transporte;
       · y ese total == la suma de los `recepciones_leche.valor_transporte` que
         entraron (las fotos que se guardaron el día que se recibió la leche).
-    Quien la hace cumplir es `_renglones_de_transporte` en el servicio.
+    Quien la hace cumplir es `_reparto_del_flete` en el servicio.
     """
 
     __tablename__ = "liquidacion_detalles"
@@ -314,6 +367,51 @@ class LiquidacionDetalle(AuditMixin, Base):
     litros: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     precio_litro: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
     valor: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
+    # CÓMO SE COBRÓ ESTE RENGLÓN: 'litro' o 'dia_fijo'. Se guarda en el renglón y no
+    # se deduce, y hay tres razones para eso:
+    #
+    #   · un renglón fijo NO se puede reconocer mirando las cifras. "litros × precio no
+    #     da el valor" también le pasa a una fila corregida a mano en la base, y las dos
+    #     hay que tratarlas al revés: la fija se imprime tal cual, la corrupta se parte
+    #     (ver `_renglones_de_ultimo_recurso`). Adivinar es cómo se imprime un
+    #     comprobante que no cuadra;
+    #   · el PAPEL tiene que decirlo. En un renglón fijo la columna Precio/L no lleva
+    #     una tarifa —no existe— sino la palabra "Día completo", y eso es lo que le
+    #     permite al conductor verificar la línea: "el día vale $150.000". Sin este
+    #     campo, la única forma de escribirlo sería inventar una tarifa por litro;
+    #   · UN COMPROBANTE VIEJO SIGUE SIGNIFICANDO LO MISMO PARA SIEMPRE. Si mañana el
+    #     dueño le pone día fijo a esa ruta, los papeles ya emitidos guardan su 'litro'
+    #     y se siguen leyendo (e imprimiendo) como el día que se firmaron.
+    #
+    # Por omisión 'litro': todos los renglones que ya existen se cobraron por litro,
+    # así que la migración no le cambia el sentido a ninguno.
+    modo_transporte: Mapped[str] = mapped_column(
+        String(10), nullable=False, default=MODO_POR_LITRO, server_default=MODO_POR_LITRO
+    )
+    # POR QUÉ UN RENGLÓN DE DÍA FIJO VALE $0,00. Hay DOS razones y no son la misma:
+    #
+    #   · el día completo YA SE COBRÓ en OTRO comprobante (leche anotada tarde de un día
+    #     que ya se liquidó y se pagó). Esta bandera queda en True y el papel escribe
+    #     «Ya cobrado»: es un hecho sobre otro documento;
+    #   · la TARIFA FIJA de esa ruta es de $0,00 —el dueño decidió no cobrar ese viaje—.
+    #     La bandera queda en False y el papel escribe «Día completo», que es lo que es.
+    #
+    # SE GUARDA Y NO SE DEDUCE, por lo mismo que el modo, y con una razón más: mirando la
+    # fila no hay forma de distinguirlas (las dos son un renglón fijo en cero), y
+    # preguntárselo a la base al imprimir haría que EL PAPEL CAMBIARA SOLO —si mañana se
+    # anula el otro comprobante, el mismo renglón dejaría de decir «Ya cobrado» sin que
+    # nadie hubiera tocado este documento—. Guardado, dice para siempre lo que era cierto
+    # el día que se emitió.
+    #
+    # Y decirlo mal no es un detalle de redacción: «Ya cobrado» le afirma al conductor, en
+    # el papel que se le entrega, que ese día ya se le pagó. Sobre un fijo de $0,00 que
+    # nunca se cobró, eso es falso.
+    #
+    # Por omisión False: un renglón por litro nunca la usa, y ninguno de los que ya
+    # existen se emitió por un día ya cobrado.
+    dia_fijo_ya_cobrado: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
     liquidacion: Mapped[Liquidacion] = relationship(back_populates="detalles")
     # selectin y NUNCA joined, por lo mismo que se explica en el encabezado del
@@ -333,6 +431,168 @@ class LiquidacionDetalle(AuditMixin, Base):
         distintas, que es exactamente lo que hace desconfiar de un recibo.
         """
         return self.ruta.nombre if self.ruta is not None else None
+
+    @property
+    def es_dia_fijo(self) -> bool:
+        """Si este renglón se cobró por DÍA COMPLETO y no por litro.
+
+        La pregunta la hacen tres sitios que tienen que contestarla igual: el PDF (para
+        escribir "Día completo" en vez de una tarifa), la pantalla (por
+        `LiquidacionDetalleRead.modo_transporte`) y el propio recálculo. El `or` cubre la
+        fila vieja cuya columna todavía viene en nulo si alguien la insertó saltándose el
+        server_default.
+        """
+        return (self.modo_transporte or MODO_POR_LITRO) == MODO_DIA_FIJO
+
+
+class LiquidacionRuta(Base):
+    """CÓMO COBRÓ ESTE COMPROBANTE UNA RUTA: el modo, y la cifra o la tarifa.
+
+    ES LA MEMORIA DEL PAPEL, y existe por una sola razón: que ningún camino pueda
+    BORRARLE a un comprobante emitido la forma en que se emitió.
+
+    EL DEFECTO QUE CIERRA, con las cifras medidas. Un comprobante de flete sabe cómo
+    cobró cada ruta —por litro a $242,76, o el día completo a $150.000— y eso se
+    DEDUCÍA de los renglones que le quedaran (`_ComoCobroLaRuta` en el servicio).
+    Mientras al papel le quedara un renglón de esa ruta, la deducción acertaba. Pero
+    cuando el comprobante se quedaba SIN NINGÚN RENGLÓN de esa ruta, la deducción se
+    quedaba sin de dónde deducir y el siguiente recuadre re-precificaba con la tarifa
+    de HOY. Dos caminos lo lograban, y NINGUNO de los dos oprime Recalcular:
+
+      · apagar el día y volver a prenderlo;
+      · corregirle la ruta al día y devolvérsela.
+
+    El salto medido, sobre un día de 82,00 L en la ruta "A fábrica": el comprobante
+    emitido por DÍA COMPLETO en $150.000,00 amanecía en $19.906,32 (82 L × $242,76)
+    —o al revés, el emitido POR LITRO en $19.906,32 amanecía en $150.000,00—. Son
+    $130.093,68 que se le pagan de menos o de más al conductor, y el PDF cambiaba de
+    «Día completo $150.000» a «82 L × $242,76 = $19.906,32» sin que nadie hubiera
+    pedido re-precificar nada. El comprobante se caía a borrador, lo cual MITIGA pero
+    NO CIERRA: se vuelve a aprobar y se paga la cifra nueva.
+
+    LA CAUSA, que es la de siempre en este proyecto: SE DEDUCÍA UN HECHO DE LO QUE
+    SOBREVIVE en vez de GUARDARLO CUANDO SE SABE. El comprobante sabe cómo cobró cada
+    ruta en el momento en que se emite; escrito, ninguna puerta se lo puede borrar.
+
+    QUÉ GUARDA CADA FILA, y por qué son dos columnas de plata y no una:
+
+      · `modo_transporte` — 'litro' o 'dia_fijo'. Sin él, las otras dos cifras no se
+        pueden leer: $150.000 leídos por litro son millones en una quincena;
+      · `precio_litro` — LA TARIFA con que se emitió, y solo aplica POR LITRO. Ahí lo
+        que se conserva es la tarifa, no la cifra: si mañana se le corrige un litro a
+        un proveedor, el renglón TIENE que moverse (es lo que se le paga al conductor
+        por litro recogido), pero a la tarifa con que se firmó el papel;
+      · `valor_dia_fijo` — LA CIFRA con que se emitió, y solo aplica en DÍA FIJO. Ahí
+        se conserva la cifra: el viaje vale lo que costó y corregirle los litros a un
+        proveedor no lo cambia.
+
+    Las dos son ANULABLES porque cada modo usa una sola, y porque hay papeles de los
+    que no se puede afirmar ninguna: una ruta cuyos renglones quedaron a dos tarifas
+    distintas (líneas partidas de un flete ya pagado) no tiene "la tarifa con que se
+    emitió", y un nulo ahí dice exactamente eso —no hay nada que heredar— en vez de
+    inventar un promedio.
+
+    `ruta_id` ES ANULABLE, y esa fila nula es la de la TARIFA GENERAL: la recepción
+    que quedó sin ruta cobra la tarifa general del transportador, y su día también se
+    puede apagar y prender. Sin la fila nula, el día sin ruta se quedaba con la puerta
+    abierta.
+
+    CUÁNDO SE ESCRIBE, que es toda la regla y son tres frases:
+
+      · SOLO SE ESCRIBE CUANDO EL PAPEL SE EMITE O SE RECALCULA A PROPÓSITO —generar y
+        Recalcular, que es un botón que el dueño oprime—, y ahí se REEMPLAZA COMPLETA.
+        Después de esos dos caminos el comprobante cobra lo de hoy y su memoria dice lo
+        de hoy;
+      · EL RECUADRE AUTOMÁTICO (la cascada que se dispara al corregir una recepción o
+        un anticipo) NO LA TOCA. NUNCA. Ni una ruta, ni una fila, ni para
+        "actualizarla" desde un renglón. Un papel emitido recuerda lo que decía cuando
+        se emitió, y punto;
+      · AL ESCRIBIRLA se escriben SOLO LAS RUTAS QUE ESE PAPEL DE VERDAD COBRA: una
+        ruta de paso no deja fila, y al reemplazar completa desaparecen las filas de
+        rutas que ya no cobra.
+
+    POR QUÉ ASÍ Y NO "EL RECUADRE LA REFRESCA SIN BORRAR NADA", que fue el primer
+    intento y se cayó en dos sitios, los dos por la misma raíz —la memoria se seguía
+    RE-ESCRIBIENDO desde los renglones que sobreviven, cuando tiene que ser inmutable—:
+
+      · EL RENGLÓN «YA COBRADO» EN $0,00 LE BORRABA EL FIJO. El 16/07 es un día fijo ya
+        pagado en otro comprobante, así que la leche anotada tarde de ese mismo día
+        entra en $0,00 (lo correcto); el 17/07 vale $150.000. El papel se emite en
+        $150.000,00 con memoria ('dia_fijo', $150.000,00). Se apaga el 17/07: al papel
+        le queda SOLO el renglón de $0,00 —que no dice cuánto cuesta el viaje— y el
+        recuadre "refrescaba" la memoria desde él, dejándola en ('dia_fijo', None). Al
+        prender otra vez mandaba la tarifa de hoy: por litro un fijo vale CERO y el
+        papel quedaba en $0,00. SALTO DE −$150.000,00 (y sin cruzar el modo también, con
+        el fijo renegociado a $200.000: +$50.000). 13 de 13 secuencias reversibles daban
+        el mismo salto; el PDF pasaba de «Día completo $150.000» a «Día completo $0» y
+        «SALDO A PAGAR $0», el papel aprobado se caía a borrador, se volvía a aprobar y
+        se PAGABA en $0,00 con 233,75 L de leche viva. Y el desglose seguía cuadrando,
+        así que ninguna red de cuadre lo veía;
+      · LA FILA FANTASMA DE LA RUTA DE PASO. Un papel que cobra solo «A fábrica». Se le
+        manda un día a Nápoles un momento y se le devuelve: la fila de memoria de
+        Nápoles QUEDABA escrita aunque el papel ya no cobrara ni un peso de Nápoles.
+        Después el dueño renegociaba Nápoles a día fijo $150.000 y el día que volvía
+        cobraba $19.906,32 (la fantasma: 82,00 L × $242,76) en vez de $150.000,00,
+        −$130.093,68. Al revés, +$130.093,68.
+
+    Con las tres frases de arriba ninguno de los dos puede pasar: la memoria no se
+    re-escribe desde un renglón de $0,00 —el recuadre no la escribe—, y no queda fila de
+    una ruta que el papel no cobra.
+
+    NO LLEVA `empresa_id` NI SOFT DELETE, las dos cosas a propósito y por lo mismo que
+    `TransportadorRuta`:
+
+    · el aislamiento por empresa lo da la LIQUIDACIÓN, que sí es multi-tenant y es el
+      único camino por el que se llega a estas filas (se leen y se escriben desde
+      `liquidacion.rutas_cobradas`). Repetir `empresa_id` acá sería un dato más que se
+      puede desincronizar del padre;
+    · el soft delete pelearía con el único de (liquidacion_id, ruta_id): al volver a
+      cobrar una ruta que se había dejado de cobrar, la fila borrada en suave seguiría
+      ocupando la pareja y el índice reventaría. La lista se maneja con
+      delete-orphan, o sea borrado de verdad, y el rastro queda en la auditoría de la
+      liquidación.
+
+    OJO CON EL ÚNICO Y EL NULO: Postgres deja repetir filas cuyo `ruta_id` es NULL, así
+    que el único NO protege la fila de la tarifa general. Quien la protege es el código
+    que las escribe (`_guardar_como_cobro_cada_ruta` en el servicio), que trae la
+    colección completa y la indexa por `ruta_id`: una ruta que ya tiene fila se
+    ACTUALIZA, nunca se agrega de nuevo. El único se queda igual porque sí protege a
+    todas las demás, que son la enorme mayoría.
+
+    NO SALE EN NINGUNA PANTALLA NI EN EL PDF, y tampoco hace falta: lo que el dueño y
+    el conductor leen son los RENGLONES, que ya dicen el modo y la tarifa de cada día.
+    Esto es la nota que el comprobante se guarda para poder rehacer un día que vuelve.
+    """
+
+    __tablename__ = "liquidacion_rutas"
+    __table_args__ = (
+        # Una ruta no puede aparecer dos veces en el mismo comprobante: si apareciera
+        # con dos modos, no habría manera de saber cómo se cobró. Ver el párrafo del
+        # nulo arriba.
+        UniqueConstraint("liquidacion_id", "ruta_id", name="uq_liquidacion_ruta"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    liquidacion_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("liquidaciones.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ruta_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("rutas.id"))
+    modo_transporte: Mapped[str] = mapped_column(
+        String(10), nullable=False, default=MODO_POR_LITRO, server_default=MODO_POR_LITRO
+    )
+    # Numeric(12, 2) igual que las tarifas de las que salen: el dueño tiene una ruta a
+    # $242,76 el litro y los centavos no se pueden perder, y le caben de sobra los
+    # $150.000 de un día fijo.
+    precio_litro: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    valor_dia_fijo: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    liquidacion: Mapped[Liquidacion] = relationship(back_populates="rutas_cobradas")
 
 
 class PagoLiquidacion(AuditMixin, Base):

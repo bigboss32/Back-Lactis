@@ -8,6 +8,27 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.common.models import AuditMixin, TenantMixin
 from app.core.database import Base
 
+# ---------------------------------------------------------------------------
+# LOS DOS MODOS EN QUE SE COBRA UN FLETE
+# ---------------------------------------------------------------------------
+# Lo pidió el dueño así: "en el transporte hay un nuevo requerimiento: que sea por
+# litro o que sea por día fijo, es decir, el transporte de leche a fábrica vale 150k
+# independientemente de los litros".
+#
+#   · 'litro'     → el día vale litros × tarifa. Es como funcionó siempre y es el
+#                   valor por omisión, así que TODO lo que ya existe sigue
+#                   significando exactamente lo mismo.
+#   · 'dia_fijo'  → el día vale la tarifa, y punto: no se multiplica por los litros
+#                   ni por cuántos proveedores se recogieron ese día en esa ruta.
+#
+# Los nombres viven acá, al lado de las columnas que los guardan, y NO en tarifas.py:
+# `tarifas.py` importa este módulo (necesita el modelo `Transportador`), así que
+# ponerlos allá armaría un ciclo. `tarifas.py` los reexporta para que quien haga la
+# cuenta del flete los tenga a mano donde está la cuenta.
+MODO_POR_LITRO = "litro"
+MODO_DIA_FIJO = "dia_fijo"
+MODOS_DE_TRANSPORTE = (MODO_POR_LITRO, MODO_DIA_FIJO)
+
 
 class Transportador(TenantMixin, AuditMixin, Base):
     __tablename__ = "transportadores"
@@ -29,9 +50,22 @@ class Transportador(TenantMixin, AuditMixin, Base):
     # No es duplicar la verdad: en esos dos casos es el único valor posible, y sin
     # ella el flete quedaría en cero callado —el transportador trabajando gratis
     # sin que nadie se dé cuenta hasta la liquidación—. La cuenta de cuál de las
-    # dos manda está en UN SOLO SITIO, `tarifas.tarifa_por_litro`, para que
+    # dos manda está en UN SOLO SITIO, `tarifas.tarifa_de_transporte`, para que
     # recepción y liquidaciones no se puedan desincronizar.
     valor_transporte: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
+
+    # CÓMO se cobra esa cifra general: por litro o por día fijo. Va PEGADA a la
+    # cifra —en la misma fila— y no en una tabla de configuración aparte, porque el
+    # valor no se puede leer sin el modo: $150.000 leídos como tarifa por litro son
+    # una quincena de millones, y $242,76 leídos como día fijo son un día de trabajo
+    # por menos de trescientos pesos. Ver `tarifas.Tarifa`, que es la que obliga a
+    # cargar las dos cosas juntas.
+    #
+    # Por omisión 'litro': es lo que significaba esta columna desde que existe, así
+    # que la migración no le cambia el sentido a ninguna fila vieja.
+    modo_transporte: Mapped[str] = mapped_column(
+        String(10), nullable=False, default=MODO_POR_LITRO, server_default=MODO_POR_LITRO
+    )
 
     # lazy="selectin" y NUNCA "joined": en este proyecto un lazy="joined" sobre
     # una FK anulable ya rompió un `SELECT ... FOR UPDATE` con un 0A000 de
@@ -50,12 +84,17 @@ class Transportador(TenantMixin, AuditMixin, Base):
 
 
 class TransportadorRuta(Base):
-    """La TARIFA POR LITRO que un transportador cobra EN UNA RUTA.
+    """LA TARIFA que un transportador cobra EN UNA RUTA, y cómo la cobra.
 
     Tabla puente con dato encima, no un `secondary` pelado: lo que se guarda acá
-    no es "este señor hace esta ruta" sino cuánto cobra por litro haciéndola, y
-    eso es plata. Por eso es un modelo propio (el `rol_permisos` de usuarios no
-    sirve de molde: esa sí es una tabla de dos columnas y nada más).
+    no es "este señor hace esta ruta" sino cuánto cobra haciéndola —por litro o por
+    día completo—, y eso es plata. Por eso es un modelo propio (el `rol_permisos` de
+    usuarios no sirve de molde: esa sí es una tabla de dos columnas y nada más).
+
+    EL MODO VA POR RUTA y no solo en el transportador, y eso es justo lo que pidió el
+    dueño: el mismo Alex cobra Nápoles a $242,76 el litro y "a fábrica" a $150.000 el
+    día. Si el modo viviera solo arriba, tendría que escoger uno de los dos para
+    todas sus rutas.
 
     NO lleva `empresa_id` ni soft delete, y las dos cosas son a propósito:
 
@@ -82,9 +121,15 @@ class TransportadorRuta(Base):
     )
     ruta_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("rutas.id"), nullable=False)
     # Numeric(12, 2) igual que la tarifa general: el dueño tiene un transportador
-    # a $242,76 por litro y los centavos no se pueden perder.
+    # a $242,76 por litro y los centavos no se pueden perder. Y le caben de sobra los
+    # $150.000 de un día fijo (hasta $9.999.999.999,99).
     valor_transporte: Mapped[Decimal] = mapped_column(
         Numeric(12, 2), nullable=False, default=Decimal("0"), server_default="0"
+    )
+    # Si esa cifra es POR LITRO o POR DÍA COMPLETO. Ver el bloque de arriba y
+    # `tarifas.tarifa_de_transporte`, que es quien decide cuál manda.
+    modo_transporte: Mapped[str] = mapped_column(
+        String(10), nullable=False, default=MODO_POR_LITRO, server_default=MODO_POR_LITRO
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

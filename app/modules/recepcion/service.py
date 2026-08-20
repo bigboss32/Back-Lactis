@@ -30,8 +30,14 @@ from app.modules.recepcion.schemas import (
     ResumenPeriodo,
 )
 from app.modules.rutas.repository import RutaRepository
+from app.modules.transportadores.models import MODO_POR_LITRO, Transportador
 from app.modules.transportadores.repository import TransportadorRepository
-from app.modules.transportadores.tarifas import tarifa_por_litro
+from app.modules.transportadores.tarifas import (
+    Tarifa,
+    reparto_entre_las_fotos,
+    tarifa_de_transporte,
+    valor_del_grupo,
+)
 
 CERO = Decimal("0")
 CENTAVOS = Decimal("0.01")
@@ -128,10 +134,19 @@ _CAMPOS_DEL_FLETE = frozenset(
     }
 )
 
+# Los tres campos que MUEVEN el día de un grupo de flete a otro. No es lo mismo que
+# `_CAMPOS_DEL_FLETE`: corregirle los litros le cambia la cuenta al día pero lo deja en
+# el mismo (transportador, día, ruta); estos tres lo sacan de un viaje y lo meten en
+# otro. Es la única puerta por la que una recepción puede volver a un viaje fijo que ya
+# está cobrado, y por eso son los únicos que disparan `_volver_al_viaje_ya_cobrado`.
+_CAMPOS_QUE_MUEVEN_EL_DIA = frozenset({"transportador_id", "fecha", "ruta_id"})
+
 # ------------------------------------- CUÁNDO SE VUELVE A CALCULAR LA CIFRA DEL FLETE
-# `valor_transporte` es una cifra DERIVADA: litros × tarifa_por_litro(transportador,
-# ruta). No es un campo que el usuario mande, así que el candado de arriba —que mira
-# campos— no la cubre, y hay que decidir aparte cuándo se vuelve a derivar.
+# `valor_transporte` es una cifra DERIVADA de la tarifa del transportador en esa ruta
+# (`tarifas.tarifa_de_transporte`): litros × tarifa si se cobra por litro, o la parte
+# que le toca del fijo del día si se cobra por día completo. No es un campo que el
+# usuario mande, así que el candado de arriba —que mira campos— no la cubre, y hay que
+# decidir aparte cuándo se vuelve a derivar.
 #
 # LA REGLA SON TRES CASOS, y la frontera es SI ESE DÍA YA ESTÁ EN UN COMPROBANTE DE
 # FLETE. Está implementada en `_hay_que_rederivar_el_flete` y usada por `actualizar`:
@@ -144,24 +159,124 @@ _CAMPOS_DEL_FLETE = frozenset(
 #      abre el día, guarda, y la foto queda buena—: la tarifa no es un campo de la
 #      recepción, así que este guardado es el único momento en que le puede llegar a un
 #      día suelto. No hay comprobante que re-precificar, así que no hay nada que dañar.
-#   3. EL DÍA YA ESTÁ EN UN COMPROBANTE que todavía no ha movido plata: se re-deriva
-#      SOLO si el guardado cambió algo que de verdad le mueve la cuenta al flete (los
-#      de `_CAMPOS_DEL_FLETE`: litros, ruta, transportador, fecha, estado). Si el
-#      guardado fue de un campo libre —una observación, el precio de la leche—, la foto
-#      se queda como está.
+#      Cuenta como suelto el día que ESTE guardado suelta (se le cambia el transportador,
+#      o se le saca la fecha del período): se va con la tarifa de su grupo nuevo.
+#   3. EL DÍA SE QUEDA EN SU COMPROBANTE: NO SE LE TOCA LA FOTO. Se la pone el RECUADRE
+#      de ese comprobante, y punto. Con dos excepciones, y las dos por la misma razón —el
+#      comprobante no puede ponerle la foto a un día que ya no le pertenece a ese
+#      renglón—:
+#        · EL DÍA QUE QUEDA APAGADO. El recuadre solo mira los activos, así que un día
+#          apagado no compone ningún renglón: su foto se deriva acá con la tarifa de hoy
+#          (en día fijo, CERO, que es lo que vale un día que no se le paga a nadie);
+#        · EL DÍA AL QUE LE CAMBIAN LA RUTA. La ruta es la que ESCOGE la tarifa, así que
+#          cambiarla es escoger otra a propósito: el día pasa a un grupo que el
+#          comprobante puede no haber cobrado nunca —Nápoles, por litro— y de ese grupo
+#          el papel no sabe ningún precio que conservar. No abre ninguna puerta: si el
+#          grupo al que llega SÍ está en el comprobante, el recuadre le vuelve a poner
+#          encima la cifra del papel.
 #
-# EL CASO 3 ES EL ARREGLO, y estas son sus cifras: dos días del 02/06 en Nápoles
-# (44,23 + 82,48 = 126,71 L) con el comprobante APROBADO en $30.760,12 a $242,76.
-# Alguien sube la tarifa a $300 —un cambio legítimo, para la quincena siguiente— y
-# alguien más escribe "el tarro venía mal tapado" en uno de los días. Con la regla
-# vieja ("se re-deriva siempre") esa nota re-precificaba el comprobante a $38.013,00 y
-# le quitaba el visto bueno: $7.252,88 de cambio por un campo que no tiene nada que ver
-# con la plata. Re-precificar un comprobante ya emitido es lo que hace el botón
-# RECALCULAR, que el dueño oprime a propósito; guardar una observación no.
+# EL CASO 3 ES LA REGLA QUE CIERRA EL CRUCE DE MODOS, Y LA DA EL DUEÑO:
+#
+#     LA FOTO DE UNA RECEPCIÓN QUE YA ESTÁ EN UN COMPROBANTE LA MANDA ESE COMPROBANTE,
+#     NO LA TARIFA DE HOY.
+#
+# El porqué, con las dos cifras del caso que lo destapó. La ruta "A fábrica" era POR
+# LITRO a $242,76; el 16/07 Aurelio 82,00 L y Marleny 137,45 L, comprobante emitido en
+# 219,45 L × $242,76 = $53.273,68. El dueño le pone DÍA FIJO $150.000 a esa ruta y
+# después le corrige a Aurelio 82,00 → 91,30 L, una corrección de las de todos los días:
+#
+#   · escribiendo la foto con el modo de HOY (día fijo) esa recepción quedaba en $0,00
+#     —en un fijo la fila sola no vale nada, solo tiene una PARTE del día—, el
+#     comprobante, que está armado POR LITRO, sumaba lo que quedaba y caía a $33.367,36,
+#     y el PDF imprimía "91,3 L $0 $0". Se aprobaba y se pagaba: al conductor le
+#     faltaban $22.163,99 contra su propia cuenta por litro. Y el desglose seguía
+#     cuadrando —fotos == renglones == total—, así que ninguna red de cuadre lo veía;
+#   · sin tocarle la foto, el recuadre rehace el renglón con LA TARIFA CON QUE SE EMITIÓ
+#     y los litros de hoy: 228,75 L × $242,76 = $55.531,35. Que es exactamente lo que se
+#     le debe por lo que recogió, en el modo en que se le firmó el papel.
+#
+# Y hay una segunda cifra, del mismo cruce: corregirle la FECHA a un día de ese
+# comprobante le inyectaba un día fijo completo y lo dejaba en $183.367,36 (+$130.093,68)
+# sin que nadie oprimiera Recalcular. La cierra la misma regla, del lado del comprobante:
+# ver `_ComoCobroLaRuta` en liquidaciones/service.py, que hoy lee cómo cobró cada ruta de
+# lo que el comprobante dejó ESCRITO al emitirse (`LiquidacionRuta`) y no de deducirlo de
+# los renglones que le sobrevivan. Deducirlo dejaba dos puertas abiertas —apagar el día y
+# prenderlo, o cambiarle la ruta y devolverla— por las que el mismo papel se re-precificaba
+# solo: $150.000 amanecían en $19.906,32 y al revés.
+#
+# ANTES DE ESTO EL CASO 3 DECÍA "se re-deriva si el guardado le movió algo al flete", y
+# esa versión ya había arreglado la mitad del problema: dos días del 02/06 en Nápoles
+# (44,23 + 82,48 = 126,71 L) con el comprobante APROBADO en $30.760,12 a $242,76; alguien
+# sube la tarifa a $300 —legítimo, para la quincena siguiente— y alguien más escribe "el
+# tarro venía mal tapado" en uno de los días. Con la regla vieja ("se re-deriva siempre")
+# esa nota re-precificaba el comprobante a $38.013,00 y le quitaba el visto bueno.
+# Escribir una observación sigue sin mover un peso; lo que cambia ahora es que corregir
+# los LITROS tampoco re-precifica: mueve el renglón por los litros, a la tarifa vieja.
 #
 # Y no le quita al dueño la salida del caso 2: si el día ya está en un comprobante, la
 # tarifa corregida le llega por el botón Recalcular de ese comprobante, que es donde
 # tiene que estar la decisión de re-precificar.
+
+# ---------------------------------------------------------------------------
+# DÓNDE VIVE LA CUENTA DEL DÍA FIJO, Y POR QUÉ AQUÍ
+# ---------------------------------------------------------------------------
+# EL PROBLEMA, dicho en una línea: la foto del flete se escribe al registrar CADA
+# recepción, pero el fijo del día solo se conoce cuando se sabe CUÁLES son todas las
+# recepciones de ese día. Registrar la segunda recepción del 16/07 le cambia lo que le
+# tocaba a la primera: con una sola, esa recepción carga los $150.000 completos; con
+# dos, $75.000 cada una. En modo POR LITRO esto no pasa —la foto de un día se sostiene
+# sola, litros × tarifa, sin mirar a nadie más—.
+#
+# LA REGLA, ANTES QUE NADA, porque es la que ordena todo lo demás: EN UN DÍA FIJO EL
+# RENGLÓN VALE LA TARIFA, nunca la suma de las fotos. Las fotos son SOLO el reparto de
+# esa cifra entre las recepciones de ese (día, ruta), y su única obligación es sumarla
+# exacto. La cuenta que la dice está en UN solo sitio —`tarifas.valor_del_grupo`— y no
+# hay ninguna otra: dos verdades sobre la misma plata es la enfermedad que esto cerró.
+#
+# LA DECISIÓN: la cuenta del fijo NO es de una fila, es DEL GRUPO (transportador, día,
+# ruta), y vive en dos sitios que se reparten el trabajo sin pisarse. Cada uno es dueño
+# de las recepciones que le corresponden, y la frontera es EL COMPROBANTE:
+#
+#   1. LAS RECEPCIONES QUE TODAVÍA NO ESTÁN EN NINGÚN COMPROBANTE DE FLETE
+#      (`liquidacion_transporte_id IS NULL`) las reparte ESTE servicio, en
+#      `_repartir_el_fijo_del_dia`, después de cada escritura: crear, corregir, apagar
+#      y borrar. Son las que van a formar el renglón del comprobante que todavía no
+#      existe, así que su suma tiene que ser el fijo del día en todo momento —la grilla
+#      de la quincena y contabilidad las están leyendo—.
+#   2. LAS QUE YA ESTÁN EN UN COMPROBANTE las reparte EL COMPROBANTE
+#      (`_reparto_del_flete` en liquidaciones/service.py, que ya existía y ya repartía
+#      centavos), al generar, al recalcular y al recuadrar. Ahí el renglón es la verdad
+#      y las fotos se acomodan a él.
+#
+# LAS DOS USAN LAS MISMAS DOS FUNCIONES: `tarifas.valor_del_grupo` para saber cuánto vale
+# el grupo y `tarifas.reparto_entre_las_fotos` para bajarlo a las fotos. Una sola cuenta
+# de cada cosa, porque dos formas de valorar (o de repartir) los mismos $150.000 es como
+# aparece el centavo —o los $400.000— que no cuadran.
+#
+# Y EL GRUPO ES EL MISMO EN LAS DOS: (transportador, día, ruta) dentro de un mismo
+# comprobante —o dentro de "todavía sin comprobante"—. O sea que cada grupo es
+# EXACTAMENTE el conjunto de recepciones que produce UN renglón de UN comprobante, y por
+# eso la suma de las fotos de un grupo es siempre, al centavo, su renglón.
+#
+# EL ORDEN ENTRE LOS DOS: primero el comprobante (2) y después lo pendiente (1). No es
+# indiferente: lo pendiente le pregunta al comprobante si ese (día, ruta) ya se cobró
+# completo, así que el comprobante tiene que estar al día cuando se le pregunta. Ver
+# `actualizar`, que es donde está el caso con cifras.
+#
+# EL CANDADO MANDA SOBRE TODO ESTO: si por el flete de ese día ya salió plata, la foto
+# NO se toca. Del lado 1 eso es gratis —una recepción cuyo flete ya se pagó no está en
+# el grupo pendiente, está en el comprobante pagado— y del lado 2 lo hace cumplir
+# `_fotos_congeladas`, que si encuentra UNA foto congelada no deja que el reparto
+# escriba ninguna.
+#
+# LO QUE SÍ QUEDA DICHO, porque es la única grieta y es mejor tenerla escrita que
+# descubrirla: si a un (día, ruta) FIJO se le anota leche DESPUÉS de que su día ya se
+# cobró en un comprobante, esa recepción nueva entra con flete $0,00. No es un descuido:
+# ese día ya costó $150.000 y ya se pagó, y recoger un proveedor más no cuesta más —que
+# es literalmente lo que significa la tarifa fija—. Quien lo decide es
+# `LiquidacionRepository.viajes_ya_cobrados`, y ahí está el caso completo con
+# cifras. Si el dueño ANULA ese comprobante, el día vuelve a estar por cobrar y las
+# recepciones se rearman todas juntas en un solo fijo.
 
 # Consecuencia de las dos listas de arriba, y es la parte que hay que leer con
 # cuidado: LOS LITROS, LA FECHA y EL ESTADO están en las DOS, así que quedan
@@ -533,25 +648,44 @@ class RecepcionService(BaseService[RecepcionLeche]):
         )
 
     def _hay_que_rederivar_el_flete(
-        self, candado: CandadoRecepcion, cambios: set[str]
+        self,
+        candado: CandadoRecepcion,
+        *,
+        se_queda_en_el_comprobante: bool,
+        queda_apagada: bool,
     ) -> bool:
         """Si este guardado tiene que volver a calcular la FOTO del flete del día.
 
-        Los tres casos están explicados arriba, en el bloque "CUÁNDO SE VUELVE A
-        CALCULAR LA CIFRA DEL FLETE". En una línea: nunca sobre un flete pagado;
-        siempre sobre un día que no está en ningún comprobante; y sobre un día que sí
-        está, solo cuando el guardado cambió algo que le mueve la cuenta al flete.
+        Los casos están explicados arriba, en el bloque "CUÁNDO SE VUELVE A CALCULAR LA
+        CIFRA DEL FLETE". En una línea: nunca sobre un flete pagado; siempre sobre un día
+        que NO está en ningún comprobante; y NUNCA sobre un día que se queda dentro del
+        suyo, porque ahí la foto la manda ese comprobante y no la tarifa de hoy.
 
-        `cambios` son los cambios REALES (ver `_cambios_reales`), no los campos que el
-        formulario mandó: el diálogo manda todo el formulario en cada guardado y mirar
-        la presencia haría que reenviarlo sin tocar nada re-precificara el comprobante,
-        que es justo lo que esto viene a evitar.
+        `se_queda_en_el_comprobante` es lo que decide, y es la regla entera del cruce de
+        modos: mientras el día siga dentro de su comprobante de flete, quien le pone la
+        foto es el RECUADRE de ese comprobante —el único que sabe en qué modo y a qué
+        tarifa se armó ese papel—. Si el guardado lo SUELTA (le cambia el transportador,
+        o le saca la fecha del período), el día vuelve a estar suelto y ahí sí manda la
+        tarifa de hoy, que es la que le corresponde a su grupo nuevo.
+
+        Quien llama cuenta también como "no se queda" el día al que le CAMBIAN LA RUTA,
+        aunque la marca del comprobante no se le suelte: la ruta es la que escoge la
+        tarifa, así que el día pasa a un grupo del que ese papel puede no saber ningún
+        precio. Está explicado en el sitio donde se decide (`actualizar`) y en el bloque
+        del encabezado.
+
+        `queda_apagada` es la otra excepción, y es de las que hay que decir en voz alta:
+        un día APAGADO no compone ningún renglón —el recuadre solo mira los activos—, así
+        que el comprobante no puede ponerle la foto ni aunque quisiera. Se le deriva con
+        la tarifa de hoy, exactamente como se hacía siempre: en día fijo eso es CERO (no
+        se le paga a nadie por un día apagado, y así no queda un fijo fantasma colgado) y
+        por litro es litros × tarifa, que es lo que esa foto valía y sigue valiendo.
         """
         if candado.flete_pagado:
             return False
         if candado.flete is None:
             return True
-        return bool(cambios & _CAMPOS_DEL_FLETE)
+        return not se_queda_en_el_comprobante or queda_apagada
 
     def _exigir_no_pagada(self, recepcion: RecepcionLeche, verbo: str) -> list[Liquidacion]:
         """Para BORRAR el día: lo traba cualquiera de las dos liquidaciones pagadas.
@@ -898,17 +1032,410 @@ class RecepcionService(BaseService[RecepcionLeche]):
             # la que ya estaba guardada—, porque arriba `data["ruta_id"]` solo se
             # completa desde el proveedor cuando el día es nuevo.
             ruta_id = data["ruta_id"] if "ruta_id" in data else (actual.ruta_id if actual else None)
-            tarifa = CERO
+            tarifa = Tarifa(MODO_POR_LITRO, CERO)
             if transportador_id:
                 transportador = self._transportador_de_la_tarifa(transportador_id, actual)
                 # UNA SOLA función para esta cuenta, compartida con liquidaciones: la
-                # tarifa de la ruta si la tiene, si no la general del transportador.
-                tarifa = tarifa_por_litro(transportador, ruta_id)
-            data["valor_transporte"] = _centavos(litros * tarifa)
+                # tarifa de la ruta si la tiene, si no la general del transportador. Y
+                # trae el MODO pegado a la cifra: sin él, $150.000 el día se leerían
+                # como $150.000 el litro.
+                tarifa = tarifa_de_transporte(transportador, ruta_id)
+            # LO QUE SE ESCRIBE ACÁ ES LA FOTO DE ESTA FILA MIRÁNDOSE SOLA, y en modo
+            # por litro eso es la respuesta final (litros × tarifa, redondeado una vez:
+            # la misma cuenta de siempre, ni un centavo distinto).
+            #
+            # EN MODO DÍA FIJO SE ESCRIBE CERO, Y ES LO ÚNICO HONESTO QUE SE PUEDE
+            # ESCRIBIR MIRANDO ESTA FILA SOLA: en un fijo la recepción no tiene ninguna
+            # cifra propia que defender, solo tiene una PARTE de lo que vale el día, y
+            # cuánto es esa parte depende de quiénes más estén en ese (día, ruta) —cosa
+            # que desde aquí todavía no se sabe: la fila ni siquiera ha bajado a la
+            # base—. Un cero es un lugar vacío que el reparto llena enseguida; cualquier
+            # otra cifra sería una segunda verdad sobre la misma plata.
+            #
+            # ANTES SE ESCRIBÍA EL FIJO COMPLETO, y ese fue el defecto: era cierto
+            # mientras esta fuera la única recepción del día, y falso en cuanto la
+            # recepción YA ESTABA EN UN COMPROBANTE, porque entonces el reparto de abajo
+            # no la alcanzaba (solo reparte las que no están en ninguno) y el
+            # comprobante terminaba SUMANDO ese fijo completo como si fuera una cifra
+            # propia. Corregirle los litros a un proveedor del día de $150.000 lo dejaba
+            # en $261.045,13; corrigiéndole a los cinco, en $554.826,77. Y esa cifra se
+            # aprobaba y se pagaba.
+            #
+            # QUIÉN LO LLENA, siempre, y por eso el cero nunca se queda:
+            #   · si el día NO está en ningún comprobante → `_repartir_el_fijo_del_dia`,
+            #     un renglón más abajo en `crear` y en `actualizar`;
+            #   · si el día YA ESTÁ en uno → el recuadre de ESE comprobante
+            #     (`_recuadrar`), que es el dueño de esas fotos.
+            # Ver el bloque "DÓNDE VIVE LA CUENTA DEL DÍA FIJO" del encabezado.
+            #
+            # Y si la recepción queda APAGADA, el cero se queda, que es exactamente lo
+            # que tiene que quedar: un día apagado no compone ningún renglón, así que no
+            # le toca ni un peso del fijo. Es la foto fantasma de $150.000 que antes
+            # quedaba colgada en la recepción apagada.
+            data["valor_transporte"] = CERO if tarifa.es_dia_fijo else valor_del_grupo(
+                tarifa, litros
+            )
         data["valor_neto"] = data["valor_bruto"] + bonif - desc
         if data["valor_neto"] < 0:
             raise BusinessError("El valor neto no puede ser negativo: revise los descuentos")
         return data
+
+    # ------------------------------------------------- el fijo del día, repartido
+    def _pendientes_del_dia(
+        self, transportador_id: uuid.UUID, fecha: date, ruta_id: uuid.UUID | None
+    ) -> list[RecepcionLeche]:
+        """TODAS las recepciones PENDIENTES de ese (transportador, día, ruta).
+
+        "Pendientes" es `liquidacion_transporte_id IS NULL`: las que todavía no están en
+        ningún comprobante de flete y que por lo tanto van a formar UN renglón del
+        comprobante que se genere. Ese es el grupo del que este servicio es dueño (ver el
+        bloque "DÓNDE VIVE LA CUENTA DEL DÍA FIJO"); las que ya están en un comprobante
+        las reparte el comprobante.
+
+        VIENEN LAS APAGADAS TAMBIÉN, y quien llama las separa. No entran al reparto —un
+        día apagado no se le paga a nadie y no puede reclamar parte del fijo— pero hay
+        que verlas para poder DEJARLES LA FOTO EN CERO: si se las deja por fuera de la
+        consulta, la foto que traían se queda colgada ahí, y una foto colgada de $150.000
+        es un fijo fantasma esperando a que alguien vuelva a prender el día. Ver
+        `_repartir_el_fijo_del_dia`.
+
+        Va por `base_query`, así que el filtro por empresa y el de borrados no se pueden
+        olvidar: acá se reescribe plata.
+
+        La ruta se compara con `IS NULL` cuando viene en nulo y no con `= NULL`, que en
+        SQL no encuentra nada: el día SIN ruta también puede tener fijo (por la tarifa
+        general del transportador) y es un grupo igual de válido que los demás.
+        """
+        consulta = self.repo.base_query().where(
+            RecepcionLeche.transportador_id == transportador_id,
+            RecepcionLeche.fecha == fecha,
+            RecepcionLeche.liquidacion_transporte_id.is_(None),
+            RecepcionLeche.ruta_id.is_(None) if ruta_id is None
+            else RecepcionLeche.ruta_id == ruta_id,
+        )
+        return list(self.db.scalars(consulta).all())
+
+    def _repartir_el_fijo_del_dia(
+        self,
+        transportador_id: uuid.UUID | None,
+        fecha: date | None,
+        ruta_id: uuid.UUID | None,
+        *,
+        recepcion_del_grupo: RecepcionLeche | None = None,
+    ) -> None:
+        """Reparte el FIJO de un (transportador, día, ruta) entre sus recepciones.
+
+        ES LA CUENTA QUE HACE IMPOSIBLE EL ERROR DE LOS $750.000. Si ese día recogió
+        leche de cinco proveedores en la ruta "a fábrica", el flete del día son $150.000
+        —no $150.000 × 5— y esta función es la que baja esos $150.000 a las cinco
+        recepciones de modo que la suma de las cinco fotos dé EXACTO $150.000.
+
+        SE LLAMA DESPUÉS DE CADA ESCRITURA de una recepción, con la fila ya bajada a la
+        base (`flush`), porque solo entonces el grupo está completo y se puede ver quién
+        lo compone. Y se llama DOS VECES cuando la recepción se movió de día, de ruta o
+        de transportador: una por el grupo que dejó (los que se quedan absorben el fijo
+        completo) y otra por el grupo al que llegó.
+
+        NO HACE NADA EN MODO POR LITRO, y es a propósito: ahí la foto de cada día se
+        sostiene sola (litros × tarifa) y los centavos del grupo los cierra el
+        comprobante al generarlo, exactamente como venía funcionando. Meter el reparto
+        también ahí movería centavos en un momento en que hoy no se mueven, sin ninguna
+        necesidad.
+
+        SI EL DÍA YA SE COBRÓ COMPLETO en un comprobante, el grupo pendiente vale $0,00:
+        ese día ya costó $150.000, ya se cobró, y recoger un proveedor más no cuesta más.
+        Ver `LiquidacionRepository.viajes_ya_cobrados`, que es donde está el caso con
+        cifras. POR ESO ESTO CORRE DESPUÉS DEL RECUADRE y no antes: quién ya cobró qué lo
+        dicen los comprobantes, así que primero se dejan ellos al día. Al revés, apagar
+        la única recepción que sostenía el renglón de un comprobante dejaba el día
+        pendiente en $0,00 leyendo un renglón que un renglón después iba a desaparecer:
+        el camión hizo el viaje y no se le pagaba nada.
+
+        LAS RECEPCIONES APAGADAS DEL MISMO (DÍA, RUTA) QUEDAN EN $0,00. No entran al
+        reparto —no se le paga a nadie por un día apagado— pero tampoco se las puede
+        dejar con la foto que traían: esa cifra no compone ningún renglón, así que si se
+        quedara, el desglose del día dejaría de sumar el día. Es la foto fantasma de
+        $150.000 que quedaba colgada al apagar una recepción de un día fijo.
+
+        `recepcion_del_grupo` es un salvavidas para leer la tarifa de un transportador
+        RETIRADO (borrado en suave): el repositorio no lo devuelve, pero sus días siguen
+        existiendo y siguen siendo editables, así que la tarifa se lee de la fila que
+        trae la recepción —exigiendo que sea de esta empresa, igual que
+        `_transportador_de_la_tarifa`—. Sin esto, corregirle una observación a un día
+        viejo de un transportador retirado dejaría el grupo sin repartir.
+        """
+        if transportador_id is None or fecha is None:
+            return
+        transportador = self._transportador_del_grupo(transportador_id, recepcion_del_grupo)
+        tarifa = tarifa_de_transporte(transportador, ruta_id)
+        if not tarifa.es_dia_fijo:
+            return
+        pendientes = self._pendientes_del_dia(transportador_id, fecha, ruta_id)
+        grupo = [r for r in pendientes if r.estado == "activo"]
+        apagadas = [r for r in pendientes if r.estado != "activo"]
+        ya_cobrados = LiquidacionRepository(
+            self.db, self.ctx.empresa_id
+        ).viajes_ya_cobrados(transportador_id)
+        # LA ÚNICA CUENTA, la misma que usa el comprobante: el día vale la tarifa (o
+        # $0,00 si ya se cobró completo en otro comprobante), NUNCA la suma de las fotos.
+        # Acá no hay `ya_pactado` que pasarle porque este grupo todavía no está en ningún
+        # comprobante: no hay ningún renglón anterior que conservar.
+        total = valor_del_grupo(
+            tarifa,
+            sum((Decimal(r.cantidad_litros or 0) for r in grupo), CERO),
+            ya_cobrado=(fecha, ruta_id) in ya_cobrados,
+        )
+        asignado = reparto_entre_las_fotos(
+            tarifa, [(r.id, Decimal(r.cantidad_litros or 0)) for r in grupo], total
+        )
+        # Las apagadas van a cero por fuera del reparto: no son partes de nada.
+        asignado.update({r.id: CERO for r in apagadas})
+        self._bajar_las_fotos(
+            grupo + apagadas,
+            asignado,
+            "cambió cuántas recepciones tiene ese día en esa ruta, así que el flete de "
+            "día fijo se repartió otra vez; es una cifra informativa y no mueve el valor "
+            "total, el saldo ni el PDF de esta liquidación",
+        )
+
+    def _bajar_las_fotos(
+        self,
+        filas: list[RecepcionLeche],
+        asignado: dict[uuid.UUID, Decimal],
+        motivo: str,
+    ) -> None:
+        """Escribe las fotos que cambiaron y deja al día lo que dependía de ellas.
+
+        Es la mitad final —y compartida— de los dos caminos que rehacen fotos de días
+        SUELTOS: el reparto del fijo de un día (`_repartir_el_fijo_del_dia`) y la
+        rederivación completa cuando a un transportador le cambian el MODO de una tarifa
+        (`rehacer_las_fotos_sueltas`). Está en una función porque las dos tienen que
+        escribir igual: solo lo que de verdad cambió, y sin olvidarse de la columna
+        informativa de la liquidación de la leche.
+
+        LAS LIQUIDACIONES DE LECHE de los días que de verdad cambiaron de foto: su
+        columna informativa `valor_transporte` es la suma del flete de sus días y se
+        quedaría diciendo otra cosa que sus propias recepciones. Es el mismo defecto —y el
+        mismo remedio— que ya estaba resuelto para el otro camino; ver
+        `LiquidacionService.refrescar_transporte_informativo`.
+        """
+        de_la_leche: set[uuid.UUID] = set()
+        for recepcion in filas:
+            nueva = asignado.get(recepcion.id)
+            if nueva is None or nueva == Decimal(recepcion.valor_transporte or 0):
+                continue
+            recepcion.valor_transporte = nueva
+            recepcion.updated_by = self.ctx.user_id
+            if recepcion.liquidacion_id is not None:
+                de_la_leche.add(recepcion.liquidacion_id)
+        # Se baja el reparto SIEMPRE, aunque no haya nada más que hacer: lo que sigue
+        # después de esto —el recuadre de las liquidaciones, la respuesta— vuelve a leer
+        # estas mismas filas desde la base, y la sesión no hace autoflush.
+        self.db.flush()
+        if not de_la_leche:
+            return
+        from app.modules.liquidaciones.service import LiquidacionService
+
+        servicio = LiquidacionService(self.db, self.ctx)
+        # Ordenado por el texto del id para que dos corridas dejen las entradas de
+        # bitácora en el mismo orden, igual que `_poner_al_dia_el_flete_de_la_leche`.
+        for liq_id in sorted(de_la_leche, key=str):
+            servicio.refrescar_transporte_informativo(liq_id, motivo=motivo)
+
+    def rehacer_las_fotos_sueltas(self, transportador_id: uuid.UUID) -> None:
+        """Vuelve a derivar el flete de TODOS los días SUELTOS de un transportador.
+
+        LA LLAMA LA PANTALLA DE TARIFAS cuando a un transportador le cambian el MODO de
+        una tarifa (por litro ↔ día fijo). Ver `TransportadorService.actualizar`, que es
+        donde está la decisión de cuándo, y por qué solo con el modo.
+
+        EL PROBLEMA QUE CIERRA: la foto del flete de un día es DERIVADA de la tarifa, pero
+        la tarifa no es un campo de la recepción, así que cambiarla no llegaba sola a los
+        días ya anotados. Mientras eso fuera un cambio de CIFRA —de $242,76 a $255— la
+        foto quedaba corrida por unos pesos y se corregía al guardar el día, al generar el
+        comprobante o al recalcularlo. Con un cambio de MODO no: pasar la ruta "A fábrica"
+        de DÍA FIJO $150.000 a POR LITRO $242,76 deja fotos que ya no significan nada —una
+        parte de un fijo que ya no existe—, y la grilla de la quincena, el resumen y la
+        contabilidad las siguen sumando. Con dos días de 219,45 L eso son $150.000 en
+        pantalla contra los $53.273,68 que de verdad se van a cobrar: $96.726,32 de
+        diferencia esperando a que alguien genere el comprobante.
+
+        SOLO TOCA LOS DÍAS SUELTOS —los que no están en ningún comprobante de flete—, y
+        eso no es una limitación sino LA MISMA REGLA de siempre dicha desde el otro lado:
+        la foto de una recepción que ya está en un comprobante la manda ese comprobante y
+        se re-precifica con el botón Recalcular, que el dueño oprime a propósito. Cambiarle
+        el modo a una tarifa NO puede re-precificar un papel ya emitido.
+
+        LA CUENTA ES LA MISMA de siempre y sale de las mismas dos funciones
+        (`valor_del_grupo` y `reparto_entre_las_fotos`), por (día, ruta):
+
+          · POR LITRO cada día se sostiene solo: litros × tarifa. Idéntico a lo que
+            escribe `_completar_y_calcular` al guardar el día;
+          · DÍA FIJO el grupo vale la tarifa —o $0,00 si ese (día, ruta) ya se cobró
+            completo en un comprobante— y se reparte entre sus recepciones vivas; las
+            apagadas quedan en $0,00, que es lo que vale un día que no compone renglón.
+        """
+        transportador = TransportadorRepository(self.db, self.ctx.empresa_id).get(
+            transportador_id
+        )
+        if transportador is None:
+            return
+        sueltas = list(
+            self.db.scalars(
+                self.repo.base_query().where(
+                    RecepcionLeche.transportador_id == transportador_id,
+                    RecepcionLeche.liquidacion_transporte_id.is_(None),
+                )
+            ).all()
+        )
+        if not sueltas:
+            return
+        ya_cobrados = LiquidacionRepository(
+            self.db, self.ctx.empresa_id
+        ).viajes_ya_cobrados(transportador_id)
+        grupos: dict[tuple[date, uuid.UUID | None], list[RecepcionLeche]] = {}
+        for recepcion in sueltas:
+            grupos.setdefault((recepcion.fecha, recepcion.ruta_id), []).append(recepcion)
+        asignado: dict[uuid.UUID, Decimal] = {}
+        for (fecha, ruta_id), del_grupo in grupos.items():
+            tarifa = tarifa_de_transporte(transportador, ruta_id)
+            if not tarifa.es_dia_fijo:
+                for recepcion in del_grupo:
+                    asignado[recepcion.id] = valor_del_grupo(
+                        tarifa, Decimal(recepcion.cantidad_litros or 0)
+                    )
+                continue
+            vivas = [r for r in del_grupo if r.estado == "activo"]
+            total = valor_del_grupo(
+                tarifa,
+                sum((Decimal(r.cantidad_litros or 0) for r in vivas), CERO),
+                ya_cobrado=(fecha, ruta_id) in ya_cobrados,
+            )
+            asignado.update(
+                reparto_entre_las_fotos(
+                    tarifa,
+                    [(r.id, Decimal(r.cantidad_litros or 0)) for r in vivas],
+                    total,
+                )
+            )
+            asignado.update({r.id: CERO for r in del_grupo if r.estado != "activo"})
+        self._bajar_las_fotos(
+            sueltas,
+            asignado,
+            "le cambiaron el MODO de la tarifa al transportador (por litro ↔ día fijo), "
+            "así que el flete de sus días todavía sin liquidar se volvió a derivar; es "
+            "una cifra informativa y no mueve el valor total, el saldo ni el PDF de esta "
+            "liquidación",
+        )
+
+    def _volver_al_viaje_ya_cobrado(self, recepcion: RecepcionLeche) -> Liquidacion | None:
+        """El día que se MUEVE a un viaje ya cobrado entra a ese viaje, no se queda afuera.
+
+        EL CASO, con las cifras. El 16/07 en la ruta fija ($150.000 el día): Aurelio
+        82,00 L y Marleny 137,45 L, comprobante emitido y repartido $56.049,21 /
+        $93.950,79. A Aurelio le cambian el transportador —anotaron mal quién recogió—:
+        el día se suelta de ese comprobante, que se recuadra sin él y le deja a Marleny
+        los $150.000 completos, que es lo correcto mientras Aurelio esté en otra parte.
+        Un minuto después le corrigen el transportador de vuelta.
+
+        Sin esto, Aurelio vuelve SUELTO: el viaje del 16/07 ya está cobrado, así que su
+        parte del fijo es $0,00 y la grilla queda diciendo que recoger 137,45 L costó
+        $150.000 y recoger 82,00 L no costó nada. Las dos cifras suman bien —el desglose
+        cuadra— y las dos son falsas: vinieron en el mismo camión. Y esas fotos son las
+        que lee el costeo del queso.
+
+        LO QUE HACE: devolverle la marca del comprobante que cobra ese viaje, para que el
+        recuadre que viene enseguida vuelva a repartir los $150.000 entre las dos. EL
+        VIAJE SIGUE VALIENDO $150.000 —no se cobra un peso más, ni se cobra dos veces—:
+        lo único que cambia es entre quiénes se reparte, que es lo que la foto significa.
+
+        LAS TRES CONDICIONES, y cada una tapa algo distinto:
+
+          · SOLO CUANDO EL DÍA SE MOVIÓ (`_CAMPOS_QUE_MUEVEN_EL_DIA`, lo revisa quien
+            llama). Esto NO es para la leche anotada tarde: una recepción NUEVA de un día
+            que ya se cobró entra en $0,00 y así se queda, porque ese día ya costó
+            $150.000 y recoger un proveedor más no cuesta más —es literalmente lo que
+            significa una tarifa fija, y es como estaba probado—. Lo que se corrige acá es
+            otra cosa: una leche que ya estaba en el viaje, se salió por una corrección y
+            volvió.
+          · SOLO SI ESTÁ SUELTA Y VIVA. Si todavía tiene comprobante, no hay nada que
+            devolver; si quedó apagada, no compone ningún renglón.
+          · SOLO SI ESE COMPROBANTE TODAVÍA SE PUEDE TOCAR. Si ya se pagó (o tiene un
+            abono, o su deuda ya se cobró en otra quincena) sus cifras están congeladas y
+            meterle un día más sería mover plata entregada: ahí la recepción se queda
+            suelta en $0,00, que es la verdad —ese viaje ya se pagó y no se puede
+            repartir otra vez—.
+
+        VALE PARA LOS DOS MODOS. En el fijo es donde duele —quedarse afuera vale $0,00 con
+        la leche viva— pero por litro el resultado es el mismo y es igual de correcto: el
+        día vuelve a su papel, el renglón se rehace con los litros de hoy a la tarifa con
+        que se emitió, y el comprobante queda otra vez EXACTAMENTE como estaba antes de que
+        el día se fuera. Deshacer una corrección tiene que deshacerla del todo.
+
+        Devuelve la liquidación a la que volvió, para que quien llama la recuadre.
+        """
+        if (
+            recepcion.liquidacion_transporte_id is not None
+            or recepcion.estado != "activo"
+            or recepcion.transportador_id is None
+        ):
+            return None
+        liquidacion = LiquidacionRepository(
+            self.db, self.ctx.empresa_id
+        ).comprobante_que_cobra_el_viaje(
+            recepcion.transportador_id, recepcion.fecha, recepcion.ruta_id
+        )
+        if liquidacion is None or _traba_el_dia(liquidacion):
+            return None
+        recepcion.liquidacion_transporte_id = liquidacion.id
+        recepcion.updated_by = self.ctx.user_id
+        # Se baja antes de recuadrar: el recuadre lee sus recepciones desde la base y la
+        # sesión no hace autoflush.
+        self.db.flush()
+        return liquidacion
+
+    def _transportador_del_grupo(
+        self, transportador_id: uuid.UUID, recepcion: RecepcionLeche | None
+    ) -> Transportador | None:
+        """El transportador del que sale la tarifa del grupo, aguantando que esté BORRADO.
+
+        Es el mismo razonamiento de `_transportador_de_la_tarifa` (ver su docstring: un
+        transportador retirado no se lleva sus días con él), pero acá NO revienta si no
+        lo encuentra: esto se llama después de haber escrito, y un 404 a estas alturas
+        tumbaría un guardado que ya pasó todas las puertas. Sin transportador no hay
+        tarifa que leer y el reparto simplemente no corre.
+
+        SE MIRA PRIMERO LA FILA QUE YA TRAE LA RECEPCIÓN, y eso ahorra una consulta EN
+        CADA ESCRITURA de recepción: `RecepcionLeche.transportador` es lazy="joined", así
+        que viene cargado con la fila, y es el MISMO objeto que devolvería el repositorio
+        (el mapa de identidad de la sesión). Se le exige `empresa_id`, que es lo que el
+        repositorio aportaba: la tarifa de otra quesera no puede decidir plata en esta. Y
+        de paso resuelve solo el caso del transportador retirado, que el repositorio no
+        devuelve.
+
+        Se cae al repositorio cuando la recepción NO es de ese transportador, que es el
+        caso del grupo que un día ACABA de dejar al cambiarle el transportador.
+
+        SE LE EXIGE AL OBJETO CARGADO QUE SEA EL DEL ID, y no basta con que la columna
+        `transportador_id` coincida. Parece redundante y no lo es: acabamos de ESCRIBIR
+        esa columna, y cambiarle el id a una relación YA CARGADA no la recarga sola —el
+        objeto que cuelga de `recepcion.transportador` sigue siendo el transportador VIEJO
+        hasta que la sesión lo expire—. Sin esta línea, pasarle un día de un transportador
+        a otro leía la tarifa del que lo dejó: la ruta "A fábrica" de Alex es de DÍA FIJO,
+        así que el día de 82,00 L que se le pasaba a Beto —que cobra $310,15 POR LITRO, o
+        sea $25.432,30— salía con una foto de $150.000, un viaje fijo de un transportador
+        que no cobra por viaje. Y el mismo día terminaba cobrado dos veces: $150.000 en el
+        comprobante de Alex y otros $150.000 de fantasma del lado de Beto.
+        """
+        if (
+            recepcion is not None
+            and recepcion.transportador_id == transportador_id
+            and recepcion.transportador is not None
+            and recepcion.transportador.id == transportador_id
+            and recepcion.transportador.empresa_id == self.ctx.empresa_id
+        ):
+            return recepcion.transportador
+        return TransportadorRepository(self.db, self.ctx.empresa_id).get(transportador_id)
 
     def validar_crear(self, data: dict[str, Any]) -> None:
         if self.repo.existe_registro_dia(data["proveedor_id"], data["fecha"]):
@@ -920,6 +1447,16 @@ class RecepcionService(BaseService[RecepcionLeche]):
         data = payload.model_dump(exclude_unset=True)
         data = self._completar_y_calcular(data)
         recepcion = super().crear(data)
+        # Se baja la fila ANTES de repartir: el reparto lee el grupo desde la base (la
+        # sesión no hace autoflush) y sin esto la recepción que se acaba de crear no
+        # estaría ahí, o sea que el fijo se repartiría entre todas menos ella.
+        self.db.flush()
+        self._repartir_el_fijo_del_dia(
+            recepcion.transportador_id,
+            recepcion.fecha,
+            recepcion.ruta_id,
+            recepcion_del_grupo=recepcion,
+        )
         self._marcar_estado_liquidacion([recepcion])
         return recepcion
 
@@ -940,26 +1477,82 @@ class RecepcionService(BaseService[RecepcionLeche]):
         nueva_fecha = data.get("fecha", actual.fecha)
         if self.repo.existe_registro_dia(actual.proveedor_id, nueva_fecha, exclude_id=entity_id):
             raise ConflictError("Ya existe una recepción de este proveedor en esa fecha")
+        # LO QUE ESTE GUARDADO SUELTA, resuelto ANTES de calcular la plata y no después,
+        # porque es lo que decide si la foto del flete la pone este camino o el
+        # comprobante. Sigue devolviendo lo mismo que devolvía calculándolo abajo: solo
+        # mira el transportador y la fecha, que ya están en `data`.
+        soltar = self._marcas_a_soltar(actual, liquidaciones, data, nueva_fecha)
         # ------------------------------------------- CUÁNDO SE VUELVE A CALCULAR EL FLETE
         # La cifra del flete (`valor_transporte`) es la plata que se le va a cobrar al
-        # transportador por ese día y es DERIVADA (litros × tarifa de hoy). Cuándo se
-        # vuelve a derivar lo decide `_hay_que_rederivar_el_flete`, y la regla completa
-        # —con las cifras del caso que cerró— está en el bloque "CUÁNDO SE VUELVE A
-        # CALCULAR LA CIFRA DEL FLETE" del encabezado.
+        # transportador por ese día y es DERIVADA (litros × tarifa de hoy, o la parte que
+        # le toca del fijo). Cuándo se vuelve a derivar lo decide
+        # `_hay_que_rederivar_el_flete`, y la regla completa —con las cifras del caso que
+        # cerró— está en el bloque "CUÁNDO SE VUELVE A CALCULAR LA CIFRA DEL FLETE" del
+        # encabezado.
         #
-        # Lo que hay que tener presente al leer esta línea: un día que YA ESTÁ en un
-        # comprobante de flete solo se re-deriva si el guardado le movió algo al flete.
-        # Guardar una observación no re-precifica un comprobante ya emitido; para eso
-        # está el botón Recalcular, que el dueño oprime a propósito.
-        recalcular_flete = self._hay_que_rederivar_el_flete(candado, cambios)
+        # Lo que hay que tener presente al leer esta línea: MIENTRAS EL DÍA SE QUEDE EN SU
+        # COMPROBANTE, ACÁ NO SE LE TOCA LA FOTO. Se la pone el recuadre de ese
+        # comprobante, que es el único que sabe en qué modo y a qué tarifa se armó ese
+        # papel. Este camino solo la deriva cuando el día está (o queda) suelto, o cuando
+        # queda apagado y por lo tanto ya no compone ningún renglón.
+        recalcular_flete = self._hay_que_rederivar_el_flete(
+            candado,
+            se_queda_en_el_comprobante=(
+                actual.liquidacion_transporte_id is not None
+                and "liquidacion_transporte_id" not in soltar
+                # LA RUTA ES LA QUE ESCOGE LA TARIFA, así que cambiarla es escoger otra a
+                # propósito: ahí sí se re-deriva con la de hoy, como siempre. El día pasa
+                # a un grupo que el comprobante puede no haber cobrado nunca —Nápoles,
+                # por litro— y de ese grupo el papel no sabe ningún precio que conservar.
+                # No abre ninguna puerta: si el grupo al que llega SÍ está en el
+                # comprobante, el recuadre le vuelve a poner encima la cifra del papel.
+                and "ruta_id" not in cambios
+            ),
+            queda_apagada=data.get("estado", actual.estado) != "activo",
+        )
         data = self._completar_y_calcular(data, actual, recalcular_flete=recalcular_flete)
-        data.update(self._marcas_a_soltar(actual, liquidaciones, data, nueva_fecha))
+        data.update(soltar)
+        # EL GRUPO QUE ESTE DÍA TENÍA ANTES DE MOVERSE, apuntado antes de escribir: si el
+        # guardado le cambia el día, la ruta o el transportador —o lo apaga—, el fijo del
+        # grupo que deja tiene que repartirse otra vez entre los que se quedan, o esos
+        # $150.000 quedarían repartidos entre una recepción de más.
+        grupo_de_antes = (actual.transportador_id, actual.fecha, actual.ruta_id)
 
         recepcion = super().actualizar(entity_id, data)
         # Se baja el cambio antes de recuadrar: la sesión no hace autoflush y el
         # recálculo vuelve a leer las recepciones desde la base.
         self.db.flush()
+        # EL DÍA QUE SE MUEVE A UN VIAJE FIJO YA COBRADO ENTRA A ESE VIAJE, y esto va
+        # ANTES del recuadre para que el comprobante que lo recibe se rearme ya con él.
+        # Ver `_volver_al_viaje_ya_cobrado`.
+        if cambios & _CAMPOS_QUE_MUEVEN_EL_DIA:
+            recuperado = self._volver_al_viaje_ya_cobrado(recepcion)
+            if recuperado is not None:
+                liquidaciones = liquidaciones + [recuperado]
+        # EL RECUADRE VA PRIMERO Y EL FIJO PENDIENTE DESPUÉS, y el orden es plata.
+        #
+        # Cada uno es dueño de sus propias recepciones y en eso no se pisan (el recuadre
+        # rearma las que están EN un comprobante; el reparto de abajo, las que no están en
+        # ninguno). Pero el de abajo LE PREGUNTA AL DE ARRIBA: para saber cuánto vale un
+        # día fijo pendiente hay que saber si ese (día, ruta) ya se cobró completo en un
+        # comprobante, y eso lo dicen los renglones que el recuadre acaba de rehacer.
+        #
+        # Al revés se perdía plata, y así: el 16/07 fijo con dos recepciones, una en el
+        # comprobante y otra suelta (anotada tarde, entró en $0,00 porque el día ya
+        # estaba cobrado). Se apaga la del comprobante. Con el reparto primero, el
+        # pendiente leía el renglón viejo —todavía existía—, se declaraba "ya cobrado" y
+        # se quedaba en $0,00; un renglón después el recuadre borraba ese renglón, y el
+        # día terminaba valiendo $0,00 con leche activa: el camión hizo el viaje y no se
+        # le paga nada. Con el recuadre primero, el renglón ya no está cuando el
+        # pendiente pregunta, y el día vuelve a valer sus $150.000.
+        #
+        # Ver el bloque "DÓNDE VIVE LA CUENTA DEL DÍA FIJO".
         self._recuadrar(liquidaciones)
+        grupo_de_ahora = (recepcion.transportador_id, recepcion.fecha, recepcion.ruta_id)
+        for transportador_id, fecha, ruta_id in dict.fromkeys((grupo_de_antes, grupo_de_ahora)):
+            self._repartir_el_fijo_del_dia(
+                transportador_id, fecha, ruta_id, recepcion_del_grupo=recepcion
+            )
         self._marcar_estado_liquidacion([recepcion])
         return recepcion
 
@@ -975,9 +1568,16 @@ class RecepcionService(BaseService[RecepcionLeche]):
         """
         recepcion = self.repo.get_or_fail(entity_id)
         liquidaciones = self._exigir_no_pagada(recepcion, "eliminar")
+        # El grupo del que sale, apuntado antes de borrar: si era un día fijo, sus
+        # $150.000 tienen que volver a repartirse entre las recepciones que quedan.
+        grupo = (recepcion.transportador_id, recepcion.fecha, recepcion.ruta_id)
         super().eliminar(entity_id)
         self.db.flush()
+        # El recuadre primero y el fijo pendiente después, por lo mismo que en
+        # `actualizar`: el pendiente necesita saber qué días ya están cobrados, y eso lo
+        # dicen los renglones que el recuadre acaba de rehacer.
         self._recuadrar(liquidaciones)
+        self._repartir_el_fijo_del_dia(*grupo, recepcion_del_grupo=recepcion)
 
     # ---------------------------------------------------------------- lecturas
     def obtener(self, entity_id: uuid.UUID) -> RecepcionLeche:

@@ -1,0 +1,2948 @@
+{
+ "admin.a": {
+  "balance": {
+   "cartera_por_cobrar": "0",
+   "fecha_corte": "2026-08-20",
+   "liquidaciones_por_pagar": "3530481.81",
+   "saldo_bancos": "0",
+   "saldo_cajas": "0",
+   "terceros_le_quedan_debiendo": "0",
+   "total_disponible": "0"
+  },
+  "estado_resultados": {
+   "costo_leche": "3488382.00",
+   "costo_queso_vendido": "0.00",
+   "costo_transporte": "423639.30",
+   "descuentos": "0",
+   "desde": "2026-07-01",
+   "gastos_por_categoria": [],
+   "hasta": "2026-08-31",
+   "ingresos_ventas": "0",
+   "leche_sin_usar": "3912021.30",
+   "margen_neto": "0",
+   "origen_del_costo": [],
+   "otras_ventas": "0.00",
+   "queso_danado": "0.00",
+   "queso_en_bodega": "0.00",
+   "queso_vendido": "0.00",
+   "queso_vendido_sin_costo": "0.00",
+   "total_gastos": "0",
+   "transporte_despachos": "0.00",
+   "utilidad_bruta": "0.00",
+   "utilidad_neta": "0.00"
+  },
+  "grilla_agosto": {
+   "desde": "2026-08-01",
+   "fechas": [
+    "2026-08-01",
+    "2026-08-02",
+    "2026-08-03",
+    "2026-08-04",
+    "2026-08-05",
+    "2026-08-06",
+    "2026-08-07",
+    "2026-08-08",
+    "2026-08-09",
+    "2026-08-10",
+    "2026-08-11",
+    "2026-08-12",
+    "2026-08-13",
+    "2026-08-14",
+    "2026-08-15"
+   ],
+   "filas": [
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-03": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "55.05",
+       "pagada": false
+      },
+      "2026-08-09": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "39.60",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Aurelio A",
+     "total_litros": "94.65",
+     "valor_bruto": "170370.00",
+     "valor_neto": "170370.00",
+     "valor_transporte": "24135.75",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-03": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "180.20",
+       "pagada": false
+      },
+      "2026-08-05": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "64.80",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Gilberto A",
+     "total_litros": "245.00",
+     "valor_bruto": "441000.00",
+     "valor_neto": "441000.00",
+     "valor_transporte": "45423.00",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-05": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "70.15",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Henri A",
+     "total_litros": "70.15",
+     "valor_bruto": "126270.00",
+     "valor_neto": "126270.00",
+     "valor_transporte": "13005.81",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-05": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "91.30",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Marleny A",
+     "total_litros": "91.30",
+     "valor_bruto": "164340.00",
+     "valor_neto": "164340.00",
+     "valor_transporte": "23281.50",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-09": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "88.75",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Ramiro A",
+     "total_litros": "88.75",
+     "valor_bruto": "159750.00",
+     "valor_neto": "159750.00",
+     "valor_transporte": "16454.25",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-05": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "142.90",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Rosa A",
+     "total_litros": "142.90",
+     "valor_bruto": "257220.00",
+     "valor_neto": "257220.00",
+     "valor_transporte": "36439.50",
+     "vereda": "La Vega"
+    }
+   ],
+   "hasta": "2026-08-15",
+   "total_litros": "732.75",
+   "total_transporte": "158739.81",
+   "total_valor_neto": "1318950.00",
+   "totales_dia": {
+    "2026-08-01": "0",
+    "2026-08-02": "0",
+    "2026-08-03": "235.25",
+    "2026-08-04": "0",
+    "2026-08-05": "369.15",
+    "2026-08-06": "0",
+    "2026-08-07": "0",
+    "2026-08-08": "0",
+    "2026-08-09": "128.35",
+    "2026-08-10": "0",
+    "2026-08-11": "0",
+    "2026-08-12": "0",
+    "2026-08-13": "0",
+    "2026-08-14": "0",
+    "2026-08-15": "0"
+   }
+  },
+  "grilla_julio": {
+   "desde": "2026-07-16",
+   "fechas": [
+    "2026-07-16",
+    "2026-07-17",
+    "2026-07-18",
+    "2026-07-19",
+    "2026-07-20",
+    "2026-07-21",
+    "2026-07-22",
+    "2026-07-23",
+    "2026-07-24",
+    "2026-07-25",
+    "2026-07-26",
+    "2026-07-27",
+    "2026-07-28",
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31"
+   ],
+   "filas": [
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-07-16": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "47.90",
+       "pagada": true
+      },
+      "2026-07-17": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "51.10",
+       "pagada": true
+      },
+      "2026-07-20": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "38.75",
+       "pagada": true
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Aurelio A",
+     "total_litros": "137.75",
+     "valor_bruto": "247950.00",
+     "valor_neto": "247950.00",
+     "valor_transporte": "35126.25",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-07-16": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "227.55",
+       "pagada": true
+      },
+      "2026-07-18": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "96.30",
+       "pagada": true
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Gilberto A",
+     "total_litros": "323.85",
+     "valor_bruto": "582930.00",
+     "valor_neto": "582930.00",
+     "valor_transporte": "60041.79",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-07-18": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "225.00",
+       "pagada": true
+      },
+      "2026-07-21": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "63.40",
+       "pagada": true
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Henri A",
+     "total_litros": "288.40",
+     "valor_bruto": "519120.00",
+     "valor_neto": "519120.00",
+     "valor_transporte": "61378.51",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-07-16": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "82.48",
+       "pagada": true
+      },
+      "2026-07-18": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "137.45",
+       "pagada": true
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Marleny A",
+     "total_litros": "219.93",
+     "valor_bruto": "395874.00",
+     "valor_neto": "395874.00",
+     "valor_transporte": "56082.15",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0",
+     "celdas": {},
+     "descuentos": "0",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Ramiro A",
+     "total_litros": "0",
+     "valor_bruto": "0",
+     "valor_neto": "0",
+     "valor_transporte": "0",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-07-17": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "124.20",
+       "pagada": true
+      },
+      "2026-07-20": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "111.11",
+       "pagada": true
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Rosa A",
+     "total_litros": "235.31",
+     "valor_bruto": "423558.00",
+     "valor_neto": "423558.00",
+     "valor_transporte": "52270.79",
+     "vereda": "La Vega"
+    }
+   ],
+   "hasta": "2026-07-31",
+   "total_litros": "1205.24",
+   "total_transporte": "264899.49",
+   "total_valor_neto": "2169432.00",
+   "totales_dia": {
+    "2026-07-16": "357.93",
+    "2026-07-17": "175.30",
+    "2026-07-18": "458.75",
+    "2026-07-19": "0",
+    "2026-07-20": "149.86",
+    "2026-07-21": "63.40",
+    "2026-07-22": "0",
+    "2026-07-23": "0",
+    "2026-07-24": "0",
+    "2026-07-25": "0",
+    "2026-07-26": "0",
+    "2026-07-27": "0",
+    "2026-07-28": "0",
+    "2026-07-29": "0",
+    "2026-07-30": "0",
+    "2026-07-31": "0"
+   }
+  },
+  "libro_diario": {
+   "asientos": [],
+   "desde": "2026-07-01",
+   "hasta": "2026-08-31",
+   "total_egresos": "0",
+   "total_ingresos": "0"
+  },
+  "liquidaciones": [
+   {
+    "anticipos": "0",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-16",
+      "litros": "47.90",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "86220.00"
+     },
+     {
+      "fecha": "2026-07-17",
+      "litros": "51.10",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "91980.00"
+     },
+     {
+      "fecha": "2026-07-20",
+      "litros": "38.75",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "69750.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "247950.00",
+    "pagado": "0",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 8CB19DCF Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Aurelio A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 8CB19DCF Detalle diario Fecha Litros Precio/L Valor 16/07/2026 47,9 L $1.800 $86.220 17/07/2026 51,1 L $1.800 $91.980 20/07/2026 38,75 L $1.800 $69.750 Resumen de liquidación Total litros 137,75 L Precio promedio $1.800 Valor bruto $247.950 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $247.950 Anticipos aplicados - $0 SALDO A PAGAR $247.950 Entregué conforme Quesera A Recibí conforme Aurelio A",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "1800.00",
+    "saldo": "247950.00",
+    "saldo_anterior": "0",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "137.75",
+    "valor_bruto": "247950.00",
+    "valor_total": "247950.00",
+    "valor_transporte": "35126.25"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-16",
+      "litros": "82.48",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "148464.00"
+     },
+     {
+      "fecha": "2026-07-18",
+      "litros": "137.45",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "247410.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "395874.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º FA6FA92F Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Marleny A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º FA6FA92F Detalle diario Fecha Litros Precio/L Valor 16/07/2026 82,48 L $1.800 $148.464 18/07/2026 137,45 L $1.800 $247.410 Resumen de liquidación Total litros 219,93 L Precio promedio $1.800 Valor bruto $395.874 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $395.874 Anticipos aplicados - $0 SALDO A PAGAR $395.874 Entregué conforme Quesera A Recibí conforme Marleny A",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "1800.00",
+    "saldo": "395874.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "219.93",
+    "valor_bruto": "395874.00",
+    "valor_total": "395874.00",
+    "valor_transporte": "56082.15"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-17",
+      "litros": "124.20",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "223560.00"
+     },
+     {
+      "fecha": "2026-07-20",
+      "litros": "111.11",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "199998.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "423558.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 68D55A5C Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Rosa A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 68D55A5C Detalle diario Fecha Litros Precio/L Valor 17/07/2026 124,2 L $1.800 $223.560 20/07/2026 111,11 L $1.800 $199.998 Resumen de liquidación Total litros 235,31 L Precio promedio $1.800 Valor bruto $423.558 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $423.558 Anticipos aplicados - $0 SALDO A PAGAR $423.558 Entregué conforme Quesera A Recibí conforme Rosa A",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "1800.00",
+    "saldo": "423558.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "235.31",
+    "valor_bruto": "423558.00",
+    "valor_total": "423558.00",
+    "valor_transporte": "52270.79"
+   },
+   {
+    "anticipos": "0",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-18",
+      "litros": "225.00",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "405000.00"
+     },
+     {
+      "fecha": "2026-07-21",
+      "litros": "63.40",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "114120.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "519120.00",
+    "pagado": "0",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 51A0FF10 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Henri A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 51A0FF10 Detalle diario Fecha Litros Precio/L Valor 18/07/2026 225 L $1.800 $405.000 21/07/2026 63,4 L $1.800 $114.120 Resumen de liquidación Total litros 288,4 L Precio promedio $1.800 Valor bruto $519.120 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $519.120 Anticipos aplicados - $0 SALDO A PAGAR $519.120 Entregué conforme Quesera A Recibí conforme Henri A",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "1800.00",
+    "saldo": "519120.00",
+    "saldo_anterior": "0",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "288.40",
+    "valor_bruto": "519120.00",
+    "valor_total": "519120.00",
+    "valor_transporte": "61378.51"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-16",
+      "litros": "227.55",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "409590.00"
+     },
+     {
+      "fecha": "2026-07-18",
+      "litros": "96.30",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "173340.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "582930.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 32E41C18 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Gilberto A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 32E41C18 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 227,55 L $1.800 $409.590 18/07/2026 96,3 L $1.800 $173.340 Resumen de liquidación Total litros 323,85 L Precio promedio $1.800 Valor bruto $582.930 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $582.930 Anticipos aplicados - $0 SALDO A PAGAR $582.930 Entregué conforme Quesera A Recibí conforme Gilberto A",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "1800.00",
+    "saldo": "582930.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "323.85",
+    "valor_bruto": "582930.00",
+    "valor_total": "582930.00",
+    "valor_transporte": "60041.79"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-05",
+      "litros": "70.15",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "126270.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "126270.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 7FB7C84A Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Henri A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 7FB7C84A Detalle diario Fecha Litros Precio/L Valor 05/08/2026 70,15 L $1.800 $126.270 Resumen de liquidación Total litros 70,15 L Precio promedio $1.800 Valor bruto $126.270 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $126.270 Anticipos aplicados - $0 SALDO A PAGAR $126.270 Entregué conforme Quesera A Recibí conforme Henri A",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "126270.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "70.15",
+    "valor_bruto": "126270.00",
+    "valor_total": "126270.00",
+    "valor_transporte": "13005.81"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-09",
+      "litros": "88.75",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "159750.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "159750.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 99C8EC84 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Ramiro A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 99C8EC84 Detalle diario Fecha Litros Precio/L Valor 09/08/2026 88,75 L $1.800 $159.750 Resumen de liquidación Total litros 88,75 L Precio promedio $1.800 Valor bruto $159.750 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $159.750 Anticipos aplicados - $0 SALDO A PAGAR $159.750 Entregué conforme Quesera A Recibí conforme Ramiro A",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "159750.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "88.75",
+    "valor_bruto": "159750.00",
+    "valor_total": "159750.00",
+    "valor_transporte": "16454.25"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-05",
+      "litros": "91.30",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "164340.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "164340.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º D5535385 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Marleny A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º D5535385 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 91,3 L $1.800 $164.340 Resumen de liquidación Total litros 91,3 L Precio promedio $1.800 Valor bruto $164.340 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $164.340 Anticipos aplicados - $0 SALDO A PAGAR $164.340 Entregué conforme Quesera A Recibí conforme Marleny A",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "164340.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "91.30",
+    "valor_bruto": "164340.00",
+    "valor_total": "164340.00",
+    "valor_transporte": "23281.50"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-03",
+      "litros": "55.05",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "99090.00"
+     },
+     {
+      "fecha": "2026-08-09",
+      "litros": "39.60",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "71280.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "170370.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 44683FBE Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Aurelio A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 44683FBE Detalle diario Fecha Litros Precio/L Valor 03/08/2026 55,05 L $1.800 $99.090 09/08/2026 39,6 L $1.800 $71.280 Resumen de liquidación Total litros 94,65 L Precio promedio $1.800 Valor bruto $170.370 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $170.370 Anticipos aplicados - $0 SALDO A PAGAR $170.370 Entregué conforme Quesera A Recibí conforme Aurelio A",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "170370.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "94.65",
+    "valor_bruto": "170370.00",
+    "valor_total": "170370.00",
+    "valor_transporte": "24135.75"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-05",
+      "litros": "142.90",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "257220.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "257220.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º DDB74E41 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Rosa A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º DDB74E41 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 142,9 L $1.800 $257.220 Resumen de liquidación Total litros 142,9 L Precio promedio $1.800 Valor bruto $257.220 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $257.220 Anticipos aplicados - $0 SALDO A PAGAR $257.220 Entregué conforme Quesera A Recibí conforme Rosa A",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "257220.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "142.90",
+    "valor_bruto": "257220.00",
+    "valor_total": "257220.00",
+    "valor_transporte": "36439.50"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-03",
+      "litros": "180.20",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "324360.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "324360.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º F6B3B822 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Gilberto A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º F6B3B822 Detalle diario Fecha Litros Precio/L Valor 03/08/2026 180,2 L $1.800 $324.360 Resumen de liquidación Total litros 180,2 L Precio promedio $1.800 Valor bruto $324.360 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $324.360 Anticipos aplicados - $0 SALDO A PAGAR $324.360 Entregué conforme Quesera A Recibí conforme Gilberto A",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "324360.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "180.20",
+    "valor_bruto": "324360.00",
+    "valor_total": "324360.00",
+    "valor_transporte": "33409.08"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-21",
+      "litros": "63.40",
+      "precio_litro": "310.15",
+      "ruta_nombre": "Fabrica A",
+      "valor": "19663.51"
+     }
+    ],
+    "estado": "pagada",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "19663.51",
+    "pagado": "19663.51",
+    "pagos": [
+     {
+      "fecha": "2026-08-20",
+      "valor": "19663.51"
+     }
+    ],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º B20470FC Estado: PAGADA Emitido: 20/08/2026 00:43 Transportador Beto A Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 21/07/2026 Fabrica A 63,4 L $310,15 $19.663,51 Resumen de liquidación Total litros 63,4 L Valor transporte $19.663,51 VALOR TOTAL $19.663,51 Anticipos aplicados - $0 Pagado - $19.663,51 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 20/08/2026 $19.663,51 Beto A Pago total de la liquidación Entregué conforme Quesera A Recibí conforme Beto A",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "310.15",
+    "saldo": "0.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "transportador",
+    "total_litros": "63.40",
+    "valor_bruto": "0.00",
+    "valor_total": "19663.51",
+    "valor_transporte": "19663.51"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-16",
+      "litros": "227.55",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica A",
+      "valor": "42187.77"
+     },
+     {
+      "fecha": "2026-07-16",
+      "litros": "130.38",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles A",
+      "valor": "33246.90"
+     },
+     {
+      "fecha": "2026-07-17",
+      "litros": "175.30",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles A",
+      "valor": "44701.50"
+     },
+     {
+      "fecha": "2026-07-18",
+      "litros": "321.30",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica A",
+      "valor": "59569.02"
+     },
+     {
+      "fecha": "2026-07-18",
+      "litros": "137.45",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles A",
+      "valor": "35049.75"
+     },
+     {
+      "fecha": "2026-07-20",
+      "litros": "111.11",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica A",
+      "valor": "20599.79"
+     },
+     {
+      "fecha": "2026-07-20",
+      "litros": "38.75",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles A",
+      "valor": "9881.25"
+     }
+    ],
+    "estado": "pagada",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "245235.98",
+    "pagado": "245235.98",
+    "pagos": [
+     {
+      "fecha": "2026-08-20",
+      "valor": "245235.98"
+     }
+    ],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 93D71272 Estado: PAGADA Emitido: 20/08/2026 00:43 Transportador Alex A Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 16/07/2026 Fabrica A 227,55 L $185,40 $42.187,77 16/07/2026 Napoles A 130,38 L $255 $33.246,90 17/07/2026 Napoles A 175,3 L $255 $44.701,50 18/07/2026 Fabrica A 321,3 L $185,40 $59.569,02 18/07/2026 Napoles A 137,45 L $255 $35.049,75 20/07/2026 Fabrica A 111,11 L $185,40 $20.599,79 20/07/2026 Napoles A 38,75 L $255 $9.881,25 Resumen de liquidación Total litros 1.141,84 L Valor transporte $245.235,98 VALOR TOTAL $245.235,98 Anticipos aplicados - $0 Pagado - $245.235,98 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 20/08/2026 $245.235,98 Alex A Pago total de la liquidación Entregué conforme Quesera A Recibí conforme Alex A",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "214.77",
+    "saldo": "0.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "transportador",
+    "total_litros": "1141.84",
+    "valor_bruto": "0.00",
+    "valor_total": "245235.98",
+    "valor_transporte": "245235.98"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-03",
+      "litros": "180.20",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica A",
+      "valor": "33409.08"
+     },
+     {
+      "fecha": "2026-08-03",
+      "litros": "55.05",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles A",
+      "valor": "14037.75"
+     },
+     {
+      "fecha": "2026-08-05",
+      "litros": "70.15",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica A",
+      "valor": "13005.81"
+     },
+     {
+      "fecha": "2026-08-05",
+      "litros": "234.20",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles A",
+      "valor": "59721.00"
+     },
+     {
+      "fecha": "2026-08-09",
+      "litros": "88.75",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica A",
+      "valor": "16454.25"
+     },
+     {
+      "fecha": "2026-08-09",
+      "litros": "39.60",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles A",
+      "valor": "10098.00"
+     }
+    ],
+    "estado": "anulada",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "146725.89",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 12778BC8 Estado: ANULADA Emitido: 20/08/2026 00:43 Transportador Alex A Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica A 180,2 L $185,40 $33.409,08 03/08/2026 Napoles A 55,05 L $255 $14.037,75 05/08/2026 Fabrica A 70,15 L $185,40 $13.005,81 05/08/2026 Napoles A 234,2 L $255 $59.721 09/08/2026 Fabrica A 88,75 L $185,40 $16.454,25 09/08/2026 Napoles A 39,6 L $255 $10.098 Resumen de liquidación Total litros 667,95 L Valor transporte $146.725,89 VALOR TOTAL $146.725,89 Anticipos aplicados - $0 SALDO A PAGAR $146.725,89 Entregué conforme Quesera A Recibí conforme Alex A",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "219.67",
+    "saldo": "146725.89",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "transportador",
+    "total_litros": "667.95",
+    "valor_bruto": "0.00",
+    "valor_total": "146725.89",
+    "valor_transporte": "146725.89"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-03",
+      "litros": "180.20",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica A",
+      "valor": "33409.08"
+     },
+     {
+      "fecha": "2026-08-03",
+      "litros": "55.05",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles A",
+      "valor": "14037.75"
+     },
+     {
+      "fecha": "2026-08-05",
+      "litros": "134.95",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica A",
+      "valor": "25019.73"
+     },
+     {
+      "fecha": "2026-08-05",
+      "litros": "234.20",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles A",
+      "valor": "59721.00"
+     },
+     {
+      "fecha": "2026-08-09",
+      "litros": "88.75",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica A",
+      "valor": "16454.25"
+     },
+     {
+      "fecha": "2026-08-09",
+      "litros": "39.60",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles A",
+      "valor": "10098.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "158739.81",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º C2C657AD Estado: BORRADOR Emitido: 20/08/2026 00:43 Transportador Alex A Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica A 180,2 L $185,40 $33.409,08 03/08/2026 Napoles A 55,05 L $255 $14.037,75 05/08/2026 Fabrica A 134,95 L $185,40 $25.019,73 05/08/2026 Napoles A 234,2 L $255 $59.721 09/08/2026 Fabrica A 88,75 L $185,40 $16.454,25 09/08/2026 Napoles A 39,6 L $255 $10.098 Resumen de liquidación Total litros 732,75 L Valor transporte $158.739,81 VALOR TOTAL $158.739,81 Anticipos aplicados - $0 SALDO A PAGAR $158.739,81 Entregué conforme Quesera A Recibí conforme Alex A",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "216.64",
+    "saldo": "158739.81",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "transportador",
+    "total_litros": "732.75",
+    "valor_bruto": "0.00",
+    "valor_total": "158739.81",
+    "valor_transporte": "158739.81"
+   }
+  ],
+  "omitidas": [
+   [],
+   [],
+   []
+  ],
+  "orden_generadas": [
+   [
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "transportador",
+     null
+    ],
+    [
+     "transportador",
+     null
+    ]
+   ],
+   [
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "transportador",
+     null
+    ]
+   ],
+   [
+    [
+     "transportador",
+     null
+    ]
+   ]
+  ],
+  "recepciones": [
+   {
+    "bruto": "86220.00",
+    "estado": "activo",
+    "fecha": "2026-07-16",
+    "flete": "12214.50",
+    "litros": "47.90",
+    "neto": "86220.00",
+    "proveedor": "Aurelio A"
+   },
+   {
+    "bruto": "409590.00",
+    "estado": "activo",
+    "fecha": "2026-07-16",
+    "flete": "42187.77",
+    "litros": "227.55",
+    "neto": "409590.00",
+    "proveedor": "Gilberto A"
+   },
+   {
+    "bruto": "148464.00",
+    "estado": "activo",
+    "fecha": "2026-07-16",
+    "flete": "21032.40",
+    "litros": "82.48",
+    "neto": "148464.00",
+    "proveedor": "Marleny A"
+   },
+   {
+    "bruto": "91980.00",
+    "estado": "activo",
+    "fecha": "2026-07-17",
+    "flete": "13030.50",
+    "litros": "51.10",
+    "neto": "91980.00",
+    "proveedor": "Aurelio A"
+   },
+   {
+    "bruto": "108000.00",
+    "estado": "inactivo",
+    "fecha": "2026-07-17",
+    "flete": "11124.00",
+    "litros": "60.00",
+    "neto": "108000.00",
+    "proveedor": "Ramiro A"
+   },
+   {
+    "bruto": "223560.00",
+    "estado": "activo",
+    "fecha": "2026-07-17",
+    "flete": "31671.00",
+    "litros": "124.20",
+    "neto": "223560.00",
+    "proveedor": "Rosa A"
+   },
+   {
+    "bruto": "173340.00",
+    "estado": "activo",
+    "fecha": "2026-07-18",
+    "flete": "17854.02",
+    "litros": "96.30",
+    "neto": "173340.00",
+    "proveedor": "Gilberto A"
+   },
+   {
+    "bruto": "405000.00",
+    "estado": "activo",
+    "fecha": "2026-07-18",
+    "flete": "41715.00",
+    "litros": "225.00",
+    "neto": "405000.00",
+    "proveedor": "Henri A"
+   },
+   {
+    "bruto": "247410.00",
+    "estado": "activo",
+    "fecha": "2026-07-18",
+    "flete": "35049.75",
+    "litros": "137.45",
+    "neto": "247410.00",
+    "proveedor": "Marleny A"
+   },
+   {
+    "bruto": "69750.00",
+    "estado": "activo",
+    "fecha": "2026-07-20",
+    "flete": "9881.25",
+    "litros": "38.75",
+    "neto": "69750.00",
+    "proveedor": "Aurelio A"
+   },
+   {
+    "bruto": "199998.00",
+    "estado": "activo",
+    "fecha": "2026-07-20",
+    "flete": "20599.79",
+    "litros": "111.11",
+    "neto": "199998.00",
+    "proveedor": "Rosa A"
+   },
+   {
+    "bruto": "114120.00",
+    "estado": "activo",
+    "fecha": "2026-07-21",
+    "flete": "19663.51",
+    "litros": "63.40",
+    "neto": "114120.00",
+    "proveedor": "Henri A"
+   },
+   {
+    "bruto": "99090.00",
+    "estado": "activo",
+    "fecha": "2026-08-03",
+    "flete": "14037.75",
+    "litros": "55.05",
+    "neto": "99090.00",
+    "proveedor": "Aurelio A"
+   },
+   {
+    "bruto": "324360.00",
+    "estado": "activo",
+    "fecha": "2026-08-03",
+    "flete": "33409.08",
+    "litros": "180.20",
+    "neto": "324360.00",
+    "proveedor": "Gilberto A"
+   },
+   {
+    "bruto": "116640.00",
+    "estado": "activo",
+    "fecha": "2026-08-05",
+    "flete": "12013.92",
+    "litros": "64.80",
+    "neto": "116640.00",
+    "proveedor": "Gilberto A"
+   },
+   {
+    "bruto": "126270.00",
+    "estado": "activo",
+    "fecha": "2026-08-05",
+    "flete": "13005.81",
+    "litros": "70.15",
+    "neto": "126270.00",
+    "proveedor": "Henri A"
+   },
+   {
+    "bruto": "164340.00",
+    "estado": "activo",
+    "fecha": "2026-08-05",
+    "flete": "23281.50",
+    "litros": "91.30",
+    "neto": "164340.00",
+    "proveedor": "Marleny A"
+   },
+   {
+    "bruto": "257220.00",
+    "estado": "activo",
+    "fecha": "2026-08-05",
+    "flete": "36439.50",
+    "litros": "142.90",
+    "neto": "257220.00",
+    "proveedor": "Rosa A"
+   },
+   {
+    "bruto": "71280.00",
+    "estado": "activo",
+    "fecha": "2026-08-09",
+    "flete": "10098.00",
+    "litros": "39.60",
+    "neto": "71280.00",
+    "proveedor": "Aurelio A"
+   },
+   {
+    "bruto": "159750.00",
+    "estado": "activo",
+    "fecha": "2026-08-09",
+    "flete": "16454.25",
+    "litros": "88.75",
+    "neto": "159750.00",
+    "proveedor": "Ramiro A"
+   }
+  ],
+  "resumen": {
+   "desde": "2026-07-01",
+   "dias": [
+    {
+     "fecha": "2026-07-16",
+     "recepciones": 3,
+     "total_litros": "357.93",
+     "valor_bruto": "644274.00",
+     "valor_neto": "644274.00",
+     "valor_transporte": "75434.67"
+    },
+    {
+     "fecha": "2026-07-17",
+     "recepciones": 2,
+     "total_litros": "175.30",
+     "valor_bruto": "315540.00",
+     "valor_neto": "315540.00",
+     "valor_transporte": "44701.50"
+    },
+    {
+     "fecha": "2026-07-18",
+     "recepciones": 3,
+     "total_litros": "458.75",
+     "valor_bruto": "825750.00",
+     "valor_neto": "825750.00",
+     "valor_transporte": "94618.77"
+    },
+    {
+     "fecha": "2026-07-20",
+     "recepciones": 2,
+     "total_litros": "149.86",
+     "valor_bruto": "269748.00",
+     "valor_neto": "269748.00",
+     "valor_transporte": "30481.04"
+    },
+    {
+     "fecha": "2026-07-21",
+     "recepciones": 1,
+     "total_litros": "63.40",
+     "valor_bruto": "114120.00",
+     "valor_neto": "114120.00",
+     "valor_transporte": "19663.51"
+    },
+    {
+     "fecha": "2026-08-03",
+     "recepciones": 2,
+     "total_litros": "235.25",
+     "valor_bruto": "423450.00",
+     "valor_neto": "423450.00",
+     "valor_transporte": "47446.83"
+    },
+    {
+     "fecha": "2026-08-05",
+     "recepciones": 4,
+     "total_litros": "369.15",
+     "valor_bruto": "664470.00",
+     "valor_neto": "664470.00",
+     "valor_transporte": "84740.73"
+    },
+    {
+     "fecha": "2026-08-09",
+     "recepciones": 2,
+     "total_litros": "128.35",
+     "valor_bruto": "231030.00",
+     "valor_neto": "231030.00",
+     "valor_transporte": "26552.25"
+    }
+   ],
+   "hasta": "2026-08-31",
+   "precio_promedio": "1800.00",
+   "total_litros": "1937.99",
+   "valor_bruto": "3488382.00",
+   "valor_neto": "3488382.00",
+   "valor_transporte": "423639.30"
+  },
+  "tablero": {
+   "alertas_no_leidas": 0,
+   "cartera_pendiente": "0",
+   "fecha": "2026-08-20",
+   "gastos_mes": "0",
+   "gastos_mes_anterior": "0",
+   "gastos_por_categoria": [],
+   "liquidaciones_por_pagar": "3530481.81",
+   "litros_hoy": "0",
+   "litros_por_dia": [
+    {
+     "fecha": "2026-07-21",
+     "valor": "63.40"
+    },
+    {
+     "fecha": "2026-08-03",
+     "valor": "235.25"
+    },
+    {
+     "fecha": "2026-08-05",
+     "valor": "369.15"
+    },
+    {
+     "fecha": "2026-08-09",
+     "valor": "128.35"
+    }
+   ],
+   "litros_quincena": "0",
+   "litros_quincena_anterior": "732.75",
+   "produccion_kg_mes": "0",
+   "produccion_kg_mes_anterior": "0",
+   "produccion_por_tipo": [],
+   "terceros_le_quedan_debiendo": "0",
+   "top_proveedores": [],
+   "valor_leche_quincena": "0",
+   "ventas_mes": "0",
+   "ventas_mes_anterior": "0",
+   "ventas_por_dia": []
+  }
+ },
+ "admin.b": {
+  "balance": {
+   "cartera_por_cobrar": "0",
+   "fecha_corte": "2026-08-20",
+   "liquidaciones_por_pagar": "3530481.81",
+   "saldo_bancos": "0",
+   "saldo_cajas": "0",
+   "terceros_le_quedan_debiendo": "0",
+   "total_disponible": "0"
+  },
+  "estado_resultados": {
+   "costo_leche": "3488382.00",
+   "costo_queso_vendido": "0.00",
+   "costo_transporte": "423639.30",
+   "descuentos": "0",
+   "desde": "2026-07-01",
+   "gastos_por_categoria": [],
+   "hasta": "2026-08-31",
+   "ingresos_ventas": "0",
+   "leche_sin_usar": "3912021.30",
+   "margen_neto": "0",
+   "origen_del_costo": [],
+   "otras_ventas": "0.00",
+   "queso_danado": "0.00",
+   "queso_en_bodega": "0.00",
+   "queso_vendido": "0.00",
+   "queso_vendido_sin_costo": "0.00",
+   "total_gastos": "0",
+   "transporte_despachos": "0.00",
+   "utilidad_bruta": "0.00",
+   "utilidad_neta": "0.00"
+  },
+  "grilla_agosto": {
+   "desde": "2026-08-01",
+   "fechas": [
+    "2026-08-01",
+    "2026-08-02",
+    "2026-08-03",
+    "2026-08-04",
+    "2026-08-05",
+    "2026-08-06",
+    "2026-08-07",
+    "2026-08-08",
+    "2026-08-09",
+    "2026-08-10",
+    "2026-08-11",
+    "2026-08-12",
+    "2026-08-13",
+    "2026-08-14",
+    "2026-08-15"
+   ],
+   "filas": [
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-03": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "55.05",
+       "pagada": false
+      },
+      "2026-08-09": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "39.60",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Aurelio B",
+     "total_litros": "94.65",
+     "valor_bruto": "170370.00",
+     "valor_neto": "170370.00",
+     "valor_transporte": "24135.75",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-03": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "180.20",
+       "pagada": false
+      },
+      "2026-08-05": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "64.80",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Gilberto B",
+     "total_litros": "245.00",
+     "valor_bruto": "441000.00",
+     "valor_neto": "441000.00",
+     "valor_transporte": "45423.00",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-05": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "70.15",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Henri B",
+     "total_litros": "70.15",
+     "valor_bruto": "126270.00",
+     "valor_neto": "126270.00",
+     "valor_transporte": "13005.81",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-05": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "91.30",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Marleny B",
+     "total_litros": "91.30",
+     "valor_bruto": "164340.00",
+     "valor_neto": "164340.00",
+     "valor_transporte": "23281.50",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-09": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "88.75",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Ramiro B",
+     "total_litros": "88.75",
+     "valor_bruto": "159750.00",
+     "valor_neto": "159750.00",
+     "valor_transporte": "16454.25",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-08-05": {
+       "con_transporte": true,
+       "flete_pagado": false,
+       "leche_pagada": false,
+       "liquidacion_estado": "borrador",
+       "liquidada": true,
+       "litros": "142.90",
+       "pagada": false
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Rosa B",
+     "total_litros": "142.90",
+     "valor_bruto": "257220.00",
+     "valor_neto": "257220.00",
+     "valor_transporte": "36439.50",
+     "vereda": "La Vega"
+    }
+   ],
+   "hasta": "2026-08-15",
+   "total_litros": "732.75",
+   "total_transporte": "158739.81",
+   "total_valor_neto": "1318950.00",
+   "totales_dia": {
+    "2026-08-01": "0",
+    "2026-08-02": "0",
+    "2026-08-03": "235.25",
+    "2026-08-04": "0",
+    "2026-08-05": "369.15",
+    "2026-08-06": "0",
+    "2026-08-07": "0",
+    "2026-08-08": "0",
+    "2026-08-09": "128.35",
+    "2026-08-10": "0",
+    "2026-08-11": "0",
+    "2026-08-12": "0",
+    "2026-08-13": "0",
+    "2026-08-14": "0",
+    "2026-08-15": "0"
+   }
+  },
+  "grilla_julio": {
+   "desde": "2026-07-16",
+   "fechas": [
+    "2026-07-16",
+    "2026-07-17",
+    "2026-07-18",
+    "2026-07-19",
+    "2026-07-20",
+    "2026-07-21",
+    "2026-07-22",
+    "2026-07-23",
+    "2026-07-24",
+    "2026-07-25",
+    "2026-07-26",
+    "2026-07-27",
+    "2026-07-28",
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31"
+   ],
+   "filas": [
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-07-16": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "47.90",
+       "pagada": true
+      },
+      "2026-07-17": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "51.10",
+       "pagada": true
+      },
+      "2026-07-20": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "38.75",
+       "pagada": true
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Aurelio B",
+     "total_litros": "137.75",
+     "valor_bruto": "247950.00",
+     "valor_neto": "247950.00",
+     "valor_transporte": "35126.25",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-07-16": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "227.55",
+       "pagada": true
+      },
+      "2026-07-18": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "96.30",
+       "pagada": true
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Gilberto B",
+     "total_litros": "323.85",
+     "valor_bruto": "582930.00",
+     "valor_neto": "582930.00",
+     "valor_transporte": "60041.79",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-07-18": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "225.00",
+       "pagada": true
+      },
+      "2026-07-21": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "63.40",
+       "pagada": true
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Henri B",
+     "total_litros": "288.40",
+     "valor_bruto": "519120.00",
+     "valor_neto": "519120.00",
+     "valor_transporte": "61378.51",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-07-16": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "82.48",
+       "pagada": true
+      },
+      "2026-07-18": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "137.45",
+       "pagada": true
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Marleny B",
+     "total_litros": "219.93",
+     "valor_bruto": "395874.00",
+     "valor_neto": "395874.00",
+     "valor_transporte": "56082.15",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0",
+     "celdas": {},
+     "descuentos": "0",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Ramiro B",
+     "total_litros": "0",
+     "valor_bruto": "0",
+     "valor_neto": "0",
+     "valor_transporte": "0",
+     "vereda": "La Vega"
+    },
+    {
+     "bonificaciones": "0.00",
+     "celdas": {
+      "2026-07-17": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "124.20",
+       "pagada": true
+      },
+      "2026-07-20": {
+       "con_transporte": true,
+       "flete_pagado": true,
+       "leche_pagada": false,
+       "liquidacion_estado": "pagada",
+       "liquidada": true,
+       "litros": "111.11",
+       "pagada": true
+      }
+     },
+     "descuentos": "0.00",
+     "precio_litro": "1800.00",
+     "proveedor_activo": true,
+     "proveedor_nombre": "Rosa B",
+     "total_litros": "235.31",
+     "valor_bruto": "423558.00",
+     "valor_neto": "423558.00",
+     "valor_transporte": "52270.79",
+     "vereda": "La Vega"
+    }
+   ],
+   "hasta": "2026-07-31",
+   "total_litros": "1205.24",
+   "total_transporte": "264899.49",
+   "total_valor_neto": "2169432.00",
+   "totales_dia": {
+    "2026-07-16": "357.93",
+    "2026-07-17": "175.30",
+    "2026-07-18": "458.75",
+    "2026-07-19": "0",
+    "2026-07-20": "149.86",
+    "2026-07-21": "63.40",
+    "2026-07-22": "0",
+    "2026-07-23": "0",
+    "2026-07-24": "0",
+    "2026-07-25": "0",
+    "2026-07-26": "0",
+    "2026-07-27": "0",
+    "2026-07-28": "0",
+    "2026-07-29": "0",
+    "2026-07-30": "0",
+    "2026-07-31": "0"
+   }
+  },
+  "libro_diario": {
+   "asientos": [],
+   "desde": "2026-07-01",
+   "hasta": "2026-08-31",
+   "total_egresos": "0",
+   "total_ingresos": "0"
+  },
+  "liquidaciones": [
+   {
+    "anticipos": "0",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-16",
+      "litros": "47.90",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "86220.00"
+     },
+     {
+      "fecha": "2026-07-17",
+      "litros": "51.10",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "91980.00"
+     },
+     {
+      "fecha": "2026-07-20",
+      "litros": "38.75",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "69750.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "247950.00",
+    "pagado": "0",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 01D91E11 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Aurelio B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 01D91E11 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 47,9 L $1.800 $86.220 17/07/2026 51,1 L $1.800 $91.980 20/07/2026 38,75 L $1.800 $69.750 Resumen de liquidación Total litros 137,75 L Precio promedio $1.800 Valor bruto $247.950 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $247.950 Anticipos aplicados - $0 SALDO A PAGAR $247.950 Entregué conforme Quesera B Recibí conforme Aurelio B",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "1800.00",
+    "saldo": "247950.00",
+    "saldo_anterior": "0",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "137.75",
+    "valor_bruto": "247950.00",
+    "valor_total": "247950.00",
+    "valor_transporte": "35126.25"
+   },
+   {
+    "anticipos": "0",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-16",
+      "litros": "82.48",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "148464.00"
+     },
+     {
+      "fecha": "2026-07-18",
+      "litros": "137.45",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "247410.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "395874.00",
+    "pagado": "0",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 494AEE83 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Marleny B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 494AEE83 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 82,48 L $1.800 $148.464 18/07/2026 137,45 L $1.800 $247.410 Resumen de liquidación Total litros 219,93 L Precio promedio $1.800 Valor bruto $395.874 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $395.874 Anticipos aplicados - $0 SALDO A PAGAR $395.874 Entregué conforme Quesera B Recibí conforme Marleny B",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "1800.00",
+    "saldo": "395874.00",
+    "saldo_anterior": "0",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "219.93",
+    "valor_bruto": "395874.00",
+    "valor_total": "395874.00",
+    "valor_transporte": "56082.15"
+   },
+   {
+    "anticipos": "0",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-17",
+      "litros": "124.20",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "223560.00"
+     },
+     {
+      "fecha": "2026-07-20",
+      "litros": "111.11",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "199998.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "423558.00",
+    "pagado": "0",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 5035AB77 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Rosa B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 5035AB77 Detalle diario Fecha Litros Precio/L Valor 17/07/2026 124,2 L $1.800 $223.560 20/07/2026 111,11 L $1.800 $199.998 Resumen de liquidación Total litros 235,31 L Precio promedio $1.800 Valor bruto $423.558 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $423.558 Anticipos aplicados - $0 SALDO A PAGAR $423.558 Entregué conforme Quesera B Recibí conforme Rosa B",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "1800.00",
+    "saldo": "423558.00",
+    "saldo_anterior": "0",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "235.31",
+    "valor_bruto": "423558.00",
+    "valor_total": "423558.00",
+    "valor_transporte": "52270.79"
+   },
+   {
+    "anticipos": "0",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-18",
+      "litros": "225.00",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "405000.00"
+     },
+     {
+      "fecha": "2026-07-21",
+      "litros": "63.40",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "114120.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "519120.00",
+    "pagado": "0",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º C1F6689E Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Henri B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º C1F6689E Detalle diario Fecha Litros Precio/L Valor 18/07/2026 225 L $1.800 $405.000 21/07/2026 63,4 L $1.800 $114.120 Resumen de liquidación Total litros 288,4 L Precio promedio $1.800 Valor bruto $519.120 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $519.120 Anticipos aplicados - $0 SALDO A PAGAR $519.120 Entregué conforme Quesera B Recibí conforme Henri B",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "1800.00",
+    "saldo": "519120.00",
+    "saldo_anterior": "0",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "288.40",
+    "valor_bruto": "519120.00",
+    "valor_total": "519120.00",
+    "valor_transporte": "61378.51"
+   },
+   {
+    "anticipos": "0",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-16",
+      "litros": "227.55",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "409590.00"
+     },
+     {
+      "fecha": "2026-07-18",
+      "litros": "96.30",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "173340.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "582930.00",
+    "pagado": "0",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 63AB8AF4 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Gilberto B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 63AB8AF4 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 227,55 L $1.800 $409.590 18/07/2026 96,3 L $1.800 $173.340 Resumen de liquidación Total litros 323,85 L Precio promedio $1.800 Valor bruto $582.930 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $582.930 Anticipos aplicados - $0 SALDO A PAGAR $582.930 Entregué conforme Quesera B Recibí conforme Gilberto B",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "1800.00",
+    "saldo": "582930.00",
+    "saldo_anterior": "0",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "323.85",
+    "valor_bruto": "582930.00",
+    "valor_total": "582930.00",
+    "valor_transporte": "60041.79"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-05",
+      "litros": "70.15",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "126270.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "126270.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 3E82D559 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Henri B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 3E82D559 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 70,15 L $1.800 $126.270 Resumen de liquidación Total litros 70,15 L Precio promedio $1.800 Valor bruto $126.270 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $126.270 Anticipos aplicados - $0 SALDO A PAGAR $126.270 Entregué conforme Quesera B Recibí conforme Henri B",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "126270.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "70.15",
+    "valor_bruto": "126270.00",
+    "valor_total": "126270.00",
+    "valor_transporte": "13005.81"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-09",
+      "litros": "88.75",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "159750.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "159750.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 0310951F Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Ramiro B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 0310951F Detalle diario Fecha Litros Precio/L Valor 09/08/2026 88,75 L $1.800 $159.750 Resumen de liquidación Total litros 88,75 L Precio promedio $1.800 Valor bruto $159.750 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $159.750 Anticipos aplicados - $0 SALDO A PAGAR $159.750 Entregué conforme Quesera B Recibí conforme Ramiro B",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "159750.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "88.75",
+    "valor_bruto": "159750.00",
+    "valor_total": "159750.00",
+    "valor_transporte": "16454.25"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-05",
+      "litros": "91.30",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "164340.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "164340.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º E55E2DB4 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Marleny B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º E55E2DB4 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 91,3 L $1.800 $164.340 Resumen de liquidación Total litros 91,3 L Precio promedio $1.800 Valor bruto $164.340 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $164.340 Anticipos aplicados - $0 SALDO A PAGAR $164.340 Entregué conforme Quesera B Recibí conforme Marleny B",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "164340.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "91.30",
+    "valor_bruto": "164340.00",
+    "valor_total": "164340.00",
+    "valor_transporte": "23281.50"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-03",
+      "litros": "55.05",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "99090.00"
+     },
+     {
+      "fecha": "2026-08-09",
+      "litros": "39.60",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "71280.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "170370.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 8C3E6E26 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Aurelio B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 8C3E6E26 Detalle diario Fecha Litros Precio/L Valor 03/08/2026 55,05 L $1.800 $99.090 09/08/2026 39,6 L $1.800 $71.280 Resumen de liquidación Total litros 94,65 L Precio promedio $1.800 Valor bruto $170.370 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $170.370 Anticipos aplicados - $0 SALDO A PAGAR $170.370 Entregué conforme Quesera B Recibí conforme Aurelio B",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "170370.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "94.65",
+    "valor_bruto": "170370.00",
+    "valor_total": "170370.00",
+    "valor_transporte": "24135.75"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-05",
+      "litros": "142.90",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "257220.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "257220.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 1A2C69E2 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Rosa B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 1A2C69E2 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 142,9 L $1.800 $257.220 Resumen de liquidación Total litros 142,9 L Precio promedio $1.800 Valor bruto $257.220 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $257.220 Anticipos aplicados - $0 SALDO A PAGAR $257.220 Entregué conforme Quesera B Recibí conforme Rosa B",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "257220.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "142.90",
+    "valor_bruto": "257220.00",
+    "valor_total": "257220.00",
+    "valor_transporte": "36439.50"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-03",
+      "litros": "180.20",
+      "precio_litro": "1800.00",
+      "ruta_nombre": null,
+      "valor": "324360.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "324360.00",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 025AF7CC Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Gilberto B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 025AF7CC Detalle diario Fecha Litros Precio/L Valor 03/08/2026 180,2 L $1.800 $324.360 Resumen de liquidación Total litros 180,2 L Precio promedio $1.800 Valor bruto $324.360 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $324.360 Anticipos aplicados - $0 SALDO A PAGAR $324.360 Entregué conforme Quesera B Recibí conforme Gilberto B",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "1800.00",
+    "saldo": "324360.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "proveedor",
+    "total_litros": "180.20",
+    "valor_bruto": "324360.00",
+    "valor_total": "324360.00",
+    "valor_transporte": "33409.08"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-21",
+      "litros": "63.40",
+      "precio_litro": "310.15",
+      "ruta_nombre": "Fabrica B",
+      "valor": "19663.51"
+     }
+    ],
+    "estado": "pagada",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "19663.51",
+    "pagado": "19663.51",
+    "pagos": [
+     {
+      "fecha": "2026-08-20",
+      "valor": "19663.51"
+     }
+    ],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 0CE8DB4D Estado: PAGADA Emitido: 20/08/2026 00:44 Transportador Beto B Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 21/07/2026 Fabrica B 63,4 L $310,15 $19.663,51 Resumen de liquidación Total litros 63,4 L Valor transporte $19.663,51 VALOR TOTAL $19.663,51 Anticipos aplicados - $0 Pagado - $19.663,51 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 20/08/2026 $19.663,51 Beto B Pago total de la liquidación Entregué conforme Quesera B Recibí conforme Beto B",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "310.15",
+    "saldo": "0.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "transportador",
+    "total_litros": "63.40",
+    "valor_bruto": "0.00",
+    "valor_total": "19663.51",
+    "valor_transporte": "19663.51"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-07-16",
+      "litros": "227.55",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica B",
+      "valor": "42187.77"
+     },
+     {
+      "fecha": "2026-07-16",
+      "litros": "130.38",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles B",
+      "valor": "33246.90"
+     },
+     {
+      "fecha": "2026-07-17",
+      "litros": "175.30",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles B",
+      "valor": "44701.50"
+     },
+     {
+      "fecha": "2026-07-18",
+      "litros": "321.30",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica B",
+      "valor": "59569.02"
+     },
+     {
+      "fecha": "2026-07-18",
+      "litros": "137.45",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles B",
+      "valor": "35049.75"
+     },
+     {
+      "fecha": "2026-07-20",
+      "litros": "111.11",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica B",
+      "valor": "20599.79"
+     },
+     {
+      "fecha": "2026-07-20",
+      "litros": "38.75",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles B",
+      "valor": "9881.25"
+     }
+    ],
+    "estado": "pagada",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "245235.98",
+    "pagado": "245235.98",
+    "pagos": [
+     {
+      "fecha": "2026-08-20",
+      "valor": "245235.98"
+     }
+    ],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 5C8E234E Estado: PAGADA Emitido: 20/08/2026 00:44 Transportador Alex B Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 16/07/2026 Fabrica B 227,55 L $185,40 $42.187,77 16/07/2026 Napoles B 130,38 L $255 $33.246,90 17/07/2026 Napoles B 175,3 L $255 $44.701,50 18/07/2026 Fabrica B 321,3 L $185,40 $59.569,02 18/07/2026 Napoles B 137,45 L $255 $35.049,75 20/07/2026 Fabrica B 111,11 L $185,40 $20.599,79 20/07/2026 Napoles B 38,75 L $255 $9.881,25 Resumen de liquidación Total litros 1.141,84 L Valor transporte $245.235,98 VALOR TOTAL $245.235,98 Anticipos aplicados - $0 Pagado - $245.235,98 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 20/08/2026 $245.235,98 Alex B Pago total de la liquidación Entregué conforme Quesera B Recibí conforme Alex B",
+    "periodo_fin": "2026-07-31",
+    "periodo_inicio": "2026-07-16",
+    "precio_promedio": "214.77",
+    "saldo": "0.00",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "transportador",
+    "total_litros": "1141.84",
+    "valor_bruto": "0.00",
+    "valor_total": "245235.98",
+    "valor_transporte": "245235.98"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-03",
+      "litros": "180.20",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica B",
+      "valor": "33409.08"
+     },
+     {
+      "fecha": "2026-08-03",
+      "litros": "55.05",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles B",
+      "valor": "14037.75"
+     },
+     {
+      "fecha": "2026-08-05",
+      "litros": "70.15",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica B",
+      "valor": "13005.81"
+     },
+     {
+      "fecha": "2026-08-05",
+      "litros": "234.20",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles B",
+      "valor": "59721.00"
+     },
+     {
+      "fecha": "2026-08-09",
+      "litros": "88.75",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica B",
+      "valor": "16454.25"
+     },
+     {
+      "fecha": "2026-08-09",
+      "litros": "39.60",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles B",
+      "valor": "10098.00"
+     }
+    ],
+    "estado": "anulada",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "146725.89",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 909B73DE Estado: ANULADA Emitido: 20/08/2026 00:44 Transportador Alex B Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica B 180,2 L $185,40 $33.409,08 03/08/2026 Napoles B 55,05 L $255 $14.037,75 05/08/2026 Fabrica B 70,15 L $185,40 $13.005,81 05/08/2026 Napoles B 234,2 L $255 $59.721 09/08/2026 Fabrica B 88,75 L $185,40 $16.454,25 09/08/2026 Napoles B 39,6 L $255 $10.098 Resumen de liquidación Total litros 667,95 L Valor transporte $146.725,89 VALOR TOTAL $146.725,89 Anticipos aplicados - $0 SALDO A PAGAR $146.725,89 Entregué conforme Quesera B Recibí conforme Alex B",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "219.67",
+    "saldo": "146725.89",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "transportador",
+    "total_litros": "667.95",
+    "valor_bruto": "0.00",
+    "valor_total": "146725.89",
+    "valor_transporte": "146725.89"
+   },
+   {
+    "anticipos": "0.00",
+    "bonificaciones": "0.00",
+    "descuentos": "0.00",
+    "detalles": [
+     {
+      "fecha": "2026-08-03",
+      "litros": "180.20",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica B",
+      "valor": "33409.08"
+     },
+     {
+      "fecha": "2026-08-03",
+      "litros": "55.05",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles B",
+      "valor": "14037.75"
+     },
+     {
+      "fecha": "2026-08-05",
+      "litros": "134.95",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica B",
+      "valor": "25019.73"
+     },
+     {
+      "fecha": "2026-08-05",
+      "litros": "234.20",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles B",
+      "valor": "59721.00"
+     },
+     {
+      "fecha": "2026-08-09",
+      "litros": "88.75",
+      "precio_litro": "185.40",
+      "ruta_nombre": "Fabrica B",
+      "valor": "16454.25"
+     },
+     {
+      "fecha": "2026-08-09",
+      "litros": "39.60",
+      "precio_litro": "255.00",
+      "ruta_nombre": "Napoles B",
+      "valor": "10098.00"
+     }
+    ],
+    "estado": "borrador",
+    "le_queda_debiendo": "0",
+    "neto_a_pagar": "158739.81",
+    "pagado": "0.00",
+    "pagos": [],
+    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 66A65AFD Estado: BORRADOR Emitido: 20/08/2026 00:44 Transportador Alex B Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica B 180,2 L $185,40 $33.409,08 03/08/2026 Napoles B 55,05 L $255 $14.037,75 05/08/2026 Fabrica B 134,95 L $185,40 $25.019,73 05/08/2026 Napoles B 234,2 L $255 $59.721 09/08/2026 Fabrica B 88,75 L $185,40 $16.454,25 09/08/2026 Napoles B 39,6 L $255 $10.098 Resumen de liquidación Total litros 732,75 L Valor transporte $158.739,81 VALOR TOTAL $158.739,81 Anticipos aplicados - $0 SALDO A PAGAR $158.739,81 Entregué conforme Quesera B Recibí conforme Alex B",
+    "periodo_fin": "2026-08-15",
+    "periodo_inicio": "2026-08-01",
+    "precio_promedio": "216.64",
+    "saldo": "158739.81",
+    "saldo_anterior": "0.00",
+    "tercero": null,
+    "tipo": "transportador",
+    "total_litros": "732.75",
+    "valor_bruto": "0.00",
+    "valor_total": "158739.81",
+    "valor_transporte": "158739.81"
+   }
+  ],
+  "omitidas": [
+   [],
+   [],
+   []
+  ],
+  "orden_generadas": [
+   [
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "transportador",
+     null
+    ],
+    [
+     "transportador",
+     null
+    ]
+   ],
+   [
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "proveedor",
+     null
+    ],
+    [
+     "transportador",
+     null
+    ]
+   ],
+   [
+    [
+     "transportador",
+     null
+    ]
+   ]
+  ],
+  "recepciones": [
+   {
+    "bruto": "86220.00",
+    "estado": "activo",
+    "fecha": "2026-07-16",
+    "flete": "12214.50",
+    "litros": "47.90",
+    "neto": "86220.00",
+    "proveedor": "Aurelio B"
+   },
+   {
+    "bruto": "409590.00",
+    "estado": "activo",
+    "fecha": "2026-07-16",
+    "flete": "42187.77",
+    "litros": "227.55",
+    "neto": "409590.00",
+    "proveedor": "Gilberto B"
+   },
+   {
+    "bruto": "148464.00",
+    "estado": "activo",
+    "fecha": "2026-07-16",
+    "flete": "21032.40",
+    "litros": "82.48",
+    "neto": "148464.00",
+    "proveedor": "Marleny B"
+   },
+   {
+    "bruto": "91980.00",
+    "estado": "activo",
+    "fecha": "2026-07-17",
+    "flete": "13030.50",
+    "litros": "51.10",
+    "neto": "91980.00",
+    "proveedor": "Aurelio B"
+   },
+   {
+    "bruto": "108000.00",
+    "estado": "inactivo",
+    "fecha": "2026-07-17",
+    "flete": "11124.00",
+    "litros": "60.00",
+    "neto": "108000.00",
+    "proveedor": "Ramiro B"
+   },
+   {
+    "bruto": "223560.00",
+    "estado": "activo",
+    "fecha": "2026-07-17",
+    "flete": "31671.00",
+    "litros": "124.20",
+    "neto": "223560.00",
+    "proveedor": "Rosa B"
+   },
+   {
+    "bruto": "173340.00",
+    "estado": "activo",
+    "fecha": "2026-07-18",
+    "flete": "17854.02",
+    "litros": "96.30",
+    "neto": "173340.00",
+    "proveedor": "Gilberto B"
+   },
+   {
+    "bruto": "405000.00",
+    "estado": "activo",
+    "fecha": "2026-07-18",
+    "flete": "41715.00",
+    "litros": "225.00",
+    "neto": "405000.00",
+    "proveedor": "Henri B"
+   },
+   {
+    "bruto": "247410.00",
+    "estado": "activo",
+    "fecha": "2026-07-18",
+    "flete": "35049.75",
+    "litros": "137.45",
+    "neto": "247410.00",
+    "proveedor": "Marleny B"
+   },
+   {
+    "bruto": "69750.00",
+    "estado": "activo",
+    "fecha": "2026-07-20",
+    "flete": "9881.25",
+    "litros": "38.75",
+    "neto": "69750.00",
+    "proveedor": "Aurelio B"
+   },
+   {
+    "bruto": "199998.00",
+    "estado": "activo",
+    "fecha": "2026-07-20",
+    "flete": "20599.79",
+    "litros": "111.11",
+    "neto": "199998.00",
+    "proveedor": "Rosa B"
+   },
+   {
+    "bruto": "114120.00",
+    "estado": "activo",
+    "fecha": "2026-07-21",
+    "flete": "19663.51",
+    "litros": "63.40",
+    "neto": "114120.00",
+    "proveedor": "Henri B"
+   },
+   {
+    "bruto": "99090.00",
+    "estado": "activo",
+    "fecha": "2026-08-03",
+    "flete": "14037.75",
+    "litros": "55.05",
+    "neto": "99090.00",
+    "proveedor": "Aurelio B"
+   },
+   {
+    "bruto": "324360.00",
+    "estado": "activo",
+    "fecha": "2026-08-03",
+    "flete": "33409.08",
+    "litros": "180.20",
+    "neto": "324360.00",
+    "proveedor": "Gilberto B"
+   },
+   {
+    "bruto": "116640.00",
+    "estado": "activo",
+    "fecha": "2026-08-05",
+    "flete": "12013.92",
+    "litros": "64.80",
+    "neto": "116640.00",
+    "proveedor": "Gilberto B"
+   },
+   {
+    "bruto": "126270.00",
+    "estado": "activo",
+    "fecha": "2026-08-05",
+    "flete": "13005.81",
+    "litros": "70.15",
+    "neto": "126270.00",
+    "proveedor": "Henri B"
+   },
+   {
+    "bruto": "164340.00",
+    "estado": "activo",
+    "fecha": "2026-08-05",
+    "flete": "23281.50",
+    "litros": "91.30",
+    "neto": "164340.00",
+    "proveedor": "Marleny B"
+   },
+   {
+    "bruto": "257220.00",
+    "estado": "activo",
+    "fecha": "2026-08-05",
+    "flete": "36439.50",
+    "litros": "142.90",
+    "neto": "257220.00",
+    "proveedor": "Rosa B"
+   },
+   {
+    "bruto": "71280.00",
+    "estado": "activo",
+    "fecha": "2026-08-09",
+    "flete": "10098.00",
+    "litros": "39.60",
+    "neto": "71280.00",
+    "proveedor": "Aurelio B"
+   },
+   {
+    "bruto": "159750.00",
+    "estado": "activo",
+    "fecha": "2026-08-09",
+    "flete": "16454.25",
+    "litros": "88.75",
+    "neto": "159750.00",
+    "proveedor": "Ramiro B"
+   }
+  ],
+  "resumen": {
+   "desde": "2026-07-01",
+   "dias": [
+    {
+     "fecha": "2026-07-16",
+     "recepciones": 3,
+     "total_litros": "357.93",
+     "valor_bruto": "644274.00",
+     "valor_neto": "644274.00",
+     "valor_transporte": "75434.67"
+    },
+    {
+     "fecha": "2026-07-17",
+     "recepciones": 2,
+     "total_litros": "175.30",
+     "valor_bruto": "315540.00",
+     "valor_neto": "315540.00",
+     "valor_transporte": "44701.50"
+    },
+    {
+     "fecha": "2026-07-18",
+     "recepciones": 3,
+     "total_litros": "458.75",
+     "valor_bruto": "825750.00",
+     "valor_neto": "825750.00",
+     "valor_transporte": "94618.77"
+    },
+    {
+     "fecha": "2026-07-20",
+     "recepciones": 2,
+     "total_litros": "149.86",
+     "valor_bruto": "269748.00",
+     "valor_neto": "269748.00",
+     "valor_transporte": "30481.04"
+    },
+    {
+     "fecha": "2026-07-21",
+     "recepciones": 1,
+     "total_litros": "63.40",
+     "valor_bruto": "114120.00",
+     "valor_neto": "114120.00",
+     "valor_transporte": "19663.51"
+    },
+    {
+     "fecha": "2026-08-03",
+     "recepciones": 2,
+     "total_litros": "235.25",
+     "valor_bruto": "423450.00",
+     "valor_neto": "423450.00",
+     "valor_transporte": "47446.83"
+    },
+    {
+     "fecha": "2026-08-05",
+     "recepciones": 4,
+     "total_litros": "369.15",
+     "valor_bruto": "664470.00",
+     "valor_neto": "664470.00",
+     "valor_transporte": "84740.73"
+    },
+    {
+     "fecha": "2026-08-09",
+     "recepciones": 2,
+     "total_litros": "128.35",
+     "valor_bruto": "231030.00",
+     "valor_neto": "231030.00",
+     "valor_transporte": "26552.25"
+    }
+   ],
+   "hasta": "2026-08-31",
+   "precio_promedio": "1800.00",
+   "total_litros": "1937.99",
+   "valor_bruto": "3488382.00",
+   "valor_neto": "3488382.00",
+   "valor_transporte": "423639.30"
+  },
+  "tablero": {
+   "alertas_no_leidas": 0,
+   "cartera_pendiente": "0",
+   "fecha": "2026-08-20",
+   "gastos_mes": "0",
+   "gastos_mes_anterior": "0",
+   "gastos_por_categoria": [],
+   "liquidaciones_por_pagar": "3530481.81",
+   "litros_hoy": "0",
+   "litros_por_dia": [
+    {
+     "fecha": "2026-07-21",
+     "valor": "63.40"
+    },
+    {
+     "fecha": "2026-08-03",
+     "valor": "235.25"
+    },
+    {
+     "fecha": "2026-08-05",
+     "valor": "369.15"
+    },
+    {
+     "fecha": "2026-08-09",
+     "valor": "128.35"
+    }
+   ],
+   "litros_quincena": "0",
+   "litros_quincena_anterior": "732.75",
+   "produccion_kg_mes": "0",
+   "produccion_kg_mes_anterior": "0",
+   "produccion_por_tipo": [],
+   "terceros_le_quedan_debiendo": "0",
+   "top_proveedores": [],
+   "valor_leche_quincena": "0",
+   "ventas_mes": "0",
+   "ventas_mes_anterior": "0",
+   "ventas_por_dia": []
+  }
+ }
+}

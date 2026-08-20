@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import lazyload
 
 from app.common.repository import BaseRepository
@@ -12,8 +12,10 @@ from app.modules.liquidaciones.models import (
     ESTADO_PAGADA,
     ESTADO_PARCIAL,
     TIPO_PROVEEDOR,
+    TIPO_TRANSPORTADOR,
     Anticipo,
     Liquidacion,
+    LiquidacionDetalle,
 )
 
 
@@ -187,6 +189,134 @@ class LiquidacionRepository(BaseRepository[Liquidacion]):
         """
         stmt = self.base_query().where(Liquidacion.deuda_trasladada_a_id == liquidacion_id)
         return list(self.db.scalars(stmt).all())
+
+    def viajes_ya_cobrados(
+        self,
+        transportador_id: uuid.UUID,
+        *,
+        excepto: uuid.UUID | None = None,
+    ) -> set[tuple[date, uuid.UUID | None]]:
+        """Los (día, ruta) de ESE transportador cuyo VIAJE ya está cobrado en un papel.
+
+        SOLO LA MIRA QUIEN COBRA POR DÍA FIJO, y por eso está escrita en términos del
+        viaje: en un fijo el (día, ruta) es UN viaje que se cobra UNA vez, así que lo
+        único que hay que saber es si ese viaje ya está en algún comprobante. Por litro
+        nadie pregunta esto —ahí cada litro se paga aparte y la leche anotada tarde SÍ
+        suma flete nuevo, que no cambió ni un centavo—.
+
+        SIN ESTO EL VIAJE SE COBRABA DOS VECES, y el camino no es raro:
+
+          el 16/07 Alex recoge en la ruta "a fábrica" a 5 proveedores → $150.000, se
+          liquida y SE PAGA. Después alguien anota tarde la leche de un sexto proveedor
+          de ESE MISMO día. Un comprobante pagado NO reserva sus fechas —a propósito,
+          ver `solapada_para_periodo`: si las reservara, el día anotado tarde no tendría
+          por dónde entrar nunca—, así que el dueño puede volver a correr la quincena…
+          y le saldría un segundo renglón "Día completo (a fábrica) $150.000" del MISMO
+          16 de julio. $150.000 de más, por una tarifa que dice "el día vale 150k".
+
+        Con esto, ese (día, ruta) se reconoce como YA COBRADO: la leche que se anote
+        después de ese día entra con flete $0,00 —el día ya costó $150.000 y recoger un
+        proveedor más no cuesta más, que es literalmente lo que significa la tarifa
+        fija— y su renglón sale en cero diciendo "Ya cobrado".
+
+        RESERVA EL VIAJE CUALQUIER RENGLÓN, TAMBIÉN UNO POR LITRO, y esa es la parte que
+        cierra el cruce de modos. Con las cifras: la ruta era POR LITRO y el 16/07 salió
+        cobrado en $53.273,68; el dueño le pone DÍA FIJO $150.000 y alguien anota tarde la
+        leche de un tercer proveedor de ese mismo día. Si un renglón por litro no reservara
+        nada, esa leche formaría un grupo fijo suelto por $150.000 y el mismo viaje quedaría
+        cobrado $203.273,68 entre los dos papeles. El viaje es el mismo lo hayan cobrado por
+        litro o por día: si ya está en un papel, el fijo no lo vuelve a cobrar.
+
+        Los demás filtros, uno por uno:
+
+        · `valor > 0`: un renglón de "ya cobrado" (que vale $0,00) no puede a su vez
+          hacer de cobrador. Solo reserva el día quien de verdad le entregó la plata.
+        · `estado != 'anulada'`: anular suelta las recepciones y es EL flujo de
+          corrección. Después de anular, el día vuelve a estar por cobrar completo y las
+          recepciones se rearman todas juntas en un solo fijo.
+        · `excepto`: la liquidación que se está recalculando no se estorba a sí misma.
+          Es lo que deja que RECALCULAR sí re-precifique al modo de hoy: si el papel se
+          reservara a sí mismo, su propio día fijo saldría siempre en $0,00.
+
+        Devuelve un conjunto de parejas (fecha, ruta_id) —con `ruta_id` en nulo para el
+        día sin ruta, que también puede tener fijo por la tarifa general—, listo para
+        preguntarle `in`. Va por consulta y con `empresa_id` puesto: son datos de plata
+        de un tenant.
+        """
+        stmt = (
+            select(LiquidacionDetalle.fecha, LiquidacionDetalle.ruta_id)
+            .join(Liquidacion, Liquidacion.id == LiquidacionDetalle.liquidacion_id)
+            .where(
+                Liquidacion.empresa_id == self.empresa_id,
+                Liquidacion.deleted_at.is_(None),
+                Liquidacion.tipo == TIPO_TRANSPORTADOR,
+                Liquidacion.transportador_id == transportador_id,
+                Liquidacion.estado != ESTADO_ANULADA,
+                LiquidacionDetalle.deleted_at.is_(None),
+                LiquidacionDetalle.valor > 0,
+            )
+            .distinct()
+        )
+        if excepto is not None:
+            stmt = stmt.where(Liquidacion.id != excepto)
+        return {(fila.fecha, fila.ruta_id) for fila in self.db.execute(stmt).all()}
+
+    def comprobante_que_cobra_el_viaje(
+        self, transportador_id: uuid.UUID, fecha: date, ruta_id: uuid.UUID | None
+    ) -> Liquidacion | None:
+        """EL comprobante que hoy cobra el viaje de ese (transportador, día, ruta).
+
+        Es la otra mitad de `viajes_ya_cobrados`: aquella dice QUÉ viajes ya están
+        cobrados, y esta dice CUÁL es el papel que los cobra, para poder devolverle una
+        recepción que se movió a ese día.
+
+        PARA QUÉ, con las cifras: el 16/07 en la ruta fija, Aurelio 82,00 L y Marleny
+        137,45 L, comprobante en $150.000 repartido $56.049,21 / $93.950,79. A Aurelio le
+        cambian el transportador —el día se suelta de ese comprobante, que se recuadra sin
+        él y le deja los $150.000 completos a Marleny— y un minuto después se lo devuelven.
+        Sin esto el día vuelve SUELTO: el viaje ya está cobrado, así que su foto queda en
+        $0,00 con la leche viva, y el reparto del fijo termina diciendo que recoger 137,45
+        L costó $150.000 y recoger 82,00 L costó nada. El costeo del queso lee esas fotos.
+
+        Con esto, la recepción que vuelve entra otra vez al papel que cobra ese viaje y
+        los $150.000 se vuelven a repartir entre las dos. EL VIAJE SIGUE VALIENDO
+        $150.000: no se cobra un peso más, solo se reparte entre quienes de verdad
+        vinieron en él.
+
+        Los filtros son los mismos de `viajes_ya_cobrados` —cualquier renglón que de
+        verdad cobró algo, y ningún comprobante anulado— más el período, que se exige
+        explícitamente: una recepción no puede entrar a un comprobante que no cubre su
+        fecha, aunque tuviera un renglón de ese día.
+
+        Y VALE PARA LOS DOS MODOS, no solo para el fijo: si el papel cobró ese día POR
+        LITRO, el día que vuelve también vuelve a él, y el renglón se rehace con los
+        litros que hoy tenga a la tarifa con que se emitió. El comprobante queda otra vez
+        EXACTAMENTE como estaba antes de que el día se fuera, que es lo que tiene que
+        pasar cuando alguien deshace una corrección.
+
+        NO filtra por pagada ni por abonos: eso lo decide quien llama, que es el único que
+        sabe si va a poder recuadrar. Devuelve el más antiguo cuando hay varios, para que
+        dos corridas iguales escojan el mismo.
+        """
+        stmt = (
+            self.base_query()
+            .join(LiquidacionDetalle, LiquidacionDetalle.liquidacion_id == Liquidacion.id)
+            .where(
+                Liquidacion.tipo == TIPO_TRANSPORTADOR,
+                Liquidacion.transportador_id == transportador_id,
+                Liquidacion.estado != ESTADO_ANULADA,
+                Liquidacion.periodo_inicio <= fecha,
+                Liquidacion.periodo_fin >= fecha,
+                LiquidacionDetalle.deleted_at.is_(None),
+                LiquidacionDetalle.fecha == fecha,
+                LiquidacionDetalle.ruta_id.is_(None)
+                if ruta_id is None
+                else LiquidacionDetalle.ruta_id == ruta_id,
+                LiquidacionDetalle.valor > 0,
+            )
+            .order_by(Liquidacion.created_at, Liquidacion.id)
+        )
+        return self.db.scalars(stmt).first()
 
     def solapada_para_periodo(
         self, tipo: str, tercero_id: uuid.UUID, inicio: date, fin: date

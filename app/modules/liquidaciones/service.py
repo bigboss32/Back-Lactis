@@ -6,12 +6,11 @@ import uuid
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
-from typing import Any, NamedTuple, Sequence
+from typing import Any, Iterable, NamedTuple, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, lazyload
 
-from app.common.dinero import repartir_al_resto_mayor
 from app.common.service import BaseService, serialize_entity
 from app.core.exceptions import BusinessError, NotFoundError
 from app.core.pagination import PageParams
@@ -27,6 +26,7 @@ from app.modules.liquidaciones.models import (
     Anticipo,
     Liquidacion,
     LiquidacionDetalle,
+    LiquidacionRuta,
     PagoLiquidacion,
 )
 from app.modules.liquidaciones.repository import AnticipoRepository, LiquidacionRepository
@@ -42,8 +42,15 @@ from app.modules.liquidaciones.schemas import (
 from app.modules.proveedores.repository import ProveedorRepository
 from app.modules.recepcion.models import RecepcionLeche
 from app.modules.recepcion.repository import RecepcionRepository
+from app.modules.transportadores.models import MODO_DIA_FIJO, MODO_POR_LITRO
 from app.modules.transportadores.repository import TransportadorRepository
-from app.modules.transportadores.tarifas import tarifa_por_litro
+from app.modules.transportadores.tarifas import (
+    Tarifa,
+    reparto_entre_las_fotos,
+    tarifa_de_transporte,
+    tarifa_por_litro,
+    valor_del_grupo,
+)
 from app.utils.export import build_liquidacion_pdf, litros, pesos
 
 CERO = Decimal("0")
@@ -77,13 +84,22 @@ def _centavos(valor: Decimal) -> Decimal:
 #   3. y ese total == la suma de los `recepciones_leche.valor_transporte` que
 #      entraron, que son FOTOS del momento en que se recibió la leche.
 #
+# Y CON LA TARIFA POR DÍA FIJO la invariante 1 cambia de forma, porque tiene que
+# cambiar: en un día fijo litros × precio NO reproduce el valor —$150.000 el día no
+# es ninguna tarifa por litro— así que ese renglón no puede decir "litros × precio =
+# valor". Dice que es EL DÍA COMPLETO: "Día completo (a fábrica): $150.000", con los
+# litros al lado como información. Y se verifica trivialmente: el día vale $150.000.
+# Los renglones por litro se siguen verificando multiplicando, como siempre. Cuál de
+# las dos cosas es cada renglón lo dice el propio renglón (`modo_transporte`), no se
+# adivina de las cifras.
+#
 # EL COMPROBANTE MANDA, y esa es la decisión del dueño que ordena todo lo de
 # abajo. Así cuadra él, a mano y con calculadora: junta los litros del día en esa
 # ruta, los multiplica por la tarifa, y eso TIENE que ser lo que dice el renglón.
 # O sea que el renglón de un (día, ruta) es UNO —litros sumados, la tarifa, y
-# valor = redondear(litros × tarifa) UNA SOLA VEZ—, y la plata de ese renglón SE
-# REPARTE entre las fotos de ese día y esa ruta para que las tres cosas se cumplan
-# a la vez.
+# valor = redondear(litros × tarifa) UNA SOLA VEZ, o el fijo del día si se cobra
+# así—, y la plata de ese renglón SE REPARTE entre las fotos de ese día y esa ruta
+# para que las tres cosas se cumplan a la vez.
 #
 # Antes se hacía al revés: el renglón sumaba las fotos y se PARTÍA en una línea
 # por recepción cuando la suma de las fotos redondeadas no daba lo mismo que
@@ -119,20 +135,359 @@ def _foto_del_flete(recepcion: RecepcionLeche) -> Decimal:
     return Decimal(recepcion.valor_transporte or 0)
 
 
-def _tarifa_de_hoy(recepcion: RecepcionLeche) -> Decimal:
-    """La tarifa que le aplica HOY: la de su ruta, o la general del transportador."""
+def _tarifa_de_hoy(recepcion: RecepcionLeche) -> Tarifa:
+    """La tarifa que le aplica HOY —con su MODO—: la de su ruta, o la general.
+
+    Devuelve la pareja (modo, valor) y no un número pelado a propósito: el valor no se
+    puede usar sin el modo. Ver `tarifas.Tarifa`.
+    """
+    return tarifa_de_transporte(recepcion.transportador, recepcion.ruta_id)
+
+
+def _por_litro_de_hoy(recepcion: RecepcionLeche) -> Decimal:
+    """La tarifa POR LITRO de hoy, y cero si ese día se cobra por día fijo.
+
+    Es para el camino POR LITRO: imprimir la tarifa en el renglón y compararla contra
+    la que explica una foto vieja. Nunca para calcular la plata de un grupo, que es
+    trabajo de `valor_del_grupo`.
+    """
     return tarifa_por_litro(recepcion.transportador, recepcion.ruta_id)
 
 
-def _flete_de_hoy(recepcion: RecepcionLeche) -> Decimal:
-    """Lo que ese día vale HOY: litros × tarifa de hoy, redondeado una sola vez.
+def _por_dia_y_ruta(recepciones: Sequence[Any]) -> dict[tuple[Any, Any], list[Any]]:
+    """Agrupa por (fecha, ruta_id): UN grupo == UN renglón del comprobante.
+
+    Está en una función porque lo hacen DOS cosas que tienen que agrupar idéntico: el
+    reparto que arma los renglones (`_reparto_del_flete`) y la re-derivación de las
+    fotos con la tarifa de hoy (`_fletes_de_hoy`). Si agruparan distinto, la foto de
+    un día fijo se calcularía sobre un grupo y el renglón sobre otro, y la suma de las
+    fotos dejaría de ser el renglón: el centavo (o los $150.000) que no cuadra.
+    """
+    grupos: dict[tuple[Any, Any], list[Any]] = {}
+    for recepcion in recepciones:
+        grupos.setdefault((recepcion.fecha, recepcion.ruta_id), []).append(recepcion)
+    return grupos
+
+
+class _RenglonDeAntes(NamedTuple):
+    """CÓMO, POR CUÁNTO y A QUÉ TARIFA cobró este comprobante un (día, ruta) la última vez.
+
+    Las tres cosas viajan juntas y nunca una sola, por la misma razón por la que
+    `tarifas.Tarifa` junta el modo con la cifra: $150.000 significan una cosa si ese
+    renglón era de día completo y otra muy distinta si era por litro.
+
+    Lo arma y lo usa SOLO el recuadre —el camino que no re-precifica ni re-clasifica—;
+    ver `_renglones_del_dia_y_ruta`. Generar y Recalcular entran sin esto, que es lo que
+    los hace re-precificar con la tarifa de hoy.
+
+    `precio` ES LA TARIFA POR LITRO CON QUE SE EMITIÓ, y hace falta por lo mismo que el
+    `valor` hacía falta para el fijo: el recuadre tiene que poder rehacer el renglón sin
+    preguntarle nada a la tarifa de hoy. La diferencia entre los dos modos es qué se
+    conserva:
+
+      · en DÍA FIJO se conserva LA CIFRA (`valor`): el día vale la tarifa y corregirle
+        los litros a un proveedor no cambia lo que costó el viaje;
+      · POR LITRO se conserva LA TARIFA (`precio`) y el renglón se vuelve a derivar de
+        los litros que hoy quedaron —$242,76 × los litros de hoy—, porque ahí corregir un
+        litro SÍ tiene que mover el renglón: es lo que se le cobra al conductor por
+        litro recogido. Lo que no se mueve es la tarifa con que se firmó ese papel.
+
+    Va en `None` cuando los renglones de ese (día, ruta) no se ponen de acuerdo en una
+    sola tarifa (líneas partidas de un flete ya pagado, o una foto que ninguna tarifa
+    explica): ahí no hay "la tarifa con que se emitió" y se sigue por el camino de
+    siempre, que sabe separarlas.
+    """
+
+    modo: str
+    valor: Decimal
+    precio: Decimal | None = None
+
+
+class _ComoCobroLaRuta(NamedTuple):
+    """CÓMO cobró este comprobante una RUTA, mirando todos sus días juntos.
+
+    ES PARA LOS DÍAS QUE EL COMPROBANTE TODAVÍA NO TIENE. Un (día, ruta) nuevo aparece
+    dentro de un comprobante ya emitido por un solo camino: una recepción suya que se
+    mueve de fecha (o de ruta) sin salirse del período. Y ahí el recuadre se queda sin
+    `_RenglonDeAntes` que mirar, porque ese día nunca tuvo renglón.
+
+    Preguntarle entonces a la tarifa de HOY es lo que inflaba el comprobante: un papel
+    emitido POR LITRO por $53.273,68 al que se le movía la fecha a un día le nacía un
+    renglón de "Día completo $150.000" —porque hoy esa ruta es fija— y quedaba en
+    $183.367,36 sin que nadie hubiera oprimido Recalcular.
+
+    La respuesta correcta la tiene el propio comprobante: LA RUTA SE COBRÓ DE UN SOLO
+    MODO EN TODO EL PAPEL, porque el modo vive en la tarifa (transportador, ruta) y no
+    en el día. Así que el día que nace hereda el modo —y la tarifa, o el fijo— con que
+    esa ruta ya está cobrada en ese mismo comprobante:
+
+      · POR LITRO  → el día nuevo vale sus litros × la tarifa emitida. Los $53.273,68 se
+        reparten entre los dos días y el total no se mueve;
+      · DÍA FIJO   → el día nuevo vale SU PROPIO fijo, que es lo correcto y lo que ya
+        estaba probado: son dos días y son dos viajes.
+
+    Si la ruta no aparece en el comprobante —la recepción se movió a una ruta que ese
+    papel no cobraba— no hay nada que heredar y manda la tarifa de hoy, que es lo que el
+    usuario acaba de escoger al cambiarle la ruta al día.
+
+    Y "NO APARECE EN EL COMPROBANTE" QUIERE DECIR QUE ESE PAPEL NO LA COBRA, no que no
+    tenga fila: por eso la memoria se escribe SOLO con las rutas que el papel de verdad
+    cobra y se reemplaza completa. Una ruta de PASO —al día se le corrige la ruta a
+    Nápoles un momento y se le devuelve— alcanzó a dejar fila mientras el recuadre
+    escribía, y esa FILA FANTASMA le ganaba después a la tarifa de hoy: el dueño
+    renegociaba Nápoles a día fijo $150.000 y el día que volvía cobraba los $19.906,32 de
+    la visita anterior, −$130.093,68 (al revés, +$130.093,68). Ver `LiquidacionRuta`.
+
+    DE DÓNDE SALE, Y ESO ES LO QUE CAMBIÓ: de lo que el comprobante tiene ESCRITO
+    (`liquidacion_rutas`, ver `LiquidacionRuta`), no de deducirlo de los renglones que le
+    sobrevivan. Deducirlo funcionaba mientras al papel le quedara AL MENOS UN renglón de
+    esa ruta, y se quedaba sin fuente justo cuando no le quedaba ninguno: apagando el
+    único día de esa ruta, o mandándoselo a otra. Ahí el comprobante emitido por «Día
+    completo $150.000» amanecía en «82 L × $242,76 = $19.906,32» —$130.093,68 de menos
+    para el conductor— y al revés, sin que nadie hubiera oprimido Recalcular. La
+    deducción se quedó debajo como red para los papeles que no tengan la memoria
+    escrita; ver `_como_cobro_este_comprobante`.
+    """
+
+    modo: str
+    precio: Decimal | None
+    fijo: Decimal | None
+
+
+def _deducir_de_los_renglones(
+    filas: Iterable[tuple[date, Any, str, Decimal, Decimal]],
+) -> tuple[dict[tuple[date, Any], _RenglonDeAntes], dict[Any, _ComoCobroLaRuta]]:
+    """Lee UNA TANDA DE RENGLONES y dice cómo se cobró: por (día, ruta) y por ruta.
+
+    Cada fila es (fecha, ruta_id, modo, valor, precio por litro). Recibe tuplas y no
+    filas de la base porque la usan LOS DOS LADOS del mismo hecho, y tienen que decir
+    exactamente lo mismo:
+
+      · LEER los renglones que un comprobante ya tiene (`_como_cobro_este_comprobante`),
+        que es lo que hace el recuadre antes de rearmarlos;
+      · GUARDAR cómo cobró cada ruta el papel que se acaba de armar
+        (`_como_cobro_cada_ruta`), que es lo que se escribe en `liquidacion_rutas`.
+
+    Con dos cuentas distintas, la memoria escrita y la deducida dirían cosas distintas
+    sobre el mismo papel el día que alguien toque una de las dos.
+
+    EL VALOR SE APUNTA DESDE EL RENGLÓN Y NO DESDE LAS FOTOS: las dos cifras son la
+    misma mientras todo esté cuadrado, pero a esto se llega justo cuando NO lo está
+    —alguien acaba de corregir, apagar, borrar o mover una recepción—, y en ese momento
+    el renglón es el que dice la verdad de lo que se pactó; las fotos son las que hay que
+    rehacer. Leer el valor de las fotos era lo que dejaba que una foto inflada le subiera
+    la cifra al comprobante.
+
+    Si un (día, ruta) trae varias líneas partidas y ALGUNA es de día fijo, el grupo es de
+    día fijo: el fijo no se puede repartir en líneas por litro sin inventarle una tarifa a
+    cada trozo. Y el valor del grupo es LA SUMA de sus líneas, que es lo que el
+    comprobante cobró por ese día.
+    """
+    por_dia: dict[tuple[date, Any], _RenglonDeAntes] = {}
+    # Por ruta se junta lo que hace falta para que un día NUEVO nazca como esa ruta ya
+    # está cobrada: el modo, las tarifas por litro vistas y los fijos vistos.
+    precios_por_ruta: dict[Any, set[Decimal]] = {}
+    fijos_por_ruta: dict[Any, set[Decimal]] = {}
+    modo_por_ruta: dict[Any, str] = {}
+    for fecha, ruta_id, modo, valor, precio in filas:
+        clave = (fecha, ruta_id)
+        anterior = por_dia.get(clave)
+        if anterior is None:
+            por_dia[clave] = _RenglonDeAntes(
+                modo, valor, precio if modo == MODO_POR_LITRO else None
+            )
+        else:
+            # Dos líneas del mismo (día, ruta): la tarifa solo se conserva si las dos
+            # dicen la misma. Si no, no existe "la tarifa con que se emitió" y se deja en
+            # None para que el camino de siempre las vuelva a separar.
+            mismo_precio = (
+                anterior.precio is not None
+                and modo == MODO_POR_LITRO
+                and anterior.modo == MODO_POR_LITRO
+                and anterior.precio == precio
+            )
+            por_dia[clave] = _RenglonDeAntes(
+                MODO_DIA_FIJO if modo == MODO_DIA_FIJO else anterior.modo,
+                anterior.valor + valor,
+                precio if mismo_precio else None,
+            )
+        if modo == MODO_DIA_FIJO:
+            modo_por_ruta[ruta_id] = MODO_DIA_FIJO
+            # Un renglón de "ya cobrado" vale $0,00 y no dice cuánto cuesta el viaje:
+            # como fijo de referencia solo sirven los que de verdad cobraron algo.
+            if valor > CERO:
+                fijos_por_ruta.setdefault(ruta_id, set()).add(valor)
+        else:
+            modo_por_ruta.setdefault(ruta_id, MODO_POR_LITRO)
+            precios_por_ruta.setdefault(ruta_id, set()).add(precio)
+    por_ruta = {
+        ruta_id: _ComoCobroLaRuta(
+            modo,
+            # Una sola tarifa por litro en toda la ruta, o ninguna: dos tarifas
+            # distintas para la misma ruta son un papel partido y no una tarifa que
+            # heredar.
+            next(iter(precios_por_ruta[ruta_id]))
+            if len(precios_por_ruta.get(ruta_id) or ()) == 1
+            else None,
+            max(fijos_por_ruta[ruta_id]) if fijos_por_ruta.get(ruta_id) else None,
+        )
+        for ruta_id, modo in modo_por_ruta.items()
+    }
+    return por_dia, por_ruta
+
+
+def _como_cobro_cada_ruta(
+    renglones: Sequence[dict[str, Any]],
+) -> dict[Any, _ComoCobroLaRuta]:
+    """CÓMO COBRÓ CADA RUTA el papel que se acaba de armar. Es lo que hay que GUARDAR.
+
+    Se le pasan los renglones tal como salieron de `_reparto_del_flete` —los mismos que
+    van a quedar impresos— y devuelve, por ruta, el modo y la cifra o la tarifa. Quien lo
+    escribe en la base es `_guardar_como_cobro_cada_ruta`; ver `LiquidacionRuta` para el
+    porqué de guardarlo en vez de deducirlo de los renglones que sobrevivan.
+
+    Sale de la MISMA cuenta que usa la lectura (`_deducir_de_los_renglones`), así que lo
+    que queda escrito dice exactamente lo que dicen los renglones. Con dos cuentas, la
+    memoria y el papel se contradirían.
+    """
+    return _deducir_de_los_renglones(
+        (
+            renglon["fecha"],
+            renglon["ruta_id"],
+            renglon.get("modo") or MODO_POR_LITRO,
+            Decimal(renglon["valor"]),
+            Decimal(renglon["precio_litro"]),
+        )
+        for renglon in renglones
+    )[1]
+
+
+def _lo_que_el_comprobante_tiene_escrito(
+    liquidacion: Liquidacion,
+) -> dict[Any, _ComoCobroLaRuta]:
+    """La memoria GUARDADA: cómo cobró este comprobante cada ruta, según lo ESCRITO.
+
+    Sale de `liquidacion_rutas`, la tabla que se escribe SOLO en el momento en que el papel
+    se emite o se recalcula a propósito (ver `LiquidacionRuta`). Es la que cierra las dos
+    puertas: un comprobante que se queda SIN NINGÚN RENGLÓN de una ruta —porque le apagaron
+    el único día de esa ruta, o porque se lo mandaron a otra— no puede perder lo que está
+    escrito.
+
+    ES DE SOLO LECTURA, y esa es la mitad de la regla que le toca a este lado: el recuadre
+    LEE la memoria y no la escribe. Mientras la escribía —"refrescándola" desde los
+    renglones que sobrevivieran— el renglón «ya cobrado» en $0,00 le borraba el fijo
+    (−$150.000,00) y la ruta de paso le dejaba una fila fantasma (±$130.093,68).
+
+    Devuelve vacío en dos casos legítimos, y en los dos manda la deducción de siempre: un
+    comprobante de PROVEEDOR (no cobra rutas) y un comprobante emitido antes de que esta
+    tabla existiera al que la migración no le hubiera podido escribir la fila.
+    """
+    return {
+        fila.ruta_id: _ComoCobroLaRuta(
+            fila.modo_transporte or MODO_POR_LITRO,
+            None if fila.precio_litro is None else Decimal(fila.precio_litro),
+            None if fila.valor_dia_fijo is None else Decimal(fila.valor_dia_fijo),
+        )
+        for fila in liquidacion.rutas_cobradas
+    }
+
+
+def _como_cobro_este_comprobante(
+    liquidacion: Liquidacion,
+) -> tuple[dict[tuple[date, Any], _RenglonDeAntes], dict[Any, _ComoCobroLaRuta]]:
+    """CÓMO QUEDÓ FIRMADO ESTE PAPEL: por (día, ruta) desde los renglones, y por RUTA
+    desde lo que el comprobante tiene ESCRITO.
+
+    Se llama ANTES de borrar los renglones para rearmarlos, y SOLO desde el recuadre: es
+    la memoria de cómo quedó firmado ese papel. Generar y Recalcular no la usan, y por eso
+    ellos sí re-precifican con la tarifa de hoy.
+
+    LAS DOS MITADES NO SALEN DEL MISMO SITIO, y esa asimetría es el arreglo:
+
+      · POR (DÍA, RUTA) se leen LOS RENGLONES. Ahí la deducción no puede quedarse sin
+        fuente: si el comprobante tiene ese día, tiene su renglón, y el renglón dice el
+        modo, la cifra y la tarifa con que se cobró. Cuando el día no está, no hay nada
+        que preguntar —ese día no se cobró—;
+      · POR RUTA manda LO ESCRITO (`liquidacion_rutas`). Esta mitad es la que hace falta
+        justo cuando el comprobante se queda SIN renglones de esa ruta —le apagaron el
+        único día, o se lo mandaron a otra ruta— y por lo tanto es la única que NO se
+        puede deducir de lo que sobrevive. Deducirla era el defecto: el papel emitido en
+        «Día completo $150.000» amanecía en «82 L × $242,76 = $19.906,32», y al revés, sin
+        que nadie hubiera oprimido Recalcular. Ver `LiquidacionRuta`.
+
+    LA DEDUCCIÓN SE QUEDA DEBAJO como red, no como fuente: se calcula primero y lo escrito
+    la tapa. Así un comprobante sin memoria escrita —uno de antes de que la tabla
+    existiera— se comporta exactamente como se comportaba, y uno con memoria se comporta
+    como dice su memoria.
+
+    Y CUANDO LAS DOS SE CONTRADICEN, MANDA LO ESCRITO, que es exactamente para lo que
+    existe. Al emitirse las dos dicen lo mismo, porque la memoria se escribe de los mismos
+    renglones y con la misma cuenta (`_deducir_de_los_renglones`); después el recuadre
+    puede dejar al papel con renglones de los que se deduciría OTRA cosa —el único que
+    queda de esa ruta es un «ya cobrado» en $0,00, que no dice cuánto cuesta el viaje— y
+    ahí hacerle caso a la deducción es lo que costaba los $150.000,00. La memoria del papel
+    emitido no se corrige desde lo que sobrevive: se reemplaza cuando el dueño oprime
+    Recalcular, y hasta entonces es la verdad.
+    """
+    por_dia, deducido = _deducir_de_los_renglones(
+        (
+            detalle.fecha,
+            detalle.ruta_id,
+            detalle.modo_transporte or MODO_POR_LITRO,
+            Decimal(detalle.valor or 0),
+            Decimal(detalle.precio_litro or 0),
+        )
+        for detalle in liquidacion.detalles
+        if detalle.deleted_at is None
+    )
+    por_ruta = dict(deducido)
+    por_ruta.update(_lo_que_el_comprobante_tiene_escrito(liquidacion))
+    return por_dia, por_ruta
+
+
+def _fletes_de_hoy(
+    recepciones: Sequence[Any], ya_cobrados: frozenset[tuple[date, Any]] = frozenset()
+) -> dict[uuid.UUID, Decimal]:
+    """Lo que vale HOY el flete de cada recepción, decidido POR GRUPO (día, ruta).
 
     Es la MISMA cuenta que hace la recepción al guardar el día
-    (`recepcion/service.py::_completar_y_calcular`). Vive acá arriba porque la usan
-    los tres caminos del flete —generar, recalcular y el avance— y cuatro copias de
-    una cuenta de plata son cuatro oportunidades de que se desincronicen.
+    (`recepcion/service.py`), y vive acá arriba porque la usan los tres caminos del
+    flete —generar, recalcular y el avance— y cuatro copias de una cuenta de plata son
+    cuatro oportunidades de que se desincronicen.
+
+    POR GRUPO Y NO POR FILA, y ahí está todo el cambio del día fijo: la cuenta por
+    litro solo necesita ESA fila (litros × tarifa), pero el fijo del día depende de
+    CUÁNTAS recepciones tenga el día en esa ruta —cinco proveedores en la ruta a
+    fábrica son $150.000, no $150.000 × 5— así que hay que ver el grupo completo para
+    saber qué le toca a cada una. En modo por litro el resultado es exactamente el
+    mismo de siempre, fila por fila.
+
+    `ya_cobrados` son los (día, ruta) cuyo DÍA COMPLETO ya se cobró en otro
+    comprobante: esos valen $0,00 acá, porque el día ya costó $150.000 y ya se pagó.
+    Ver `LiquidacionRepository.viajes_ya_cobrados`.
     """
-    return _centavos(_litros_de(recepcion) * _tarifa_de_hoy(recepcion))
+    resultado: dict[uuid.UUID, Decimal] = {}
+    for (fecha, ruta_id), grupo in _por_dia_y_ruta(recepciones).items():
+        tarifa = _tarifa_de_hoy(grupo[0])
+        if not tarifa.es_dia_fijo:
+            # Por litro cada foto se sostiene sola. Los centavos entre las fotos de un
+            # mismo grupo los sigue acomodando el reparto del renglón, como siempre.
+            for recepcion in grupo:
+                resultado[recepcion.id] = valor_del_grupo(tarifa, _litros_de(recepcion))
+            continue
+        # Sin `ya_pactado`: esto es RE-DERIVAR, o sea generar y recalcular, que sí
+        # re-precifican con la tarifa de hoy. El recuadre no pasa por aquí.
+        total = valor_del_grupo(
+            tarifa,
+            sum((_litros_de(r) for r in grupo), CERO),
+            ya_cobrado=(fecha, ruta_id) in ya_cobrados,
+        )
+        resultado.update(
+            reparto_entre_las_fotos(
+                tarifa, [(r.id, _litros_de(r)) for r in grupo], total
+            )
+        )
+    return resultado
 
 
 def _tarifa_de_la_foto(recepcion: RecepcionLeche, tolerancia: Decimal) -> Decimal | None:
@@ -171,7 +526,7 @@ def _tarifa_de_la_foto(recepcion: RecepcionLeche, tolerancia: Decimal) -> Decima
     def explica(tarifa: Decimal) -> bool:
         return tarifa >= CERO and abs(_centavos(litros_ * tarifa) - foto) <= tolerancia
 
-    de_hoy = _tarifa_de_hoy(recepcion)
+    de_hoy = _por_litro_de_hoy(recepcion)
     if explica(de_hoy):
         return de_hoy
     if litros_ <= CERO:
@@ -192,12 +547,22 @@ def _renglon_de_transporte(
     litros_: Decimal,
     precio_litro: Decimal,
     valor: Decimal,
+    modo: str = MODO_POR_LITRO,
+    ya_cobrado: bool = False,
 ) -> dict[str, Any]:
     """Un renglón ya cuadrado, como diccionario.
 
     Se devuelven diccionarios y no `LiquidacionDetalle` porque los mismos renglones
     los usan tres caminos: generar la liquidación, recalcularla y la
     PRE-liquidación, que no persiste nada. Una sola cuenta para los tres.
+
+    `modo` es CÓMO se cobró, y viaja con el renglón hasta la columna del mismo nombre
+    (ver `LiquidacionDetalle.modo_transporte`): es lo que le permite al papel escribir
+    "Día completo" donde no hay tarifa por litro que escribir, y lo que hace que un
+    comprobante viejo siga significando lo mismo si mañana la ruta cambia de modo.
+
+    `ya_cobrado` es POR QUÉ un día fijo vale $0,00, y viaja igual hasta su columna
+    (`LiquidacionDetalle.dia_fijo_ya_cobrado`). Ver ahí el porqué de guardarlo.
     """
     return {
         "fecha": fecha,
@@ -206,7 +571,50 @@ def _renglon_de_transporte(
         "litros": litros_,
         "precio_litro": precio_litro,
         "valor": valor,
+        "modo": modo,
+        "ya_cobrado": ya_cobrado,
     }
+
+
+def _renglon_del_dia_completo(
+    fecha: date,
+    ruta_id: uuid.UUID | None,
+    ruta_nombre: str | None,
+    litros_: Decimal,
+    valor: Decimal,
+    ya_cobrado: bool = False,
+) -> dict[str, Any]:
+    """EL RENGLÓN DE UN DÍA FIJO: "Día completo (a fábrica) — 340,00 L — $150.000".
+
+    LA TARIFA VA EN CERO Y ESO ES LO CORRECTO, no un dato que falte: en un día fijo NO
+    EXISTE una tarifa por litro. Escribir $150.000 en la columna Precio/L invitaría a
+    multiplicarla por los litros (y a preguntar por los $51 millones que no aparecen), y
+    escribir $441,18 —el promedio— pondría en el papel una cifra que no es la tarifa de
+    nada y que el dueño no puede reproducir con calculadora. Con la tarifa en cero y el
+    modo en 'dia_fijo', el papel escribe la palabra "Día completo" en esa columna y el
+    conductor verifica la línea de la única forma en que se puede verificar: el día vale
+    $150.000.
+
+    LOS LITROS SÍ VAN, y van como INFORMACIÓN: son los litros que de verdad recogió ese
+    día en esa ruta y hacen falta para que el total de litros del comprobante siga siendo
+    la suma de la columna. Lo que no hay que hacer con ellos es multiplicarlos.
+
+    `ya_cobrado` distingue las DOS razones por las que un renglón fijo puede valer
+    $0,00 —el día ya se pagó en otro comprobante, o la tarifa fija de esa ruta es de
+    $0,00 porque el dueño decidió no cobrar ese viaje—. Son dos hechos distintos y el
+    papel del conductor no los puede confundir. Ver `_precio_del_renglon`.
+
+    Y LA MARCA SOLO SE PONE SI EL RENGLÓN DE VERDAD VA EN CERO, que es lo que la marca
+    significa ("va en $0,00 porque ya se cobró"). Se cierra acá, en el único sitio que
+    arma estos renglones, y no en cada quien que llama: un renglón de $150.000 rotulado
+    «Ya cobrado» sería una contradicción impresa en el papel de un conductor, y el
+    único camino que hoy podría producirla —una foto congelada de un flete pagado, que
+    hace que el renglón diga lo que se pagó— no tiene por qué acordarse de esto.
+    """
+    return _renglon_de_transporte(
+        fecha, ruta_id, ruta_nombre, litros_, CERO, valor,
+        modo=MODO_DIA_FIJO, ya_cobrado=ya_cobrado and Decimal(valor) == CERO,
+    )
 
 
 def _renglones_de_ultimo_recurso(
@@ -272,12 +680,17 @@ def _un_renglon_y_su_reparto(
     cada una con la tarifa que explica su propia foto, y así el papel sigue
     cuadrando aunque salga con más líneas.
     """
+    por_litro = Tarifa(MODO_POR_LITRO, tarifa)
     litros_ = sum((_litros_de(r) for r in del_grupo), CERO)
-    valor = _centavos(litros_ * tarifa)
-    # El valor EXACTO de cada día (sin redondear) es la base del reparto: es lo que
-    # hace que los centavos caigan donde de verdad se generaron.
-    exactos = [(r.id, _litros_de(r) * tarifa) for r in del_grupo]
-    asignado = repartir_al_resto_mayor(exactos, valor)
+    valor = valor_del_grupo(por_litro, litros_)
+    # El reparto sale de `tarifas.reparto_entre_las_fotos`, la MISMA función que usa
+    # Recepción diaria para bajar el fijo de un día a sus recepciones: una sola forma
+    # de repartir plata entre las fotos de un (día, ruta). Por dentro sigue siendo lo
+    # de siempre —el valor EXACTO de cada día, sin redondear, como base del reparto por
+    # resto mayor, para que los centavos caigan donde de verdad se generaron—.
+    asignado = reparto_entre_las_fotos(
+        por_litro, [(r.id, _litros_de(r)) for r in del_grupo], valor
+    )
 
     fotos: dict[uuid.UUID, Decimal] = {}
     for recepcion in del_grupo:
@@ -317,17 +730,135 @@ def _renglones_partidos_uno_por_recepcion(
     return renglones
 
 
+def _renglones_del_dia_fijo(
+    fecha: date,
+    ruta_id: uuid.UUID | None,
+    ruta_nombre: str | None,
+    tarifa: Tarifa,
+    del_grupo: list[RecepcionLeche],
+    congeladas: frozenset[uuid.UUID],
+    ya_cobrado: bool,
+    ya_pactado: Decimal | None = None,
+) -> tuple[list[dict[str, Any]], dict[uuid.UUID, Decimal]]:
+    """UN renglón "día completo" para todo el (día, ruta), y las fotos que lo respaldan.
+
+    ES EL CORAZÓN DEL CAMBIO. Cinco proveedores el 16/07 en la ruta a fábrica dan UN
+    renglón de $150.000 —no cinco de $150.000— y esos mismos $150.000 se reparten entre
+    las cinco fotos para que sumen exacto el renglón.
+
+    CUÁL ES EL VALOR DEL RENGLÓN: lo dice `tarifas.valor_del_grupo`, que es LA ÚNICA
+    cuenta que lo dice en todo el sistema, y son tres casos —el fijo de hoy; el que este
+    comprobante ya le había puesto a ese (día, ruta), cuando quien llama es el RECUADRE,
+    que no re-precifica; y cero cuando ese día ya se cobró completo en otro comprobante—.
+
+    LO QUE NO ES, Y ESE ERA EL DEFECTO: NUNCA es la suma de las fotos. Antes había una
+    rama que decía "si el fijo de hoy no explica lo que las fotos suman, el renglón vale
+    lo que las fotos suman", y esa rama —pensada para no re-precificar un comprobante
+    aprobado— era la que bendecía cualquier cifra inflada que llegara desde una foto.
+    Corregirle los litros a un proveedor del día de $150.000 le escribía en su foto el
+    fijo completo, y esta función lo sumaba: el comprobante quedaba en $261.045,13, y
+    corrigiéndole a los cinco proveedores, en $554.826,77. Aprobable y pagable.
+    Conservar lo que ya se pactó es legítimo; lo que estaba mal era ir a buscarlo a las
+    fotos, que es justo lo que acaba de cambiar. Ahora se conserva EL RENGLÓN de antes
+    (`ya_pactado`), que es la cifra que el conductor vio, y las fotos se rehacen para que
+    lo sumen.
+
+    Y SI UNA FOTO DEL GRUPO ESTÁ CONGELADA —por ese flete ya salió plata— no se toca
+    ninguna y el renglón dice LO QUE SE PAGÓ (la suma de las fotos, que es exactamente la
+    plata que salió). Es la única vez que las fotos mandan, y manda porque el candado
+    está por encima de todo: si ya salió plata, no se mueve nada. No se parte en una
+    línea por recepción como en el camino por litro: partirlo obligaría a inventarle una
+    tarifa por litro a cada trozo de un día que nunca se cobró por litro. "El día vale
+    $150.000" es una línea que el conductor verifica igual de bien.
+    """
+    litros_ = sum((_litros_de(r) for r in del_grupo), CERO)
+    suma_de_fotos = sum((_foto_del_flete(r) for r in del_grupo), CERO)
+    objetivo = valor_del_grupo(
+        tarifa, litros_, ya_cobrado=ya_cobrado, ya_pactado=ya_pactado
+    )
+
+    asignado = reparto_entre_las_fotos(
+        tarifa, [(r.id, _litros_de(r)) for r in del_grupo], objetivo
+    )
+    fotos: dict[uuid.UUID, Decimal] = {}
+    for recepcion in del_grupo:
+        nueva = asignado[recepcion.id]
+        if nueva == _foto_del_flete(recepcion):
+            continue
+        if recepcion.id in congeladas:
+            return (
+                [
+                    _renglon_del_dia_completo(
+                        fecha, ruta_id, ruta_nombre, litros_, suma_de_fotos,
+                        ya_cobrado=ya_cobrado,
+                    )
+                ],
+                {},
+            )
+        fotos[recepcion.id] = nueva
+    return (
+        [
+            _renglon_del_dia_completo(
+                fecha, ruta_id, ruta_nombre, litros_, objetivo, ya_cobrado=ya_cobrado
+            )
+        ],
+        fotos,
+    )
+
+
 def _renglones_del_dia_y_ruta(
     fecha: date,
     ruta_id: uuid.UUID | None,
     ruta_nombre: str | None,
     del_grupo: list[RecepcionLeche],
     congeladas: frozenset[uuid.UUID],
+    ya_cobrado: bool = False,
+    de_antes: _RenglonDeAntes | None = None,
+    de_la_ruta: _ComoCobroLaRuta | None = None,
 ) -> tuple[list[dict[str, Any]], dict[uuid.UUID, Decimal]]:
     """Los renglones de un (día, ruta): UNO, salvo que haya dos tarifas mezcladas.
 
-    Primero se pregunta lo único que importa: ¿una sola tarifa —la de hoy— explica
-    todo el grupo? La pregunta se le hace AL GRUPO ENTERO y no foto por foto:
+    LO PRIMERO ES EL MODO: si ese (día, ruta) se cobra POR DÍA FIJO, el renglón es uno
+    solo y dice el día completo (ver `_renglones_del_dia_fijo`). Todo lo que sigue es el
+    camino POR LITRO.
+
+    `de_antes` ES CÓMO, POR CUÁNTO Y A QUÉ TARIFA COBRÓ ESTE COMPROBANTE ese (día, ruta)
+    la última vez, y lo manda el RECUADRE. El recuadre no re-precifica (eso está explicado
+    en `recuadrar`) y por la misma razón NO PUEDE RE-CLASIFICAR: si alguien le cambia el
+    modo a la ruta y después alguien escribe una observación en un día, el comprobante
+    aprobado que decía "Día completo $150.000" salía convertido en dos líneas por litro que
+    sumaban los mismos $150.000. La plata no se movía, pero EL PAPEL CAMBIABA DE FORMA sin
+    que nadie hubiera tocado nada, y un papel que cambia solo es lo que hace desconfiar de
+    todo el sistema. Con el modo, el valor y la tarifa de antes, el renglón sigue siendo
+    exactamente el que el conductor ya vio —con los litros que hoy tenga—. Re-clasificar y
+    re-precificar es lo que hace el botón Recalcular, que el dueño oprime a propósito y que
+    entra por aquí sin este dato.
+
+    LO QUE SE CONSERVA ES DISTINTO EN CADA MODO, y esa diferencia es toda la regla:
+
+      · DÍA FIJO conserva LA CIFRA (`de_antes.valor`): el día vale lo que costó el viaje y
+        corregirle los litros a un proveedor no lo cambia;
+      · POR LITRO conserva LA TARIFA (`de_antes.precio`) y vuelve a derivar el renglón de
+        los litros de hoy, porque ahí corregir un litro SÍ tiene que mover el renglón: es
+        lo que se le cobra al conductor por litro recogido.
+
+    ESO ÚLTIMO ES LO QUE CIERRA EL CRUCE DE MODOS, con las cifras del caso: la ruta "A
+    fábrica" era POR LITRO a $242,76 y el comprobante salió en $53.273,68 (219,45 L). El
+    dueño le pone DÍA FIJO $150.000 a la ruta y después le corrige a un proveedor 82,00 →
+    91,30 L. Preguntándole a la tarifa de HOY, por litro un fijo vale cero: el grupo no lo
+    explicaba ninguna tarifa, se partía por foto y el comprobante caía a $33.367,36 con una
+    línea de "91,3 L $0 $0". Con la tarifa de antes el renglón queda en 228,75 L × $242,76
+    = $55.531,35, que es exactamente lo que el conductor cobra por los litros que de verdad
+    recogió, en el modo en que se le emitió el papel.
+
+    `de_la_ruta` es el mismo dato pero de LA RUTA ENTERA, y es para los días que este
+    comprobante todavía no tenía —una recepción suya que se movió de fecha—. Ver
+    `_ComoCobroLaRuta`.
+
+    SIN NINGUNA DE LAS DOS —o sea GENERAR y RECALCULAR— manda la tarifa de hoy, que es
+    justo lo que esos dos caminos tienen que hacer. Ahí se pregunta lo único que importa:
+    ¿una sola tarifa —la de hoy— explica todo el grupo? La pregunta se le hace AL GRUPO
+    ENTERO y no foto por foto:
 
         |suma de las fotos − redondear(litros del grupo × tarifa)| ≤ un centavo
         por recepción
@@ -344,7 +875,51 @@ def _renglones_del_dia_y_ruta(
     SU tarifa. En un flete sin pagar esta rama no se pisa, porque `_rederivar_el_flete`
     dejó todas las fotos a la tarifa viva antes de llegar acá.
     """
-    de_hoy = _tarifa_de_hoy(del_grupo[0])
+    tarifa_hoy = _tarifa_de_hoy(del_grupo[0])
+    # El modo lo decide, en este orden: el renglón que este comprobante ya tenía para ese
+    # día; si el día es nuevo, cómo está cobrada esa ruta en el resto del papel; y solo si
+    # el comprobante no sabe nada de esa ruta —o no hay comprobante—, la tarifa de hoy.
+    modo_de_antes = de_antes.modo if de_antes is not None else (
+        de_la_ruta.modo if de_la_ruta is not None else None
+    )
+    if (modo_de_antes or tarifa_hoy.modo) == MODO_DIA_FIJO:
+        # El fijo con que se entra solo se usa cuando NO hay valor pactado (un día que
+        # nace dentro del comprobante): el suyo propio, que es el que esa ruta ya cobra en
+        # este papel, y si el papel no lo dice, el de hoy. Y si el modo lo manda el
+        # comprobante y hoy la ruta ya NO es de día fijo, se entra en cero: ahí quien
+        # manda es el valor que ese renglón ya tenía.
+        del_papel = de_la_ruta.fijo if de_la_ruta is not None else None
+        de_hoy_fijo = tarifa_hoy.valor if tarifa_hoy.es_dia_fijo else CERO
+        fijo = del_papel if del_papel is not None else de_hoy_fijo
+        return _renglones_del_dia_fijo(
+            fecha,
+            ruta_id,
+            ruta_nombre,
+            Tarifa(MODO_DIA_FIJO, fijo),
+            del_grupo,
+            congeladas,
+            ya_cobrado,
+            de_antes.valor if de_antes is not None else None,
+        )
+    # LA TARIFA CON QUE ESTE COMPROBANTE COBRÓ ESE DÍA (o esa ruta), cuando se conoce:
+    # manda ella y no hay nada que preguntarle a las fotos. El renglón se vuelve a derivar
+    # de los litros de hoy —eso sí cambia, y tiene que cambiar— pero a la tarifa firmada.
+    # El renglón de ESE día manda sobre el de la ruta: si el papel ya cobró ese (día,
+    # ruta), su propia tarifa es la que se conserva. La de la ruta solo entra cuando el
+    # día es nuevo dentro del comprobante.
+    emitida = (
+        de_antes.precio if de_antes is not None
+        else de_la_ruta.precio if de_la_ruta is not None
+        else None
+    )
+    if emitida is not None:
+        return _un_renglon_y_su_reparto(
+            fecha, ruta_id, ruta_nombre, emitida, del_grupo, congeladas
+        )
+    # `_por_litro_de_hoy` y no `tarifa_hoy.valor`: si el modo lo forzó el comprobante y
+    # hoy la ruta es de día fijo, `valor` son los $150.000 del día, y multiplicarlos por
+    # los litros daría millones. Por litro, un fijo vale cero.
+    de_hoy = _por_litro_de_hoy(del_grupo[0])
     litros_ = sum((_litros_de(r) for r in del_grupo), CERO)
     suma_de_fotos = sum((_foto_del_flete(r) for r in del_grupo), CERO)
     margen = CENTAVOS * len(del_grupo)
@@ -395,6 +970,10 @@ def _orden_del_renglon(renglon: dict[str, Any]) -> tuple[Any, ...]:
         renglon["precio_litro"],
         renglon["litros"],
         renglon["valor"],
+        # Y el modo de último, para que un día que trajera a la vez una línea por litro
+        # y una de día completo —solo puede pasar con fotos congeladas de una ruta que
+        # cambió de modo después de pagada— salga siempre en el mismo orden.
+        renglon.get("modo") or MODO_POR_LITRO,
     )
 
 
@@ -415,27 +994,45 @@ class _RepartoDelFlete(NamedTuple):
 def _reparto_del_flete(
     recepciones: Sequence[RecepcionLeche],
     congeladas: frozenset[uuid.UUID] = frozenset(),
+    ya_cobrados: frozenset[tuple[date, Any]] = frozenset(),
+    renglones_de_antes: dict[tuple[date, Any], _RenglonDeAntes] | None = None,
+    rutas_de_antes: dict[Any, _ComoCobroLaRuta] | None = None,
 ) -> _RepartoDelFlete:
     """LOS RENGLONES del comprobante de un transportador, cuadrados al centavo.
 
     Agrupa por (fecha, ruta): un renglón por día y ruta, porque el transportador
-    puede haber hecho las dos rutas el mismo día y cobrar distinto en cada una. La
+    puede haber hecho las dos rutas el mismo día y cobrar distinto en cada una —y
+    hasta con modos distintos: Nápoles por litro y "a fábrica" por día fijo—. La
     tarifa YA NO entra en la clave del grupo —antes sí— porque era eso lo que
     partía el día en cuatro líneas idénticas: la tarifa se decide adentro, mirando
     el grupo completo (ver `_renglones_del_dia_y_ruta`).
 
     `congeladas` son los ids de las recepciones cuya foto no se puede tocar porque
     su flete ya se pagó.
-    """
-    grupos: dict[tuple[Any, Any], list[RecepcionLeche]] = {}
-    for recepcion in recepciones:
-        grupos.setdefault((recepcion.fecha, recepcion.ruta_id), []).append(recepcion)
 
+    `ya_cobrados` son los (día, ruta) cuyo día completo ya se cobró en OTRO
+    comprobante: esos salen en $0,00 para no cobrar dos veces el mismo día fijo. Ver
+    `LiquidacionRepository.viajes_ya_cobrados`.
+
+    `renglones_de_antes` es cómo, por cuánto y a qué tarifa se cobró cada (día, ruta) en
+    los renglones que este comprobante YA tenía, y `rutas_de_antes` lo mismo por RUTA, para
+    los días que el comprobante todavía no tenía. Los manda solo el RECUADRE, que no
+    re-precifica ni re-clasifica; ver `_renglones_del_dia_y_ruta` y `_ComoCobroLaRuta`.
+    """
+    renglones_de_antes = renglones_de_antes or {}
+    rutas_de_antes = rutas_de_antes or {}
     renglones: list[dict[str, Any]] = []
     fotos: dict[uuid.UUID, Decimal] = {}
-    for (fecha, ruta_id), del_grupo in grupos.items():
+    for (fecha, ruta_id), del_grupo in _por_dia_y_ruta(recepciones).items():
         del_grupo_renglones, del_grupo_fotos = _renglones_del_dia_y_ruta(
-            fecha, ruta_id, _nombre_de_ruta(del_grupo[0]), del_grupo, congeladas
+            fecha,
+            ruta_id,
+            _nombre_de_ruta(del_grupo[0]),
+            del_grupo,
+            congeladas,
+            (fecha, ruta_id) in ya_cobrados,
+            renglones_de_antes.get((fecha, ruta_id)),
+            rutas_de_antes.get(ruta_id),
         )
         renglones += del_grupo_renglones
         fotos.update(del_grupo_fotos)
@@ -466,8 +1063,12 @@ class _DiaConElFleteDeHoy(NamedTuple):
     valor_transporte: Decimal
 
 
-def _con_el_flete_de_hoy(recepciones: Sequence[RecepcionLeche]) -> list[_DiaConElFleteDeHoy]:
+def _con_el_flete_de_hoy(
+    recepciones: Sequence[RecepcionLeche],
+    ya_cobrados: frozenset[tuple[date, Any]] = frozenset(),
+) -> list[_DiaConElFleteDeHoy]:
     """Las mismas recepciones, en copias de solo lectura y con el flete de hoy."""
+    de_hoy = _fletes_de_hoy(recepciones, ya_cobrados)
     return [
         _DiaConElFleteDeHoy(
             id=r.id,
@@ -476,13 +1077,16 @@ def _con_el_flete_de_hoy(recepciones: Sequence[RecepcionLeche]) -> list[_DiaConE
             ruta=r.ruta,
             transportador=r.transportador,
             cantidad_litros=Decimal(r.cantidad_litros or 0),
-            valor_transporte=_flete_de_hoy(r),
+            valor_transporte=de_hoy[r.id],
         )
         for r in recepciones
     ]
 
 
-def _renglones_de_transporte(recepciones: Sequence[RecepcionLeche]) -> list[dict[str, Any]]:
+def _renglones_de_transporte(
+    recepciones: Sequence[RecepcionLeche],
+    ya_cobrados: frozenset[tuple[date, Any]] = frozenset(),
+) -> list[dict[str, Any]]:
     """Solo los renglones, para quien no va a escribir las fotos (la PRE-liquidación).
 
     Deliberadamente NO devuelve el reparto: quien lo llama por acá es porque no
@@ -491,7 +1095,9 @@ def _renglones_de_transporte(recepciones: Sequence[RecepcionLeche]) -> list[dict
 
     Va sobre COPIAS con el flete de hoy para que el avance y el papel digan lo mismo.
     """
-    return _reparto_del_flete(_con_el_flete_de_hoy(recepciones)).renglones
+    return _reparto_del_flete(
+        _con_el_flete_de_hoy(recepciones, ya_cobrados), frozenset(), ya_cobrados
+    ).renglones
 
 
 # Ancho de cada columna del detalle del comprobante DEL TRANSPORTADOR, en
@@ -500,6 +1106,43 @@ def _renglones_de_transporte(recepciones: Sequence[RecepcionLeche]) -> list[dict
 # la columna de la ruta. El nombre de la ruta es el que se lleva el espacio grande
 # porque es texto y se envuelve; las cifras van justas y alineadas a la derecha.
 _ANCHOS_DETALLE_FLETE = (2.4, 5.4, 2.7, 2.9, 3.5)
+
+# LO QUE VA EN LA COLUMNA "Precio/L" DE UN RENGLÓN DE DÍA FIJO, donde no hay ninguna
+# tarifa por litro que escribir. Son dos palabras y cada una dice una cosa distinta que
+# el conductor necesita saber:
+#
+#   · "Día completo": ese día se cobró por día, no por litro. La línea se verifica
+#     leyéndola —el día vale $150.000— y no multiplicando;
+#   · "Ya cobrado": ese día completo ya se pagó en otro comprobante, y por eso esta línea
+#     va en $0,00. Pasa cuando se anota leche de un día que ya estaba liquidado: el día
+#     costó $150.000 una vez y recoger un proveedor más no cuesta más.
+#
+# Se escriben acá y no en el navegador para que el PDF y la pantalla digan lo mismo.
+_ROTULO_DIA_FIJO = "Día completo"
+_ROTULO_DIA_FIJO_YA_COBRADO = "Ya cobrado"
+
+
+def _ya_cobrado_en_otro(detalle: Any) -> bool:
+    """Si ESTE renglón fijo va en $0,00 porque el día ya se cobró en otro comprobante.
+
+    Sale de la columna que lo guardó al emitir el papel
+    (`LiquidacionDetalle.dia_fijo_ya_cobrado`) y NO de mirar si el valor es cero, que era
+    lo que se hacía y era falso: un fijo de $0,00 también vale cero, y ahí el papel le
+    estaba afirmando al conductor que ese día ya se le había pagado en otra parte —un
+    hecho que no ocurrió—. El `getattr` cubre al avance ("¿cómo voy?"), que trae el mismo
+    dato en un objeto que no es una fila.
+    """
+    return bool(getattr(detalle, "dia_fijo_ya_cobrado", False))
+
+
+def _precio_del_renglon(detalle: Any) -> str:
+    """Lo que va en la columna Precio/L: la tarifa, o la palabra del día fijo."""
+    modo = getattr(detalle, "modo_transporte", None) or MODO_POR_LITRO
+    if modo != MODO_DIA_FIJO:
+        return pesos(detalle.precio_litro)
+    if _ya_cobrado_en_otro(detalle):
+        return _ROTULO_DIA_FIJO_YA_COBRADO
+    return _ROTULO_DIA_FIJO
 
 
 def _tabla_del_detalle(
@@ -549,14 +1192,18 @@ def _tabla_del_detalle(
             Decimal(d.precio_litro or 0),
             Decimal(d.litros or 0),
             Decimal(d.valor or 0),
+            getattr(d, "modo_transporte", None) or MODO_POR_LITRO,
         ),
     )
+    # EN UN DÍA FIJO LA COLUMNA Precio/L NO LLEVA UNA TARIFA, lleva la palabra "Día
+    # completo": no existe ninguna tarifa por litro que reproduzca $150.000 el día, y
+    # escribir una invitaría al conductor a multiplicarla. Ver `_precio_del_renglon`.
     filas = [
         [
             d.fecha.strftime("%d/%m/%Y"),
             d.ruta_nombre or "—",
             litros(d.litros),
-            pesos(d.precio_litro),
+            _precio_del_renglon(d),
             pesos(d.valor),
         ]
         for d in en_orden
@@ -567,6 +1214,39 @@ def _tabla_del_detalle(
         _ANCHOS_DETALLE_FLETE,
         (1,),  # la columna Ruta es texto: se envuelve y se alinea a la izquierda
     )
+
+
+def _promedio_del_flete(
+    valor_transporte: Decimal, total_litros: Decimal, renglones: Sequence[dict[str, Any]]
+) -> Decimal:
+    """El "precio promedio" del comprobante del transportador, SIN MENTIR.
+
+    Esa cifra del encabezado es informativa —"a cómo le salió el litro"— y se calcula
+    dividiendo el total entre los litros. Mientras todo se cobre POR LITRO no hay
+    problema: si toda la quincena fue a $242,76, el promedio da $242,76 y el dueño lo
+    reconoce.
+
+    CON UN DÍA FIJO MEZCLADO ESA DIVISIÓN DEJA DE SIGNIFICAR ALGO. Un comprobante con
+    $150.000 del día completo (340 L) y $53.273,68 de otro día a $242,76 el litro
+    (219,45 L) da un promedio de $363,80 el litro: una cifra que no es la tarifa de
+    ningún renglón, que no aparece en ninguna pantalla de tarifas y que no reproduce
+    nada. Ponerla en el encabezado es afirmar una tarifa por litro que no existe, y el
+    dueño cuadra este papel a mano.
+
+    LA DECISIÓN: con días fijos mezclados el promedio va en CERO, y al lado viaja
+    `tiene_dias_fijos` (ver `Liquidacion.tiene_dias_fijos`) para que la pantalla escriba
+    "—" y no "$0,00 el litro", que sería la otra forma de mentir. Se prefirió eso a
+    inventar un promedio "solo de los días por litro": ese número tampoco es
+    verificable contra el total del comprobante, que es la cifra que el dueño suma.
+
+    Un comprobante SIN días fijos —o sea todos los que existen hoy— sale exactamente
+    igual que antes.
+    """
+    if any((renglon.get("modo") or MODO_POR_LITRO) == MODO_DIA_FIJO for renglon in renglones):
+        return CERO
+    if not total_litros:
+        return CERO
+    return _centavos(Decimal(valor_transporte) / Decimal(total_litros))
 
 
 def _estado_pago(neto_a_pagar: Decimal, pagado: Decimal) -> str:
@@ -1072,9 +1752,22 @@ class LiquidacionService(BaseService[Liquidacion]):
             # litros recogidos esperando— así que sale en `omitidas` con su motivo. El caso
             # es de todos los días: la tarifa por omisión es cero, o sea que el
             # transportador recién creado al que nadie le llenó la tarifa cae justo aquí.
-            previstos = _reparto_del_flete(_con_el_flete_de_hoy(recepciones)).renglones
+            #
+            # `ya_cobrados` son los (día, ruta) cuyo DÍA COMPLETO ya se cobró en otro
+            # comprobante de este transportador: salen en $0,00 para no cobrar dos veces
+            # el mismo día fijo. Se consulta acá, una vez por transportador, y baja por
+            # todo el camino (la previsión, la re-derivación de las fotos y el reparto)
+            # para que las tres cosas miren lo mismo.
+            ya_cobrados = frozenset(self.repo.viajes_ya_cobrados(trans_id))
+            previstos = _reparto_del_flete(
+                _con_el_flete_de_hoy(recepciones, ya_cobrados),
+                frozenset(),
+                ya_cobrados,
+            ).renglones
             if sum((renglon["valor"] for renglon in previstos), CERO) == CERO:
-                omitidas.append(self._omitido_por_flete_sin_tarifa(recepciones))
+                omitidas.append(
+                    self._omitido_por_flete_sin_tarifa(recepciones, ya_cobrados)
+                )
                 continue
             # EL CRUCE DE PERÍODOS SE MIRA AQUÍ, DENTRO DEL RECORRIDO, y no antes como en
             # la de proveedor: hasta esta línea no se sabe si a este transportador le va a
@@ -1090,8 +1783,8 @@ class LiquidacionService(BaseService[Liquidacion]):
             if omitida is not None:
                 omitidas.append(omitida)
                 continue
-            self._rederivar_el_flete(recepciones, frozenset())
-            reparto = _reparto_del_flete(recepciones)
+            self._rederivar_el_flete(recepciones, frozenset(), ya_cobrados)
+            reparto = _reparto_del_flete(recepciones, frozenset(), ya_cobrados)
             # EL TOTAL ES LA SUMA DE LOS RENGLONES, no la de las fotos como estaban:
             # el reparto acomoda las fotos para que las dos cifras sean la misma, y
             # tomarla de los renglones deja el papel cuadrado por definición.
@@ -1110,10 +1803,12 @@ class LiquidacionService(BaseService[Liquidacion]):
                 periodo_fin=fin,
                 total_litros=total_litros,
                 # `_centavos` y no `.quantize(...)` pelado: ver la nota en
-                # `_generar_proveedores`. $2,505 el litro es $2,51, no $2,50.
-                precio_promedio=_centavos(valor_transporte / total_litros)
-                if total_litros
-                else CERO,
+                # `_generar_proveedores`. $2,505 el litro es $2,51, no $2,50. Y CERO
+                # cuando hay días fijos, porque ahí el promedio no reproduce nada: ver
+                # `_promedio_del_flete`.
+                precio_promedio=_promedio_del_flete(
+                    valor_transporte, total_litros, reparto.renglones
+                ),
                 valor_transporte=valor_transporte,
                 anticipos=total_anticipos,
                 valor_total=valor_transporte,
@@ -1129,11 +1824,18 @@ class LiquidacionService(BaseService[Liquidacion]):
                     litros=renglon["litros"],
                     precio_litro=renglon["precio_litro"],
                     valor=renglon["valor"],
+                    modo_transporte=renglon["modo"],
+                    dia_fijo_ya_cobrado=renglon["ya_cobrado"],
                     created_by=self.ctx.user_id,
                     updated_by=self.ctx.user_id,
                 )
                 for renglon in reparto.renglones
             ]
+            # LA MEMORIA DEL PAPEL nace con él: cómo cobró cada ruta, escrito en el
+            # momento en que se emite. Emitir es uno de los DOS únicos caminos que la
+            # escriben —el otro es Recalcular—; ver `_guardar_como_cobro_cada_ruta` y
+            # `LiquidacionRuta`.
+            self._guardar_como_cobro_cada_ruta(liquidacion, reparto.renglones)
             self.db.add(liquidacion)
             self.db.flush()
             for r in recepciones:
@@ -1152,7 +1854,9 @@ class LiquidacionService(BaseService[Liquidacion]):
         return generadas, omitidas
 
     def _omitido_por_flete_sin_tarifa(
-        self, recepciones: list[RecepcionLeche]
+        self,
+        recepciones: list[RecepcionLeche],
+        ya_cobrados: frozenset[tuple[date, Any]] = frozenset(),
     ) -> LiquidacionOmitida:
         """El aviso del transportador al que no se le puede armar el comprobante del flete.
 
@@ -1165,22 +1869,42 @@ class LiquidacionService(BaseService[Liquidacion]):
 
         EL MOTIVO DICE LOS LITROS QUE ESTÁN ESPERANDO, porque es lo que hace que el dueño
         entienda que esto no es "no le tocaba nada": son litros que ya se recogieron.
+
+        Y HAY UN SEGUNDO MOTIVO POR EL QUE EL TOTAL PUEDE DAR CERO, que no es un error y
+        no hay que mandar a nadie a arreglar nada: que TODOS sus días pendientes sean días
+        fijos YA COBRADOS COMPLETOS en otro comprobante. Ahí no falta ninguna tarifa —el
+        día vale $150.000 y ya se pagó— y decirle "póngale la tarifa" lo mandaría a
+        cambiar una tarifa que está bien. Son dos hechos distintos y el mensaje los
+        distingue.
         """
         quien = recepciones[0].transportador
         nombre = quien.nombre if quien is not None else "Este transportador"
         pendientes = sum((Decimal(r.cantidad_litros) for r in recepciones), CERO)
+        todos_ya_cobrados = bool(ya_cobrados) and all(
+            (r.fecha, r.ruta_id) in ya_cobrados for r in recepciones
+        )
+        if todos_ya_cobrados:
+            motivo = (
+                f"A {nombre} no le queda flete nuevo por cobrar en este período: los días "
+                f"de estas {litros(pendientes)} se cobran por DÍA COMPLETO y ya se le "
+                "pagaron completos en otro comprobante, así que recoger más leche esos "
+                "mismos días no le suma flete. No hay nada que corregir"
+            )
+        else:
+            motivo = (
+                f"{nombre} no tiene tarifa de flete —o quedó en cero—, así que el "
+                f"comprobante le saldría en $0 y no se generó. Sus {litros(pendientes)} "
+                "de este período quedan pendientes y no se perdió nada: póngale la tarifa "
+                "(por litro o por día fijo, según cómo le pague) o vuélvale a asignar la "
+                "ruta, y genere otra vez"
+            )
         return LiquidacionOmitida(
             tipo=TIPO_TRANSPORTADOR,
             cuenta="flete",
             tercero_id=recepciones[0].transportador_id,
             tercero_nombre=nombre,
             motivo_codigo=MOTIVO_FLETE_SIN_TARIFA,
-            motivo=(
-                f"{nombre} no tiene tarifa de flete —o quedó en cero—, así que el "
-                f"comprobante le saldría en $0 y no se generó. Sus {litros(pendientes)} "
-                "de este período quedan pendientes y no se perdió nada: póngale la tarifa "
-                "por litro (o vuélvale a asignar la ruta) y genere otra vez"
-            ),
+            motivo=motivo,
         )
 
     # -------------------------------------------------------- previsualización
@@ -1273,7 +1997,11 @@ class LiquidacionService(BaseService[Liquidacion]):
         # que muestra sale de los renglones y no de las fotos como están hoy: si
         # sumara las fotos, el "¿cómo voy?" podría decir un centavo distinto del
         # papel que el transportador va a firmar.
-        renglones = _renglones_de_transporte(recepciones)
+        # Los mismos (día, ruta) YA COBRADOS que verá el comprobante de verdad: si el
+        # avance no los mirara, prometería $150.000 de un día fijo que ya se pagó y al
+        # generar saldría $0. El papel del avance se le muestra al conductor.
+        ya_cobrados = frozenset(self.repo.viajes_ya_cobrados(trans_id))
+        renglones = _renglones_de_transporte(recepciones, ya_cobrados)
         valor_transporte = sum((renglon["valor"] for renglon in renglones), CERO)
         anticipos = AnticipoRepository(self.db, self.ctx.empresa_id).pendientes_transportador(
             trans_id, fin
@@ -1287,7 +2015,13 @@ class LiquidacionService(BaseService[Liquidacion]):
             periodo_inicio=inicio,
             periodo_fin=fin,
             total_litros=total_litros,
-            precio_promedio=_centavos(valor_transporte / total_litros) if total_litros else CERO,
+            precio_promedio=_promedio_del_flete(valor_transporte, total_litros, renglones),
+            # Y la bandera que hace que ese cero se lea como "—" y no como "$0,00 el
+            # litro": misma decisión que en el comprobante oficial, ver
+            # `_promedio_del_flete`.
+            tiene_dias_fijos=any(
+                renglon["modo"] == MODO_DIA_FIJO for renglon in renglones
+            ),
             valor_bruto=CERO,
             bonificaciones=CERO,
             descuentos=CERO,
@@ -1308,6 +2042,8 @@ class LiquidacionService(BaseService[Liquidacion]):
                     litros=renglon["litros"],
                     precio_litro=renglon["precio_litro"],
                     valor=renglon["valor"],
+                    modo_transporte=renglon["modo"],
+                    dia_fijo_ya_cobrado=renglon["ya_cobrado"],
                 )
                 for renglon in renglones
             ],
@@ -1531,13 +2267,41 @@ class LiquidacionService(BaseService[Liquidacion]):
         """
         recepciones = self._recepciones_transporte_de(liquidacion)
         congeladas = self._fotos_congeladas(liquidacion, recepciones)
+        # Los (día, ruta) cuyo día completo ya está cobrado en OTRO comprobante —esta
+        # liquidación no se estorba a sí misma, de ahí el `excepto`—. Sin esto, recalcular
+        # un comprobante que arrastra un día ya cobrado le volvería a poner los $150.000
+        # y el día se cobraría dos veces.
+        ya_cobrados = (
+            frozenset(
+                self.repo.viajes_ya_cobrados(
+                    liquidacion.transportador_id, excepto=liquidacion.id
+                )
+            )
+            if liquidacion.transportador_id is not None
+            else frozenset()
+        )
         # La foto de cada día ANTES de tocar nada: es la única referencia honesta para
         # decirle a la bitácora cuántos días cambiaron de verdad.
         antes_de_tocar = {r.id: _foto_del_flete(r) for r in recepciones}
+        # CÓMO, POR CUÁNTO Y A QUÉ TARIFA SE COBRÓ CADA (DÍA, RUTA) EN LOS RENGLONES QUE
+        # ESTE COMPROBANTE YA TIENE, apuntado antes de borrarlos. Solo lo usa el RECUADRE:
+        # no re-precifica y por lo mismo no re-clasifica, así que un comprobante que decía
+        # "Día completo $150.000" no se convierte en dos líneas por litro —ni en otra
+        # cifra— porque alguien escribió una observación. RECALCULAR sí re-precifica y
+        # re-clasifica —con la tarifa y el modo de hoy— y por eso no lo manda.
+        #
+        # Ver `_como_cobro_este_comprobante`, que es donde está la lectura y el porqué de
+        # apuntarlo desde EL RENGLÓN y no desde las fotos.
+        renglones_de_antes: dict[tuple[date, Any], _RenglonDeAntes] | None = None
+        rutas_de_antes: dict[Any, _ComoCobroLaRuta] | None = None
+        if not rederivar_tarifas:
+            renglones_de_antes, rutas_de_antes = _como_cobro_este_comprobante(liquidacion)
         if rederivar_tarifas:
-            self._rederivar_el_flete(recepciones, congeladas)
+            self._rederivar_el_flete(recepciones, congeladas, ya_cobrados)
 
-        reparto = _reparto_del_flete(recepciones, congeladas)
+        reparto = _reparto_del_flete(
+            recepciones, congeladas, ya_cobrados, renglones_de_antes, rutas_de_antes
+        )
         # Se vacía y SE BAJA EL DELETE antes de insertar los nuevos. Con
         # delete-orphan, sacarlos de la colección los borra de verdad; el flush de
         # por medio es para que los INSERT no se adelanten a los DELETE, que es un
@@ -1553,10 +2317,33 @@ class LiquidacionService(BaseService[Liquidacion]):
                     litros=renglon["litros"],
                     precio_litro=renglon["precio_litro"],
                     valor=renglon["valor"],
+                    modo_transporte=renglon["modo"],
+                    dia_fijo_ya_cobrado=renglon["ya_cobrado"],
                     created_by=self.ctx.user_id,
                     updated_by=self.ctx.user_id,
                 )
             )
+        # LA MEMORIA DEL PAPEL SOLO LA ESCRIBE RECALCULAR, que es el botón que el dueño
+        # oprime a propósito, y ahí se reemplaza completa. EL RECUADRE NO LA TOCA: NI UNA
+        # RUTA, NI UNA FILA, NI PARA "ACTUALIZARLA" DESDE UN RENGLÓN. Un papel emitido
+        # recuerda lo que decía cuando se emitió, y punto.
+        #
+        # Este `if` es el arreglo entero, y son dos huecos con una sola raíz —re-escribir
+        # la memoria desde los renglones que sobreviven—:
+        #
+        #   · con el recuadre escribiendo, apagar el día bueno de una ruta fija que
+        #     además tiene un renglón «ya cobrado» en $0,00 le dejaba la memoria en
+        #     ('dia_fijo', None) —ese renglón no dice cuánto cuesta el viaje— y al
+        #     prenderlo otra vez mandaba la tarifa de hoy: el papel emitido en
+        #     $150.000,00 quedaba en $0,00, un salto de −$150.000,00;
+        #   · y una ruta de PASO —el día se va un momento a Nápoles y vuelve— le dejaba
+        #     una FILA FANTASMA escrita de una ruta que el papel no cobra, que después le
+        #     ganaba a la tarifa de hoy: $19.906,32 donde hoy vale $150.000,00, o sea
+        #     ±$130.093,68.
+        #
+        # Ver `_guardar_como_cobro_cada_ruta` y `LiquidacionRuta`.
+        if rederivar_tarifas:
+            self._guardar_como_cobro_cada_ruta(liquidacion, reparto.renglones)
         self._aplicar_fotos_del_flete(recepciones, reparto.fotos)
         dias_cambiados = sum(
             1 for r in recepciones if _foto_del_flete(r) != antes_de_tocar[r.id]
@@ -1570,17 +2357,88 @@ class LiquidacionService(BaseService[Liquidacion]):
         liquidacion.total_litros = total_litros
         liquidacion.valor_transporte = valor_transporte
         # `_centavos` y no `.quantize(CENTAVOS)`: el medio centavo sube, como en
-        # toda la plata del proyecto.
-        liquidacion.precio_promedio = (
-            _centavos(valor_transporte / total_litros) if total_litros else CERO
+        # toda la plata del proyecto. Y en CERO cuando hay días fijos, porque ahí el
+        # promedio no reproduce nada: ver `_promedio_del_flete`.
+        liquidacion.precio_promedio = _promedio_del_flete(
+            valor_transporte, total_litros, reparto.renglones
         )
         liquidacion.valor_total = valor_transporte
         _refrescar_saldo(liquidacion)
         return dias_cambiados
 
+    def _guardar_como_cobro_cada_ruta(
+        self,
+        liquidacion: Liquidacion,
+        renglones: Sequence[dict[str, Any]],
+    ) -> None:
+        """Deja ESCRITO cómo cobró este comprobante cada ruta. La memoria del papel.
+
+        POR QUÉ SE ESCRIBE EN VEZ DE DEDUCIRSE, con las cifras: el modo y la tarifa de una
+        ruta se deducían de los renglones que al comprobante le quedaran, y eso se quedaba
+        sin fuente justo cuando el papel se quedaba SIN NINGÚN RENGLÓN de esa ruta. Dos
+        caminos lo lograban y ninguno oprime Recalcular —apagar el día y volver a
+        prenderlo; corregirle la ruta y devolvérsela— y el comprobante emitido por «Día
+        completo $150.000» amanecía en «82 L × $242,76 = $19.906,32», o al revés:
+        $130.093,68 que se le pagan de menos o de más al conductor. Escrito, ninguna
+        puerta se lo puede borrar. Ver `LiquidacionRuta`.
+
+        SOLO LA LLAMAN GENERAR Y RECALCULAR, y eso NO ES UN DETALLE DE ORGANIZACIÓN: ES LA
+        REGLA. La memoria se escribe cuando el papel se emite o cuando el dueño oprime
+        Recalcular a propósito, y ahí se REEMPLAZA COMPLETA. EL RECUADRE AUTOMÁTICO NO
+        ENTRA POR AQUÍ NUNCA: un papel emitido recuerda lo que decía cuando se emitió, y
+        punto. Antes el recuadre entraba con `reemplazar=False` para "refrescar" las rutas
+        que el papel todavía cobraba, y eso mismo abrió los dos huecos que están medidos en
+        `LiquidacionRuta`: el renglón «ya cobrado» en $0,00 le BORRABA el fijo a la memoria
+        (−$150.000,00) y la ruta de paso le dejaba una FILA FANTASMA (±$130.093,68). Los
+        dos son la misma raíz: re-escribir la memoria desde los renglones que sobreviven,
+        cuando tiene que ser inmutable.
+
+        LO QUE SE ESCRIBE sale de los renglones que se acaban de armar y con la misma
+        cuenta que usa la lectura (`_como_cobro_cada_ruta`), así que la memoria y el papel
+        no se pueden contradecir. Y son SOLO LAS RUTAS QUE ESE PAPEL DE VERDAD COBRA:
+        `_como_cobro_cada_ruta` sale de los renglones, así que una ruta sin renglones no
+        deja fila, y las filas de rutas que este papel ya no cobra SE BORRAN acá abajo. Sí,
+        eso significa que apagar un día, oprimir Recalcular y volver a prenderlo lo trae
+        con la tarifa de HOY: es lo correcto y es la definición de Recalcular.
+
+        LAS FILAS SE ACTUALIZAN EN SITIO y no se borran para volverlas a insertar: la
+        pareja (liquidacion_id, ruta_id) es única, y un DELETE seguido de un INSERT de la
+        misma pareja depende de que SQLAlchemy los ordene bien —un orden que no garantiza y
+        que ya costó un IntegrityError en la tabla de tarifas por ruta—. Indexando la
+        colección por `ruta_id` no hay nada que ordenar. Y es además lo que protege la fila
+        de la TARIFA GENERAL (`ruta_id` en nulo), que el único no puede proteger porque
+        Postgres deja repetir los nulos.
+        """
+        de_ahora = _como_cobro_cada_ruta(renglones)
+        ya_escritas = {fila.ruta_id: fila for fila in liquidacion.rutas_cobradas}
+        for ruta_id, como in de_ahora.items():
+            fila = ya_escritas.get(ruta_id)
+            if fila is None:
+                liquidacion.rutas_cobradas.append(
+                    LiquidacionRuta(
+                        ruta_id=ruta_id,
+                        modo_transporte=como.modo,
+                        precio_litro=como.precio,
+                        valor_dia_fijo=como.fijo,
+                    )
+                )
+                continue
+            fila.modo_transporte = como.modo
+            fila.precio_litro = como.precio
+            fila.valor_dia_fijo = como.fijo
+        # SE REEMPLAZA COMPLETA: la ruta que este papel ya no cobra deja de tener fila. Es
+        # la mitad de la regla que cierra la FILA FANTASMA de la ruta de paso.
+        for ruta_id, fila in ya_escritas.items():
+            if ruta_id not in de_ahora:
+                # Con delete-orphan, sacarla de la colección la borra de verdad.
+                liquidacion.rutas_cobradas.remove(fila)
+
     # ------------------------------------------------- las fotos del flete
     def _rederivar_el_flete(
-        self, recepciones: Sequence[RecepcionLeche], congeladas: frozenset[uuid.UUID]
+        self,
+        recepciones: Sequence[RecepcionLeche],
+        congeladas: frozenset[uuid.UUID],
+        ya_cobrados: frozenset[tuple[date, Any]] = frozenset(),
     ) -> None:
         """Vuelve a calcular el flete de cada día con LA TARIFA DE HOY.
 
@@ -1591,10 +2449,16 @@ class LiquidacionService(BaseService[Liquidacion]):
         comprobante IMPRIMÍA esa tarifa vieja, que ya no existe en ninguna pantalla,
         porque el renglón la deriva de la foto. En un día de 44 L eso son $6.281,44.
 
-        Después de esto todas las fotos del grupo son litros × tarifa de hoy, así que
-        el reparto de `_reparto_del_flete` encuentra UNA sola tarifa por (día, ruta) y
-        el papel sale con la tarifa que el conductor reconoce y que está en la
+        Después de esto todas las fotos del grupo son litros × tarifa de hoy —o la parte
+        que les toca del fijo de hoy, si ese (día, ruta) se cobra por día completo—, así
+        que el reparto de `_reparto_del_flete` encuentra UNA sola tarifa por (día, ruta)
+        y el papel sale con la tarifa que el conductor reconoce y que está en la
         pantalla. Los centavos del redondeo los sigue acomodando el reparto.
+
+        LA CUENTA VA POR GRUPO Y NO FILA POR FILA (`_fletes_de_hoy`), y eso es lo que el
+        día fijo obligó a cambiar: la cuenta por litro solo necesita esa fila, pero el
+        fijo del día depende de cuántas recepciones tenga el día en esa ruta. En modo por
+        litro el resultado es exactamente el mismo que antes, fila por fila.
 
         SE ABSTIENE COMPLETA si hay UNA sola foto congelada. Congelada quiere decir
         que por ese flete ya salió plata, y `_fotos_congeladas` congela todas o
@@ -1610,9 +2474,10 @@ class LiquidacionService(BaseService[Liquidacion]):
         """
         if congeladas:
             return
+        de_hoy = _fletes_de_hoy(recepciones, ya_cobrados)
         cambiados = 0
         for recepcion in recepciones:
-            nueva = _flete_de_hoy(recepcion)
+            nueva = de_hoy[recepcion.id]
             if nueva == _foto_del_flete(recepcion):
                 continue
             recepcion.valor_transporte = nueva
@@ -2777,7 +3642,12 @@ class LiquidacionService(BaseService[Liquidacion]):
             detalle_col_widths=detalle_anchos,
             detalle_wrap_cols=detalle_envuelven,
             resumen_rows=resumen_rows,
-            notas_resumen=self._notas_de_la_deuda(liquidacion),
+            # LAS NOTAS DEL DÍA FIJO VAN PRIMERO: explican cómo se lee la tabla que el
+            # conductor acaba de mirar, y eso se lee antes que de dónde vino un descuento.
+            notas_resumen=(
+                self._notas_del_dia_fijo(liquidacion.detalles)
+                + self._notas_de_la_deuda(liquidacion)
+            ),
             anticipos_rows=anticipos_rows,
             pagos_rows=pagos_rows,
             observaciones=liquidacion.observaciones,
@@ -2794,6 +3664,45 @@ class LiquidacionService(BaseService[Liquidacion]):
         se armara de dos formas, el dueño no podría emparejarlos.
         """
         return str(liquidacion.id)[:8].upper()
+
+    @staticmethod
+    def _notas_del_dia_fijo(detalles: Sequence[Any]) -> list[str]:
+        """La letra chica que explica un renglón de DÍA COMPLETO. Vacía si no hay ninguno.
+
+        HACE FALTA PORQUE EL PAPEL SE LE ENTREGA AL CONDUCTOR y él suma la columna a
+        mano. En un renglón por litro la línea se comprueba multiplicando; en uno de día
+        fijo esa multiplicación no da —$150.000 no es litros × nada— y sin una línea que
+        lo diga el conductor solo ve una columna Precio/L con una palabra en vez de una
+        cifra y una plata que no le cuadra con los litros. Con la nota, la línea se
+        verifica sola: el día vale $150.000.
+
+        La segunda nota sale solo cuando de verdad hay un renglón marcado como YA COBRADO
+        en otro comprobante, que es el caso raro (leche anotada después de que ese día ya
+        se liquidó): sin ella, un renglón en cero parece un error del sistema o una plata
+        que alguien le quitó. Y se mira la marca del renglón, no si el valor es cero: un
+        fijo de $0,00 —una ruta a la que el dueño decidió no cobrarle el viaje— también
+        vale cero, y esta nota le estaría diciendo al conductor que ya se le pagó.
+        """
+        fijos = [
+            d for d in detalles
+            if (getattr(d, "modo_transporte", None) or MODO_POR_LITRO) == MODO_DIA_FIJO
+            and getattr(d, "deleted_at", None) is None
+        ]
+        if not fijos:
+            return []
+        notas = [
+            f"Los renglones que dicen «{_ROTULO_DIA_FIJO}» se cobran POR DÍA y no por "
+            "litro: ese día completo vale lo que dice la columna Valor, sin importar "
+            "cuántos litros ni cuántos proveedores se recogieron. Los litros van al lado "
+            "como información; multiplicarlos no da el valor."
+        ]
+        if any(_ya_cobrado_en_otro(d) for d in fijos):
+            notas.append(
+                f"Los renglones que dicen «{_ROTULO_DIA_FIJO_YA_COBRADO}» van en $0,00 "
+                "porque el día completo ya se le pagó en otro comprobante: es leche que "
+                "se anotó después, y recoger un proveedor más ese mismo día no cuesta más."
+            )
+        return notas
 
     def _notas_de_la_deuda(self, liquidacion: Liquidacion) -> list[str]:
         """Las dos puntas de la deuda arrastrada, en letra chica bajo el resumen.
@@ -2954,7 +3863,12 @@ class LiquidacionService(BaseService[Liquidacion]):
             detalle_col_widths=detalle_anchos,
             detalle_wrap_cols=detalle_envuelven,
             resumen_rows=resumen_rows,
-            notas_resumen=self._aviso_de_la_deuda_que_falta_por_cobrar(pre),
+            # Las mismas notas del día fijo que el comprobante oficial: el conductor
+            # recibe los dos papeles y no pueden leerse distinto.
+            notas_resumen=(
+                self._notas_del_dia_fijo(pre.detalles)
+                + self._aviso_de_la_deuda_que_falta_por_cobrar(pre)
+            ),
             anticipos_rows=anticipos_rows,
             observaciones="PRE-LIQUIDACIÓN — documento informativo del avance; no constituye pago.",
         )

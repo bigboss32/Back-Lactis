@@ -106,6 +106,11 @@ class PreLiquidacionDetalle(BaseSchema):
     litros: Decimal
     precio_litro: Decimal
     valor: Decimal
+    # CÓMO SE COBRÓ ESTE RENGLÓN: 'litro' o 'dia_fijo'. Ver LiquidacionDetalleRead.
+    modo_transporte: str = "litro"
+    # Y si un renglón fijo en $0,00 lo está porque ese día YA SE COBRÓ COMPLETO en otro
+    # comprobante. Ver LiquidacionDetalleRead.
+    dia_fijo_ya_cobrado: bool = False
 
 
 class PreLiquidacionAnticipo(BaseSchema):
@@ -125,6 +130,11 @@ class PreLiquidacionRead(BaseSchema):
     periodo_fin: date
     total_litros: Decimal
     precio_promedio: Decimal
+    # Si este avance trae algún día cobrado POR DÍA COMPLETO. Cuando es True el
+    # `precio_promedio` de arriba va en CERO —con días fijos mezclados no reproduce
+    # nada— y la pantalla tiene que escribir "—" en vez de "$0,00 el litro". El porqué
+    # completo está en `_promedio_del_flete` del servicio.
+    tiene_dias_fijos: bool = False
     valor_bruto: Decimal
     bonificaciones: Decimal
     descuentos: Decimal
@@ -167,6 +177,31 @@ class LiquidacionDetalleRead(BaseSchema):
     litros: Decimal
     precio_litro: Decimal
     valor: Decimal
+    # CÓMO SE COBRÓ ESTE RENGLÓN, y sin esto la pantalla no puede escribirlo bien:
+    #
+    #   · 'litro'     → la línea se lee "219,45 L × $242,76 = $53.273,68" y se verifica
+    #                   multiplicando, como siempre;
+    #   · 'dia_fijo'  → NO hay tarifa por litro (`precio_litro` viaja en cero, que es la
+    #                   verdad) y la línea se lee "Día completo (a fábrica): $150.000",
+    #                   con los litros al lado como información. Se verifica leyéndola.
+    #
+    # Sin este campo la pantalla tendría que adivinar por las cifras ("litros × precio no
+    # da el valor"), y eso también le pasa a una fila corrupta: las dos hay que mostrarlas
+    # al revés. El PDF usa exactamente la misma información, así que el papel y la
+    # pantalla no se pueden contradecir.
+    modo_transporte: str = "litro"
+    # POR QUÉ UN RENGLÓN FIJO VALE $0,00, que son DOS cosas distintas y la pantalla no las
+    # puede confundir (el PDF ya no las confunde):
+    #
+    #   · True  → ese día completo YA SE COBRÓ en otro comprobante. La pantalla escribe
+    #             "Ya cobrado" en la columna Precio/L;
+    #   · False → simplemente vale eso. Si el valor es $0,00 es porque la tarifa fija de
+    #             esa ruta es $0,00 —el dueño decidió no cobrar ese viaje—, y la pantalla
+    #             escribe "Día completo", igual que en cualquier otro día fijo.
+    #
+    # NO SE PUEDE DEDUCIR DE `valor == 0`: así se deducía y era falso la mitad de las
+    # veces. Ver `LiquidacionDetalle.dia_fijo_ya_cobrado`.
+    dia_fijo_ya_cobrado: bool = False
 
 
 class PagoLiquidacionRead(BaseSchema):
@@ -225,6 +260,12 @@ class LiquidacionRead(TenantRead):
     periodo_fin: date
     total_litros: Decimal
     precio_promedio: Decimal
+    # Si el comprobante trae algún día cobrado POR DÍA COMPLETO (tarifa fija). Sale de
+    # los renglones (`Liquidacion.tiene_dias_fijos`), no de una columna. Cuando es True
+    # el `precio_promedio` va en CERO a propósito: con días fijos mezclados esa división
+    # no reproduce la tarifa de ningún renglón, así que la pantalla escribe "—" en vez de
+    # afirmar una tarifa por litro que no existe.
+    tiene_dias_fijos: bool = False
     valor_bruto: Decimal
     bonificaciones: Decimal
     descuentos: Decimal

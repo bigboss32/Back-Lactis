@@ -20,8 +20,62 @@ from app.common.service import BaseService, serialize_entity
 from app.core.exceptions import BusinessError
 from app.modules.rutas.models import Ruta
 from app.modules.rutas.repository import RutaRepository
-from app.modules.transportadores.models import Transportador, TransportadorRuta
+from app.modules.transportadores.models import (
+    MODO_POR_LITRO,
+    Transportador,
+    TransportadorRuta,
+)
 from app.modules.transportadores.repository import TransportadorRepository
+
+
+def _modo_general(foto: dict[str, Any]) -> str:
+    return foto.get("modo_transporte") or MODO_POR_LITRO
+
+
+def _modo_efectivo(foto: dict[str, Any], ruta_id: str) -> str:
+    """CON QUÉ MODO se cobraría hoy un día de esa ruta, con esta foto del transportador.
+
+    Es la misma regla que `tarifas.tarifa_de_transporte`, dicha sobre la foto que va a la
+    bitácora: si la ruta tiene fila propia manda su modo, y si no manda el general. Por eso
+    se pregunta por el modo EFECTIVO y no por la fila: quitarle a una ruta su tarifa propia
+    no la deja sin modo, la manda a la general.
+    """
+    for fila in foto.get("rutas") or []:
+        if str(fila["ruta_id"]) == ruta_id:
+            return fila.get("modo_transporte") or MODO_POR_LITRO
+    return _modo_general(foto)
+
+
+def _le_cambiaron_el_modo(antes: dict[str, Any], despues: dict[str, Any]) -> bool:
+    """Si este guardado le cambió el MODO a alguna tarifa (por litro ↔ día fijo).
+
+    LA CIFRA Y EL MODO NO SE TRATAN IGUAL, y esa diferencia es deliberada:
+
+      · corregir la CIFRA de una tarifa ($242,76 → $255, o quitarle a una ruta su tarifa
+        propia para que caiga en la general) deja las fotos de los días ya anotados
+        corridas, y esa corrección les llega por donde siempre: al guardar el día, al
+        generar el comprobante o al recalcularlo. Se deja tal cual estaba —es
+        comportamiento probado, el dueño ya lo conoce, y hay una prueba que exige que
+        Generar no le borre el flete a un día que se quedó sin tarifa—;
+      · cambiar el MODO no corrige una cifra, le cambia el SIGNIFICADO. Pasar la ruta "A
+        fábrica" de DÍA FIJO $150.000 a POR LITRO $242,76 deja fotos que son la parte de
+        un fijo que ya no existe, y no se diferencian en nada de una cifra buena: la
+        grilla de la quincena, el resumen y la contabilidad las siguen sumando. Con dos
+        días de 219,45 L eso son $150.000 en pantalla contra los $53.273,68 que de verdad
+        se van a cobrar. Un orden de magnitud, no unos pesos.
+
+    Se compara el modo EFECTIVO de cada ruta que aparece en cualquiera de las dos fotos, y
+    no la presencia de la fila: quitarle a una ruta su tarifa propia solo cambia el modo si
+    la general tiene OTRO modo, y en ese caso sí hay que rehacer las fotos.
+    """
+    if _modo_general(antes) != _modo_general(despues):
+        return True
+    rutas = {
+        str(fila["ruta_id"])
+        for foto in (antes, despues)
+        for fila in (foto.get("rutas") or [])
+    }
+    return any(_modo_efectivo(antes, r) != _modo_efectivo(despues, r) for r in rutas)
 
 
 class TransportadorService(BaseService[Transportador]):
@@ -82,16 +136,24 @@ class TransportadorService(BaseService[Transportador]):
 
         Se resuelve TODO antes de tocar la base: si una fila está mala, el
         transportador no queda a medio guardar con unas rutas sí y otras no.
+
+        EL MODO QUE NO VIENE NO SE TOCA: si la fila llega sin `modo_transporte` y esa
+        ruta YA estaba pegada a este transportador, se conserva el modo que tenía. Sin
+        eso, un PUT que no supiera del campo le cambiaba el modo a la ruta dejándole la
+        cifra intacta —$150.000 el día pasando a $150.000 el litro, $45 millones en un
+        día de 300 litros— y nadie lo vería en la pantalla, porque la única cosa que
+        cambió es una palabra. El porqué completo está en `TransportadorRutaIn`.
         """
         repo = RutaRepository(self.db, self.ctx.empresa_id)
-        # Las rutas que este transportador YA tiene pegadas. Se lee ANTES de que
-        # `_reemplazar_rutas` vacíe la colección, que es el otro motivo para
+        # Las rutas que este transportador YA tiene pegadas, CON SU MODO. Se lee ANTES de
+        # que `_reemplazar_rutas` vacíe la colección, que es el otro motivo para
         # resolver todas las filas primero.
-        ya_pegadas: set[uuid.UUID] = (
-            {fila.ruta_id for fila in transportador.rutas}
+        modos_de_antes: dict[uuid.UUID, str] = (
+            {fila.ruta_id: (fila.modo_transporte or MODO_POR_LITRO) for fila in transportador.rutas}
             if transportador is not None
-            else set()
+            else {}
         )
+        ya_pegadas: set[uuid.UUID] = set(modos_de_antes)
         vistas: set[uuid.UUID] = set()
         filas: list[TransportadorRuta] = []
         for item in rutas_data:
@@ -118,6 +180,15 @@ class TransportadorService(BaseService[Transportador]):
                     # responda sin una consulta más al devolver la respuesta.
                     ruta=ruta,
                     valor_transporte=Decimal(item["valor_transporte"]),
+                    # EL MODO QUE VENGA; si no viene, EL QUE ESA RUTA YA TENÍA; y si la
+                    # ruta es nueva, por litro (el significado de siempre). Ver el
+                    # docstring: es lo que evita que un payload sin el campo le cambie el
+                    # modo a una tarifa dejándole la cifra igual.
+                    modo_transporte=(
+                        item.get("modo_transporte")
+                        or modos_de_antes.get(ruta_id)
+                        or MODO_POR_LITRO
+                    ),
                 )
             )
         return filas
@@ -151,6 +222,11 @@ class TransportadorService(BaseService[Transportador]):
         antes idéntico al después: un cambio de plata sin rastro. Y es justamente
         el cambio que hay que poder reconstruir cuando el dueño pregunte por qué la
         quincena le dio distinto.
+
+        EL MODO VA EN LA FOTO POR LA MISMA RAZÓN, y es un cambio de plata todavía más
+        grande que la cifra: pasar "a fábrica" de $150.000 por litro a $150.000 por
+        día deja las dos columnas idénticas y la quincena en otro orden de magnitud.
+        Sin el modo en la bitácora ese cambio no dejaría rastro ninguno.
         """
         datos = serialize_entity(transportador)
         datos["rutas"] = [
@@ -160,6 +236,7 @@ class TransportadorService(BaseService[Transportador]):
                 # float y no Decimal porque esto va a una columna JSON, igual que
                 # el resto de las cifras que arma `serialize_entity`.
                 "valor_transporte": float(fila.valor_transporte or 0),
+                "modo_transporte": fila.modo_transporte or MODO_POR_LITRO,
             }
             for fila in sorted(transportador.rutas, key=lambda f: str(f.ruta_id))
         ]
@@ -214,7 +291,19 @@ class TransportadorService(BaseService[Transportador]):
         obj = self.repo.update(obj, data)
         if filas is not None:
             self._reemplazar_rutas(obj, filas)
-        self._audit("editar", obj.id, antes, self._foto(obj))
+        despues = self._foto(obj)
+        self._audit("editar", obj.id, antes, despues)
+        # CAMBIARLE EL MODO A UNA TARIFA REHACE LAS FOTOS DE LOS DÍAS TODAVÍA SUELTOS.
+        # Ver `_le_cambiaron_el_modo`, que es donde está el porqué, y
+        # `RecepcionService.rehacer_las_fotos_sueltas`, que es la cuenta.
+        #
+        # El import va aquí adentro y no arriba: recepción ya importa este módulo para
+        # leer las tarifas, y con el import arriba las dos hojas quedarían amarradas en
+        # tiempo de carga.
+        if _le_cambiaron_el_modo(antes, despues):
+            from app.modules.recepcion.service import RecepcionService
+
+            RecepcionService(self.db, self.ctx).rehacer_las_fotos_sueltas(obj.id)
         return obj
 
     def eliminar(self, entity_id: uuid.UUID) -> None:
