@@ -45,6 +45,32 @@ TODOS_LOS_ROLES: tuple[str, ...] = (*ROLES_SISTEMA, *ROLES_POR_MODULO)
 # necesita filas porque el chequeo lo aprueba de forma implícita.
 CONSULTA_TODOS = {(m, "consultar") for m in MODULOS}
 
+# El recibo de nómina en PDF pasó de pedir 'empleados:consultar' a pedir
+# 'empleados:imprimir' (era el único PDF del sistema que no pedía 'imprimir', y
+# lleva el sueldo de cada persona con nombre propio). Para que NADIE que hoy lo
+# imprime con razón se quede sin poder, aquí se le da 'empleados:imprimir' a los
+# roles que sí deben imprimirlo. El criterio es el que ya usa el sistema para el
+# comprobante de liquidación: quien tiene 'liquidaciones:imprimir' es quien
+# entrega papeles de plata a la gente.
+#
+#  · Administrador Empresa: ya lo tiene por su comprensión de MODULOS × ACCIONES.
+#  · Contador: es quien paga y contabiliza la nómina, y ya imprime todo lo
+#    contable (contabilidad, gastos, caja, bancos). Sin esto perdería un papel
+#    que hoy saca y que es de su oficio.
+#  · Supervisor: entrega el recibo al trabajador en la planta y ya tiene
+#    'liquidaciones:imprimir', que es el mismo tipo de papel. Además ve la nómina
+#    en pantalla por CONSULTA_TODOS, así que negarle SOLO el PDF no protegería
+#    nada: sería un candado de adorno.
+#
+# 'Consulta' NO lo recibe, Y ESO ES EL ARREGLO: es un rol de solo mirar para todo
+# el ERP y por él se estaba bajando la nómina completa. OJO —y esto es para que el
+# dueño lo decida, no lo cambio yo por mi cuenta—: 'Consulta' conserva
+# 'empleados:consultar', así que sigue VIENDO los sueldos en la pantalla de
+# nómina; lo que ya no puede es descargarse el recibo. Si tampoco debe verlos,
+# hay que sacar 'empleados' de CONSULTA_TODOS, y eso sí le quita algo que hoy
+# tiene, por lo que no se hace sin que usted lo pida.
+IMPRIMIR_NOMINA = {("empleados", "imprimir")}
+
 ROLES_PERMISOS: dict[str, set[tuple[str, str]]] = {
     "Administrador Empresa": {
         (m, a) for m in MODULOS for a in ACCIONES if not (m == "empresas" and a in ("crear", "eliminar"))
@@ -56,14 +82,16 @@ ROLES_PERMISOS: dict[str, set[tuple[str, str]]] = {
         for a in ("consultar", "exportar", "imprimir")
     }
     | {("gastos", "crear"), ("gastos", "editar"), ("caja", "crear"), ("caja", "administrar"),
-       ("bancos", "crear"), ("bancos", "administrar")},
+       ("bancos", "crear"), ("bancos", "administrar")}
+    | IMPRIMIR_NOMINA,
     "Supervisor": CONSULTA_TODOS
     | {
         ("recepcion", "crear"), ("recepcion", "editar"), ("produccion", "crear"),
         ("produccion", "editar"), ("liquidaciones", "crear"), ("liquidaciones", "imprimir"),
         ("reportes", "exportar"), ("inventario", "crear"), ("notificaciones", "administrar"),
         ("transporte", "crear"), ("transporte", "editar"),
-    },
+    }
+    | IMPRIMIR_NOMINA,
     "Auxiliar": {
         ("recepcion", "crear"), ("recepcion", "consultar"), ("proveedores", "consultar"),
         ("transportadores", "consultar"), ("rutas", "consultar"), ("inventario", "consultar"),
@@ -174,27 +202,43 @@ def seed_permisos(db: Session) -> dict[tuple[str, str], Permiso]:
 def seed_roles(db: Session, permisos: dict[tuple[str, str], Permiso]) -> dict[str, Rol]:
     """Crea los roles de sistema que falten y les sincroniza sus permisos.
 
-    NUNCA toca un rol que no sea de sistema, aunque se llame igual que uno de la
-    lista de siembra. Los roles son GLOBALES (Rol no tiene empresa_id) y
-    Rol.nombre es UNIQUE en toda la base, así que un nombre que aquí se siembra
-    puede chocar con uno que un administrador de cualquier empresa ya creó a
-    mano —"Reventa" es el ejemplo evidente—. Sincronizarle los permisos de la
-    lista sería una ESCALADA DE PRIVILEGIOS silenciosa: un rol de solo lectura
-    pasaría, en un despliegue cualquiera, a poder anular y eliminar, y con él
-    todos los usuarios que ya lo tuvieran asignado. Cuando pasa, el rol del
-    cliente se deja EXACTAMENTE como está y se avisa por el log.
+    LA SIEMBRA SOLO MANEJA LAS PLANTILLAS, o sea los roles con empresa_id NULL.
+    Esos son los suyos: existen una sola vez para toda la instalación, las dos
+    queseras los ven y los asignan, y ninguna los puede editar (RolService cierra
+    esa puerta; quien quiera otra cosa se copia el rol a su empresa). Por eso
+    esta función es igual de idempotente con una empresa que con veinte: no
+    recorre empresas, no crea una copia por quesera y no depende de cuántas haya.
+
+    Un rol de UNA empresa que se llame igual que una plantilla ya no le compete
+    ni la estorba: desde que el nombre es único POR EMPRESA viven en espacios
+    distintos y ni se ven. La siembra lo ignora por completo.
+
+    Lo que sí sigue vigilando —y por eso el chequeo de `es_sistema` no se quitó—
+    es el caso de una PLANTILLA que no sea de sistema: una fila global con
+    es_sistema=False. Puede quedar una así si la migración de separación no logró
+    atribuirle empresa a un rol viejo. Sincronizarle los permisos de la lista
+    sería una ESCALADA DE PRIVILEGIOS silenciosa: un rol de solo lectura pasaría,
+    en un despliegue cualquiera, a poder anular y eliminar, y con él todos los
+    usuarios que ya lo tuvieran asignado. Cuando pasa, el rol se deja EXACTAMENTE
+    como está y se avisa por el log.
 
     Devuelve {nombre: rol} con los roles utilizables (existentes y vivos). Puede
     faltar algún nombre si el rol está borrado lógicamente, así que quien lo
     consuma debe usar .get() y no indexar a ciegas.
     """
-    # Se cargan TODOS los roles, incluidos los borrados lógicamente: el borrado
-    # de roles es SOFT (BaseRepository.soft_delete pone deleted_at y estado
-    # 'inactivo'; la fila se queda) y el UNIQUE de roles.nombre es de columna, no
-    # filtra por deleted_at. O sea: una fila borrada SIGUE ocupando el nombre y
-    # crear otro rol con él reventaría el INSERT. Por eso hay que verlas aquí,
-    # aunque a efectos de sincronizar permisos no cuenten como existentes.
-    existentes: dict[str, Rol] = {r.nombre: r for r in db.scalars(select(Rol)).all()}
+    # Se cargan TODAS las plantillas, incluidas las borradas lógicamente: el
+    # borrado de roles es SOFT (BaseRepository.soft_delete pone deleted_at y
+    # estado 'inactivo'; la fila se queda) y el índice único de nombre no filtra
+    # por deleted_at. O sea: una fila borrada SIGUE ocupando el nombre y crear
+    # otra con él reventaría el INSERT. Por eso hay que verlas aquí, aunque a
+    # efectos de sincronizar permisos no cuenten como existentes.
+    #
+    # El filtro empresa_id IS NULL es lo que deja fuera los roles de las
+    # queseras: si no estuviera, un rol que la Quesera A llamara 'Ventas' se
+    # colaría en este diccionario y la siembra le trabajaría encima.
+    existentes: dict[str, Rol] = {
+        r.nombre: r for r in db.scalars(select(Rol).where(Rol.empresa_id.is_(None))).all()
+    }
 
     roles: dict[str, Rol] = {}
     # Solo los roles de sistema vivos reciben la sincronización de permisos.
@@ -204,6 +248,8 @@ def seed_roles(db: Session, permisos: dict[tuple[str, str], Permiso]) -> dict[st
         rol = existentes.get(nombre)
 
         if rol is None:
+            # empresa_id queda en None (el valor por defecto): es una PLANTILLA
+            # de toda la instalación, no el rol de una quesera.
             rol = Rol(nombre=nombre, descripcion=f"Rol de sistema: {nombre}", es_sistema=True)
             db.add(rol)
             roles[nombre] = rol
@@ -215,14 +261,16 @@ def seed_roles(db: Session, permisos: dict[tuple[str, str], Permiso]) -> dict[st
             # nombre debe encontrarlo), pero no se le toca ni un permiso.
             roles[nombre] = rol
             logger.warning(
-                "SIEMBRA OMITIDA — rol '%s': ya existe un rol de USUARIO con ese nombre "
-                "(id=%s, es_sistema=False, %d permiso(s)). NO se sembró el rol de sistema y NO "
-                "se le añadió ningún permiso al rol existente, para no ampliar en silencio lo "
-                "que pueden hacer los usuarios que ya lo tienen asignado. Si hace falta el rol "
-                "de sistema, renombre primero el rol de usuario y vuelva a ejecutar la siembra.",
+                "SIEMBRA OMITIDA — rol '%s': ya hay una PLANTILLA (empresa_id NULL) con ese "
+                "nombre que no es de sistema (id=%s, es_sistema=False, %d permiso(s)). NO se "
+                "sembró el rol de sistema y NO se le añadió ningún permiso al existente, para "
+                "no ampliar en silencio lo que pueden hacer los usuarios que ya lo tienen "
+                "asignado. Para resolverlo: pásele ese rol a la empresa que de verdad lo usa "
+                "(UPDATE roles SET empresa_id=... WHERE id=%s) y vuelva a sembrar.",
                 nombre,
                 rol.id,
                 len(rol.permisos),
+                rol.id,
             )
             continue
 

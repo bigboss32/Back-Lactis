@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, UploadFile
+from fastapi import APIRouter, Depends, UploadFile, status
 
 from app.common.crud_router import build_crud_router
 from app.core.context import RequestContext
@@ -13,6 +13,7 @@ from app.modules.usuarios.schemas import (
     CambiarPasswordAdmin,
     MembresiaEmpresaRead,
     PermisoRead,
+    RolCopiar,
     RolCreate,
     RolRead,
     RolUpdate,
@@ -131,6 +132,23 @@ def asignar_permisos(
     ctx: RequestContext = Depends(require_permission("roles", "administrar")),
 ) -> RolRead:
     return RolService(db, ctx).asignar_permisos(entity_id, payload.permiso_ids)
+
+
+@roles_router.post(
+    "/{entity_id}/copiar",
+    response_model=RolRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Copiar un rol a mi empresa (así se 'edita' un rol de sistema)",
+)
+def copiar_rol(
+    entity_id: uuid.UUID,
+    payload: RolCopiar,
+    db: DbSession,
+    # Pide 'crear' y no 'administrar' porque lo que hace es crear un rol NUEVO
+    # en la propia empresa; no toca en nada al rol de origen.
+    ctx: RequestContext = Depends(require_permission("roles", "crear")),
+) -> RolRead:
+    return RolService(db, ctx).copiar(entity_id, payload.nombre, payload.descripcion)
 
 
 # --------------------------------------------------------------------- permisos

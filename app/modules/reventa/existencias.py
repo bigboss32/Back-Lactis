@@ -81,6 +81,11 @@ class ExistenciasReventa:
         self._conversiones = ConversionBoronaRepository(db, ctx.empresa_id)
         self._disponibles: dict[str, Decimal] | None = None
         self._claves: list[str] | None = None
+        # Lo que salió de cada producto POR AJUSTES y no por una venta. Sale de la
+        # MISMA pasada que los disponibles porque lo necesita quien redacta un
+        # rechazo (ver `salio_por_ajustes`), y volver a preguntarlo sería otra
+        # consulta por cada renglón que se valide.
+        self._por_ajustes: dict[str, Decimal] | None = None
 
     # ------------------------------------------------------------------ el cálculo
     def _cargar(self) -> dict[str, Decimal]:
@@ -131,6 +136,7 @@ class ExistenciasReventa:
                 entra = compra[3]
                 sale = venta[2]
             disponibles[clave] = entra - sale
+        self._por_ajustes = sale_por_ajustes
         return disponibles
 
     @property
@@ -173,6 +179,25 @@ class ExistenciasReventa:
     def disponible(self, clave: str | None) -> Decimal:
         """Lo que hay en bodega de ese producto, en SU unidad. Cero si nunca se movió."""
         return self.disponibles.get(clave or "", CERO)
+
+    def salio_por_ajustes(self, clave: str | None) -> Decimal:
+        """Cuánto salió de ese producto por AJUSTES, o sea sin haberse vendido.
+
+        NO ES UNA CIFRA DE PANTALLA: es lo que hace que un rechazo no mande al dueño a
+        buscar una venta que no existe. El disponible baja por DOS caminos —las ventas
+        y los ajustes—, y los guardias de borrar y de anular solo saben que no
+        alcanza: si el mensaje afirma "ya se vendió" cuando lo que se llevó los kilos
+        fue un ajuste, el dueño revisa sus ventas, no encuentra ninguna, y se queda
+        atascado con la compra mal anotada. Medido contra la API: 137,45 kg de queso
+        con 44,23 pasados a borona y NADA vendido, y el rechazo del borrado le hablaba
+        de "las ventas que se lo llevaron".
+
+        LA MERMA CUENTA COMO AJUSTE, y con razón: esos kilos tampoco se vendieron, y
+        el dueño los deshace por la misma puerta.
+        """
+        if self._por_ajustes is None:
+            self._cargar_si_hace_falta()
+        return (self._por_ajustes or {}).get(clave or "", CERO)
 
     def unidad(self, clave: str | None) -> str:
         return self.catalogo.unidad_de(clave)

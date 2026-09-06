@@ -38,7 +38,13 @@ def listar_logins(
     usuario_id: uuid.UUID | None = Query(None),
     exito: bool | None = Query(None),
 ) -> Page[LoginAuditRead]:
-    repo = LoginAuditRepository(db)
+    # ctx.empresa_id: cada quesera ve los ingresos de SU gente. Antes iba sin
+    # empresa y el administrador de una veía los ingresos y los intentos
+    # fallidos de la otra —a qué horas entra cada quien, desde qué IP y con qué
+    # equipo—. El filtro es por MEMBRESÍA porque la tabla no guarda la empresa y
+    # no se le inventa una: el porqué y lo que implica está escrito en
+    # LoginAuditRepository.
+    repo = LoginAuditRepository(db, ctx.empresa_id)
     items, total = repo.list_paginated(
         params, filters={"usuario_id": usuario_id, "exito": exito}
     )

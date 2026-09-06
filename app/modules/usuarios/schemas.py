@@ -34,10 +34,21 @@ class RolUpdate(BaseSchema):
     estado: str | None = None
 
 
+class RolCopiar(BaseSchema):
+    """Copiar un rol a mi empresa. Sin nombre, se propone '<rol> (copia)'."""
+
+    nombre: str | None = Field(default=None, min_length=3, max_length=80)
+    descripcion: str | None = None
+
+
 class RolRead(AuditRead):
     nombre: str
     descripcion: str | None
     es_sistema: bool
+    # NULL = rol de sistema: lo comparte toda la instalación y NO se edita desde
+    # la aplicación (la pantalla lo puede mostrar en gris con el botón "copiar").
+    # Con valor = rol de esa quesera, suyo para editar y borrar.
+    empresa_id: uuid.UUID | None = None
     permisos: list[PermisoRead] = []
 
 

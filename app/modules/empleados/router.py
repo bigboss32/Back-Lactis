@@ -70,7 +70,13 @@ def eliminar_pago(
 def descargar_pdf_pago(
     entity_id: uuid.UUID,
     db: DbSession,
-    ctx: RequestContext = Depends(require_permission("empleados", "consultar")),
+    # 'imprimir', NO 'consultar': era el ÚNICO PDF del sistema que se conformaba
+    # con 'consultar' (los de liquidaciones y los de reventa piden 'imprimir'), y
+    # ese recibo lleva el sueldo de una persona con nombre propio. Con 'consultar'
+    # bastaba el rol 'Consulta' —que tiene el consultar de TODOS los módulos— para
+    # bajarse el sueldo de todo el mundo. Los roles que sí deben imprimirlo reciben
+    # el permiso en la siembra (ver ROLES_PERMISOS en app/seeds/seed.py).
+    ctx: RequestContext = Depends(require_permission("empleados", "imprimir")),
 ) -> Response:
     contenido, filename = PagoEmpleadoService(db, ctx).generar_pdf(entity_id)
     return Response(

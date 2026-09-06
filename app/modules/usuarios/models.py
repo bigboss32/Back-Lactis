@@ -39,13 +39,66 @@ class Permiso(AuditMixin, Base):
 
 
 class Rol(AuditMixin, Base):
-    __tablename__ = "roles"
+    """Un rol: el paquete de permisos que decide QUÉ PANTALLAS ve una persona.
 
-    nombre: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    Hay DOS clases de rol y la diferencia es `empresa_id`:
+
+    · empresa_id NULL = ROL DE SISTEMA (es_sistema=True). Es la PLANTILLA de toda
+      la instalación: la siembra la crea y la mantiene en cada despliegue, las
+      dos queseras la ven y la pueden asignar, y NADIE la edita desde la
+      aplicación. Quien quiera otra cosa se copia el rol a su empresa y edita la
+      copia. Esa barrera es la que impide lo que pasaba antes: el administrador
+      de la Quesera A le cambiaba los permisos al rol 'Reventa' y con eso le
+      apagaba o le encendía pantallas a los usuarios de la Quesera B.
+
+    · empresa_id con valor = ROL DE UNA QUESERA. Solo esa empresa lo ve, lo
+      asigna, lo edita y lo borra. Es lo que crea un administrador desde la
+      pantalla de Roles.
+
+    Y por eso el NOMBRE es único POR EMPRESA y no en toda la instalación: la
+    Quesera A y la Quesera B pueden tener cada una su rol 'Bodega' sin pisarse.
+    Se logra con dos índices únicos PARCIALES (válidos en Postgres y en SQLite),
+    el mismo recurso que ya usa `usuario_roles`: uno para los roles de empresa y
+    otro para las plantillas. Un solo UNIQUE sobre (empresa_id, nombre) NO
+    serviría: en Postgres dos NULL cuentan como distintos y dejaría entrar dos
+    plantillas con el mismo nombre.
+
+    OJO, igual que en el resto del sistema: el UNIQUE no filtra `deleted_at`, así
+    que un rol borrado en suave SIGUE ocupando su nombre (ver RolService.crear).
+    """
+
+    __tablename__ = "roles"
+    __table_args__ = (
+        Index(
+            "uq_rol_nombre_empresa",
+            "empresa_id",
+            "nombre",
+            unique=True,
+            postgresql_where=text("empresa_id IS NOT NULL"),
+            sqlite_where=text("empresa_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_rol_nombre_global",
+            "nombre",
+            unique=True,
+            postgresql_where=text("empresa_id IS NULL"),
+            sqlite_where=text("empresa_id IS NULL"),
+        ),
+    )
+
+    nombre: Mapped[str] = mapped_column(String(80), nullable=False)
     descripcion: Mapped[str | None] = mapped_column(String(200))
     es_sistema: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # NULLABLE a propósito (no lleva TenantMixin, que lo exigiría): NULL es la
+    # plantilla compartida de la instalación. Ver el docstring de la clase.
+    empresa_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("empresas.id"), index=True)
 
     permisos: Mapped[list[Permiso]] = relationship(secondary=rol_permisos, lazy="selectin")
+
+    @property
+    def es_plantilla(self) -> bool:
+        """Rol de toda la instalación: nadie lo edita desde la aplicación."""
+        return self.empresa_id is None
 
 
 class Usuario(AuditMixin, Base):

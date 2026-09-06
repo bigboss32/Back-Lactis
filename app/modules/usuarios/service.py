@@ -37,11 +37,21 @@ class UsuarioService(BaseService[Usuario]):
         ):
             raise ConflictError(f"El correo '{data['correo']}' ya está registrado")
 
-    def _cargar_roles(self, rol_ids: list[uuid.UUID]) -> list[Rol]:
+    def _cargar_roles(self, rol_ids: list[uuid.UUID], empresa_id: uuid.UUID | None) -> list[Rol]:
+        """Carga los roles que se le van a colgar a un usuario EN una empresa.
+
+        Solo son asignables las PLANTILLAS de sistema (empresa_id NULL, que son
+        de toda la instalación) y los roles de ESA empresa. Un rol de la otra
+        quesera se responde como si no existiera —404 y no 403— para no confirmar
+        que existe: es el mismo criterio con el que ya se responde cuando alguien
+        pregunta por un usuario ajeno.
+        """
         if not rol_ids:
             return []
         roles = list(self.db.scalars(select(Rol).where(Rol.id.in_(rol_ids), Rol.deleted_at.is_(None))))
         if len(roles) != len(set(rol_ids)):
+            raise NotFoundError("Uno o más roles no existen")
+        if any(r.empresa_id is not None and r.empresa_id != empresa_id for r in roles):
             raise NotFoundError("Uno o más roles no existen")
         if any(r.nombre == ROL_SUPERADMIN for r in roles) and not self.ctx.is_superadmin:
             raise ForbiddenError("Solo un Administrador General puede asignar ese rol")
@@ -68,7 +78,7 @@ class UsuarioService(BaseService[Usuario]):
                 rol=rol,
                 empresa_id=None if rol.nombre == ROL_SUPERADMIN else usuario.empresa_id,
             )
-            for rol in self._cargar_roles(rol_ids)
+            for rol in self._cargar_roles(rol_ids, usuario.empresa_id)
         ]
         self.repo.add(usuario)
         despues = serialize_entity(usuario)
@@ -106,7 +116,7 @@ class UsuarioService(BaseService[Usuario]):
         # demás solo alcanzan a los miembros de su empresa activa
         repo = UsuarioRepository(self.db) if self.ctx.is_superadmin else self.repo
         usuario = repo.get_or_fail(entity_id)
-        roles = self._cargar_roles(rol_ids)
+        roles = self._cargar_roles(rol_ids, self.ctx.empresa_id)
         antes = [r.nombre for r in usuario.roles_en(self.ctx.empresa_id)]
 
         con_superadmin = any(r.nombre == ROL_SUPERADMIN for r in roles)
@@ -233,6 +243,20 @@ class UsuarioService(BaseService[Usuario]):
             raise BusinessError(
                 "El rol Administrador General es global y no se asigna por empresa"
             )
+        # Cada empresa solo puede recibir SUS roles o las plantillas de sistema:
+        # colgarle a un usuario de la Quesera B un rol que hizo la Quesera A le
+        # daría a B unos permisos que administra A, que es justo lo que se cerró.
+        cruzados = [
+            (m.empresa_id, roles[rol_id].nombre)
+            for m in membresias
+            for rol_id in m.rol_ids
+            if roles[rol_id].empresa_id is not None
+            and roles[rol_id].empresa_id != m.empresa_id
+        ]
+        if cruzados:
+            raise BusinessError(
+                "El rol '%s' es de otra empresa y no se puede asignar en esta" % cruzados[0][1]
+            )
         if payload.empresa_principal_id is not None and payload.empresa_principal_id not in set(
             empresa_ids
         ):
@@ -328,8 +352,40 @@ class UsuarioService(BaseService[Usuario]):
 
 
 class RolService(BaseService[Rol]):
+    """Roles: los de la empresa se editan; las plantillas de sistema, no.
+
+    Un rol de sistema (empresa_id NULL) es la MISMA FILA para las dos queseras.
+    Editarlo desde una empresa le cambiaba las pantallas a los usuarios de la
+    otra, así que desde aquí no se toca: ni el nombre, ni la descripción, ni los
+    permisos, ni se borra. El camino para el dueño que quiere otra cosa es
+    `copiar`, que le deja el mismo paquete de permisos en un rol SUYO.
+
+    Tampoco lo edita el Administrador General por la API, y no es un descuido:
+    la siembra le vuelve a agregar en el siguiente despliegue todo permiso que
+    le hayan quitado (`seed_roles` sincroniza por unión), así que quitarle uno
+    desde la aplicación daría una tranquilidad falsa; y lo que sí se quedaría
+    pegado es lo AGREGADO, para las dos queseras a la vez. Las plantillas se
+    cambian donde se declaran, en app/seeds/seed.py, y viajan en un despliegue.
+    """
+
     repository_cls = RolRepository
     modulo = "roles"
+
+    def _exigir_contexto_de_empresa(self, que: str) -> uuid.UUID:
+        if self.ctx.empresa_id is None:
+            raise BusinessError(
+                f"{que} requiere contexto de empresa: envíe el header X-Empresa-Id"
+            )
+        return self.ctx.empresa_id
+
+    @staticmethod
+    def _exigir_que_sea_de_la_empresa(rol: Rol, verbo: str) -> None:
+        if rol.empresa_id is None:
+            raise ForbiddenError(
+                f"'{rol.nombre}' es un rol de sistema: lo comparten todas las queseras de "
+                f"esta instalación y la siembra lo mantiene en cada despliegue. Para {verbo}, "
+                "cópielo a su empresa y trabaje sobre la copia."
+            )
 
     def _cargar_permisos(self, permiso_ids: list[uuid.UUID]) -> list[Permiso]:
         if not permiso_ids:
@@ -341,22 +397,102 @@ class RolService(BaseService[Rol]):
             raise NotFoundError("Uno o más permisos no existen")
         return permisos
 
+    def _exigir_nombre_libre(self, nombre: str, exclude_id: uuid.UUID | None = None) -> None:
+        """El nombre no puede chocar con otro rol de la empresa ni con una plantilla.
+
+        Que no choque con las plantillas no es exigencia de la base (los índices
+        dejarían pasar un 'Ventas' de empresa junto al 'Ventas' de sistema): es
+        para que el dueño no vea DOS roles llamados igual en la misma lista y
+        tenga que adivinar cuál le asignó a quién. Con la otra quesera no hay
+        choque posible: sus roles ni siquiera se ven desde aquí.
+        """
+        choque = self.repo.nombre_ocupado(nombre, exclude_id=exclude_id)
+        if choque is None:
+            return
+        if choque.deleted_at is not None:
+            raise ConflictError(
+                f"El nombre '{nombre}' lo tiene un rol que ya se borró. Escoja otro nombre "
+                "o pida que restauren el rol borrado."
+            )
+        raise ConflictError(f"Ya existe un rol '{nombre}'")
+
+    def _nombre_libre_para_copia(self, base: str) -> str:
+        candidato = f"{base} (copia)"[:80]
+        intento = 2
+        while self.repo.nombre_ocupado(candidato) is not None:
+            candidato = f"{base} (copia {intento})"[:80]
+            intento += 1
+            if intento > 50:  # pragma: no cover - defensa, no caso real
+                raise ConflictError(
+                    f"No se encontró un nombre libre para copiar '{base}'. Indique uno."
+                )
+        return candidato
+
     def crear(self, payload: Any) -> Rol:
         data = payload.model_dump(exclude_unset=True)
         permiso_ids = data.pop("permiso_ids", [])
-        if self.repo.exists_where(Rol.nombre == data["nombre"]):
-            raise ConflictError(f"Ya existe un rol '{data['nombre']}'")
-        rol = Rol(**data, created_by=self.ctx.user_id, updated_by=self.ctx.user_id)
+        empresa_id = self._exigir_contexto_de_empresa("Crear un rol")
+        self._exigir_nombre_libre(data["nombre"])
+        # es_sistema=False SIEMPRE: por la API solo nacen roles de una empresa.
+        # Las plantillas las crea la siembra y nada más.
+        rol = Rol(
+            **data,
+            empresa_id=empresa_id,
+            es_sistema=False,
+            created_by=self.ctx.user_id,
+            updated_by=self.ctx.user_id,
+        )
         rol.permisos = self._cargar_permisos(permiso_ids)
         self.repo.add(rol)
         self._audit("crear", rol.id, None, {"nombre": rol.nombre, "permisos": len(rol.permisos)})
         return rol
 
+    def copiar(self, entity_id: uuid.UUID, nombre: str | None, descripcion: str | None) -> Rol:
+        """Deja en MI empresa una copia editable de un rol, con sus mismos permisos.
+
+        Es la salida para el dueño que quiere un rol de sistema "pero con un
+        cambio": se lleva el paquete completo de permisos y a partir de ahí lo
+        ajusta sin tocarle nada a la otra quesera. Sirve igual para duplicar un
+        rol propio.
+        """
+        empresa_id = self._exigir_contexto_de_empresa("Copiar un rol")
+        # get_or_fail pasa por base_query: solo alcanza los roles propios y las
+        # plantillas, nunca uno de la otra quesera.
+        origen = self.repo.get_or_fail(entity_id)
+        if origen.nombre == ROL_SUPERADMIN:
+            raise BusinessError(
+                "El Administrador General no se copia: sus permisos no son una lista, "
+                "son implícitos, y la copia quedaría vacía"
+            )
+        nombre_final = (nombre or "").strip() or self._nombre_libre_para_copia(origen.nombre)
+        self._exigir_nombre_libre(nombre_final)
+        copia = Rol(
+            nombre=nombre_final,
+            descripcion=(descripcion if descripcion is not None else origen.descripcion),
+            empresa_id=empresa_id,
+            es_sistema=False,
+            created_by=self.ctx.user_id,
+            updated_by=self.ctx.user_id,
+        )
+        copia.permisos = list(origen.permisos)
+        self.repo.add(copia)
+        self._audit(
+            "crear",
+            copia.id,
+            None,
+            {"nombre": copia.nombre, "permisos": len(copia.permisos), "copiado_de": origen.nombre},
+        )
+        return copia
+
     def validar_actualizar(self, obj: Rol, data: dict[str, Any]) -> None:
+        self._exigir_que_sea_de_la_empresa(obj, "cambiarlo")
         if obj.es_sistema and data.get("nombre") and data["nombre"] != obj.nombre:
             raise BusinessError("No se puede renombrar un rol de sistema")
+        if data.get("nombre") and data["nombre"] != obj.nombre:
+            self._exigir_nombre_libre(data["nombre"], exclude_id=obj.id)
 
     def validar_eliminar(self, obj: Rol) -> None:
+        self._exigir_que_sea_de_la_empresa(obj, "quitarlo")
         if obj.es_sistema:
             raise BusinessError("No se puede eliminar un rol de sistema")
 
@@ -364,6 +500,7 @@ class RolService(BaseService[Rol]):
         rol = self.repo.get_or_fail(entity_id)
         if rol.nombre == ROL_SUPERADMIN:
             raise BusinessError("El Administrador General tiene todos los permisos implícitos")
+        self._exigir_que_sea_de_la_empresa(rol, "cambiarle los permisos")
         antes = len(rol.permisos)
         rol.permisos = self._cargar_permisos(permiso_ids)
         self.db.flush()

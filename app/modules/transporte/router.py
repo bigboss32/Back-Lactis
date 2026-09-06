@@ -228,7 +228,13 @@ def eliminar_abono_servicio(
     servicio_id: uuid.UUID,
     abono_id: uuid.UUID,
     db: DbSession,
-    ctx: RequestContext = Depends(require_permission("transporte", "crear")),
+    # 'eliminar', NO 'crear': esto borra PLATA YA RECIBIDA y le devuelve el saldo
+    # al cliente. Pedía 'crear' —seguramente por copiar la firma del endpoint de
+    # abonar, que está justo arriba— y con eso un Auxiliar, que tiene
+    # transporte:crear para registrar fletes y abonos pero NO transporte:eliminar,
+    # borraba un abono ya cobrado. Es el único borrado de todo el sistema que no
+    # pedía 'eliminar' (se recorrieron los 186 endpoints comprobándolo).
+    ctx: RequestContext = Depends(require_permission("transporte", "eliminar")),
 ) -> ViajeServicioRead:
     return ViajeServicioService(db, ctx).eliminar_abono(servicio_id, abono_id)
 

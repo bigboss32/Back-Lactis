@@ -2,7 +2,7 @@
  "admin.a": {
   "balance": {
    "cartera_por_cobrar": "0",
-   "fecha_corte": "2026-08-20",
+   "fecha_corte": "2026-09-05",
    "liquidaciones_por_pagar": "3530481.81",
    "saldo_bancos": "0",
    "saldo_cajas": "0",
@@ -466,7 +466,7 @@
   },
   "liquidaciones": [
    {
-    "anticipos": "0",
+    "anticipos": "0.00",
     "bonificaciones": "0.00",
     "descuentos": "0.00",
     "detalles": [
@@ -495,14 +495,14 @@
     "estado": "borrador",
     "le_queda_debiendo": "0",
     "neto_a_pagar": "247950.00",
-    "pagado": "0",
+    "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 8CB19DCF Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Aurelio A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 8CB19DCF Detalle diario Fecha Litros Precio/L Valor 16/07/2026 47,9 L $1.800 $86.220 17/07/2026 51,1 L $1.800 $91.980 20/07/2026 38,75 L $1.800 $69.750 Resumen de liquidación Total litros 137,75 L Precio promedio $1.800 Valor bruto $247.950 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $247.950 Anticipos aplicados - $0 SALDO A PAGAR $247.950 Entregué conforme Quesera A Recibí conforme Aurelio A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 156DBC3B Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Aurelio A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 156DBC3B Detalle diario Fecha Litros Precio/L Valor 16/07/2026 47,9 L $1.800 $86.220 17/07/2026 51,1 L $1.800 $91.980 20/07/2026 38,75 L $1.800 $69.750 Resumen de liquidación Total litros 137,75 L Precio promedio $1.800 Valor bruto $247.950 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $247.950 Anticipos aplicados - $0 SALDO A PAGAR $247.950 Entregué conforme Quesera A Recibí conforme Aurelio A",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "1800.00",
     "saldo": "247950.00",
-    "saldo_anterior": "0",
+    "saldo_anterior": "0.00",
     "tercero": null,
     "tipo": "proveedor",
     "total_litros": "137.75",
@@ -535,7 +535,7 @@
     "neto_a_pagar": "395874.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º FA6FA92F Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Marleny A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º FA6FA92F Detalle diario Fecha Litros Precio/L Valor 16/07/2026 82,48 L $1.800 $148.464 18/07/2026 137,45 L $1.800 $247.410 Resumen de liquidación Total litros 219,93 L Precio promedio $1.800 Valor bruto $395.874 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $395.874 Anticipos aplicados - $0 SALDO A PAGAR $395.874 Entregué conforme Quesera A Recibí conforme Marleny A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º D3FE20C4 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Marleny A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º D3FE20C4 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 82,48 L $1.800 $148.464 18/07/2026 137,45 L $1.800 $247.410 Resumen de liquidación Total litros 219,93 L Precio promedio $1.800 Valor bruto $395.874 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $395.874 Anticipos aplicados - $0 SALDO A PAGAR $395.874 Entregué conforme Quesera A Recibí conforme Marleny A",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "1800.00",
@@ -549,7 +549,7 @@
     "valor_transporte": "56082.15"
    },
    {
-    "anticipos": "0.00",
+    "anticipos": "0",
     "bonificaciones": "0.00",
     "descuentos": "0.00",
     "detalles": [
@@ -571,14 +571,14 @@
     "estado": "borrador",
     "le_queda_debiendo": "0",
     "neto_a_pagar": "423558.00",
-    "pagado": "0.00",
+    "pagado": "0",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 68D55A5C Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Rosa A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 68D55A5C Detalle diario Fecha Litros Precio/L Valor 17/07/2026 124,2 L $1.800 $223.560 20/07/2026 111,11 L $1.800 $199.998 Resumen de liquidación Total litros 235,31 L Precio promedio $1.800 Valor bruto $423.558 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $423.558 Anticipos aplicados - $0 SALDO A PAGAR $423.558 Entregué conforme Quesera A Recibí conforme Rosa A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 730BF7E3 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Rosa A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 730BF7E3 Detalle diario Fecha Litros Precio/L Valor 17/07/2026 124,2 L $1.800 $223.560 20/07/2026 111,11 L $1.800 $199.998 Resumen de liquidación Total litros 235,31 L Precio promedio $1.800 Valor bruto $423.558 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $423.558 Anticipos aplicados - $0 SALDO A PAGAR $423.558 Entregué conforme Quesera A Recibí conforme Rosa A",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "1800.00",
     "saldo": "423558.00",
-    "saldo_anterior": "0.00",
+    "saldo_anterior": "0",
     "tercero": null,
     "tipo": "proveedor",
     "total_litros": "235.31",
@@ -587,7 +587,7 @@
     "valor_transporte": "52270.79"
    },
    {
-    "anticipos": "0",
+    "anticipos": "0.00",
     "bonificaciones": "0.00",
     "descuentos": "0.00",
     "detalles": [
@@ -609,14 +609,14 @@
     "estado": "borrador",
     "le_queda_debiendo": "0",
     "neto_a_pagar": "519120.00",
-    "pagado": "0",
+    "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 51A0FF10 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Henri A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 51A0FF10 Detalle diario Fecha Litros Precio/L Valor 18/07/2026 225 L $1.800 $405.000 21/07/2026 63,4 L $1.800 $114.120 Resumen de liquidación Total litros 288,4 L Precio promedio $1.800 Valor bruto $519.120 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $519.120 Anticipos aplicados - $0 SALDO A PAGAR $519.120 Entregué conforme Quesera A Recibí conforme Henri A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 5E92D43C Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Henri A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 5E92D43C Detalle diario Fecha Litros Precio/L Valor 18/07/2026 225 L $1.800 $405.000 21/07/2026 63,4 L $1.800 $114.120 Resumen de liquidación Total litros 288,4 L Precio promedio $1.800 Valor bruto $519.120 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $519.120 Anticipos aplicados - $0 SALDO A PAGAR $519.120 Entregué conforme Quesera A Recibí conforme Henri A",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "1800.00",
     "saldo": "519120.00",
-    "saldo_anterior": "0",
+    "saldo_anterior": "0.00",
     "tercero": null,
     "tipo": "proveedor",
     "total_litros": "288.40",
@@ -649,7 +649,7 @@
     "neto_a_pagar": "582930.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 32E41C18 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Gilberto A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 32E41C18 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 227,55 L $1.800 $409.590 18/07/2026 96,3 L $1.800 $173.340 Resumen de liquidación Total litros 323,85 L Precio promedio $1.800 Valor bruto $582.930 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $582.930 Anticipos aplicados - $0 SALDO A PAGAR $582.930 Entregué conforme Quesera A Recibí conforme Gilberto A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º C53CDB19 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Gilberto A Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º C53CDB19 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 227,55 L $1.800 $409.590 18/07/2026 96,3 L $1.800 $173.340 Resumen de liquidación Total litros 323,85 L Precio promedio $1.800 Valor bruto $582.930 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $582.930 Anticipos aplicados - $0 SALDO A PAGAR $582.930 Entregué conforme Quesera A Recibí conforme Gilberto A",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "1800.00",
@@ -680,7 +680,7 @@
     "neto_a_pagar": "126270.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 7FB7C84A Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Henri A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 7FB7C84A Detalle diario Fecha Litros Precio/L Valor 05/08/2026 70,15 L $1.800 $126.270 Resumen de liquidación Total litros 70,15 L Precio promedio $1.800 Valor bruto $126.270 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $126.270 Anticipos aplicados - $0 SALDO A PAGAR $126.270 Entregué conforme Quesera A Recibí conforme Henri A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º F6DBF48B Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Henri A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º F6DBF48B Detalle diario Fecha Litros Precio/L Valor 05/08/2026 70,15 L $1.800 $126.270 Resumen de liquidación Total litros 70,15 L Precio promedio $1.800 Valor bruto $126.270 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $126.270 Anticipos aplicados - $0 SALDO A PAGAR $126.270 Entregué conforme Quesera A Recibí conforme Henri A",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -711,7 +711,7 @@
     "neto_a_pagar": "159750.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 99C8EC84 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Ramiro A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 99C8EC84 Detalle diario Fecha Litros Precio/L Valor 09/08/2026 88,75 L $1.800 $159.750 Resumen de liquidación Total litros 88,75 L Precio promedio $1.800 Valor bruto $159.750 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $159.750 Anticipos aplicados - $0 SALDO A PAGAR $159.750 Entregué conforme Quesera A Recibí conforme Ramiro A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º DE0D322D Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Ramiro A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º DE0D322D Detalle diario Fecha Litros Precio/L Valor 09/08/2026 88,75 L $1.800 $159.750 Resumen de liquidación Total litros 88,75 L Precio promedio $1.800 Valor bruto $159.750 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $159.750 Anticipos aplicados - $0 SALDO A PAGAR $159.750 Entregué conforme Quesera A Recibí conforme Ramiro A",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -742,7 +742,7 @@
     "neto_a_pagar": "164340.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º D5535385 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Marleny A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º D5535385 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 91,3 L $1.800 $164.340 Resumen de liquidación Total litros 91,3 L Precio promedio $1.800 Valor bruto $164.340 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $164.340 Anticipos aplicados - $0 SALDO A PAGAR $164.340 Entregué conforme Quesera A Recibí conforme Marleny A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º B169712C Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Marleny A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º B169712C Detalle diario Fecha Litros Precio/L Valor 05/08/2026 91,3 L $1.800 $164.340 Resumen de liquidación Total litros 91,3 L Precio promedio $1.800 Valor bruto $164.340 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $164.340 Anticipos aplicados - $0 SALDO A PAGAR $164.340 Entregué conforme Quesera A Recibí conforme Marleny A",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -780,7 +780,7 @@
     "neto_a_pagar": "170370.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 44683FBE Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Aurelio A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 44683FBE Detalle diario Fecha Litros Precio/L Valor 03/08/2026 55,05 L $1.800 $99.090 09/08/2026 39,6 L $1.800 $71.280 Resumen de liquidación Total litros 94,65 L Precio promedio $1.800 Valor bruto $170.370 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $170.370 Anticipos aplicados - $0 SALDO A PAGAR $170.370 Entregué conforme Quesera A Recibí conforme Aurelio A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 4B3BE3A7 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Aurelio A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 4B3BE3A7 Detalle diario Fecha Litros Precio/L Valor 03/08/2026 55,05 L $1.800 $99.090 09/08/2026 39,6 L $1.800 $71.280 Resumen de liquidación Total litros 94,65 L Precio promedio $1.800 Valor bruto $170.370 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $170.370 Anticipos aplicados - $0 SALDO A PAGAR $170.370 Entregué conforme Quesera A Recibí conforme Aurelio A",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -811,7 +811,7 @@
     "neto_a_pagar": "257220.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º DDB74E41 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Rosa A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º DDB74E41 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 142,9 L $1.800 $257.220 Resumen de liquidación Total litros 142,9 L Precio promedio $1.800 Valor bruto $257.220 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $257.220 Anticipos aplicados - $0 SALDO A PAGAR $257.220 Entregué conforme Quesera A Recibí conforme Rosa A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º D771FDEE Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Rosa A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º D771FDEE Detalle diario Fecha Litros Precio/L Valor 05/08/2026 142,9 L $1.800 $257.220 Resumen de liquidación Total litros 142,9 L Precio promedio $1.800 Valor bruto $257.220 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $257.220 Anticipos aplicados - $0 SALDO A PAGAR $257.220 Entregué conforme Quesera A Recibí conforme Rosa A",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -842,7 +842,7 @@
     "neto_a_pagar": "324360.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º F6B3B822 Estado: BORRADOR Emitido: 20/08/2026 00:43 Proveedor Gilberto A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º F6B3B822 Detalle diario Fecha Litros Precio/L Valor 03/08/2026 180,2 L $1.800 $324.360 Resumen de liquidación Total litros 180,2 L Precio promedio $1.800 Valor bruto $324.360 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $324.360 Anticipos aplicados - $0 SALDO A PAGAR $324.360 Entregué conforme Quesera A Recibí conforme Gilberto A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 6E29DA98 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Gilberto A Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 6E29DA98 Detalle diario Fecha Litros Precio/L Valor 03/08/2026 180,2 L $1.800 $324.360 Resumen de liquidación Total litros 180,2 L Precio promedio $1.800 Valor bruto $324.360 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $324.360 Anticipos aplicados - $0 SALDO A PAGAR $324.360 Entregué conforme Quesera A Recibí conforme Gilberto A",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -874,11 +874,11 @@
     "pagado": "19663.51",
     "pagos": [
      {
-      "fecha": "2026-08-20",
+      "fecha": "2026-09-05",
       "valor": "19663.51"
      }
     ],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º B20470FC Estado: PAGADA Emitido: 20/08/2026 00:43 Transportador Beto A Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 21/07/2026 Fabrica A 63,4 L $310,15 $19.663,51 Resumen de liquidación Total litros 63,4 L Valor transporte $19.663,51 VALOR TOTAL $19.663,51 Anticipos aplicados - $0 Pagado - $19.663,51 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 20/08/2026 $19.663,51 Beto A Pago total de la liquidación Entregué conforme Quesera A Recibí conforme Beto A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º D269B807 Estado: PAGADA Emitido: 05/09/2026 20:14 Transportador Beto A Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 21/07/2026 Fabrica A 63,4 L $310,15 $19.663,51 Resumen de liquidación Total litros 63,4 L Valor transporte $19.663,51 VALOR TOTAL $19.663,51 Anticipos aplicados - $0 Pagado - $19.663,51 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 05/09/2026 $19.663,51 Beto A Pago total de la liquidación Entregué conforme Quesera A Recibí conforme Beto A",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "310.15",
@@ -952,11 +952,11 @@
     "pagado": "245235.98",
     "pagos": [
      {
-      "fecha": "2026-08-20",
+      "fecha": "2026-09-05",
       "valor": "245235.98"
      }
     ],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 93D71272 Estado: PAGADA Emitido: 20/08/2026 00:43 Transportador Alex A Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 16/07/2026 Fabrica A 227,55 L $185,40 $42.187,77 16/07/2026 Napoles A 130,38 L $255 $33.246,90 17/07/2026 Napoles A 175,3 L $255 $44.701,50 18/07/2026 Fabrica A 321,3 L $185,40 $59.569,02 18/07/2026 Napoles A 137,45 L $255 $35.049,75 20/07/2026 Fabrica A 111,11 L $185,40 $20.599,79 20/07/2026 Napoles A 38,75 L $255 $9.881,25 Resumen de liquidación Total litros 1.141,84 L Valor transporte $245.235,98 VALOR TOTAL $245.235,98 Anticipos aplicados - $0 Pagado - $245.235,98 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 20/08/2026 $245.235,98 Alex A Pago total de la liquidación Entregué conforme Quesera A Recibí conforme Alex A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 1E6A01C5 Estado: PAGADA Emitido: 05/09/2026 20:14 Transportador Alex A Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 16/07/2026 Fabrica A 227,55 L $185,40 $42.187,77 16/07/2026 Napoles A 130,38 L $255 $33.246,90 17/07/2026 Napoles A 175,3 L $255 $44.701,50 18/07/2026 Fabrica A 321,3 L $185,40 $59.569,02 18/07/2026 Napoles A 137,45 L $255 $35.049,75 20/07/2026 Fabrica A 111,11 L $185,40 $20.599,79 20/07/2026 Napoles A 38,75 L $255 $9.881,25 Resumen de liquidación Total litros 1.141,84 L Valor transporte $245.235,98 VALOR TOTAL $245.235,98 Anticipos aplicados - $0 Pagado - $245.235,98 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 05/09/2026 $245.235,98 Alex A Pago total de la liquidación Entregué conforme Quesera A Recibí conforme Alex A",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "214.77",
@@ -970,9 +970,9 @@
     "valor_transporte": "245235.98"
    },
    {
-    "anticipos": "0.00",
-    "bonificaciones": "0.00",
-    "descuentos": "0.00",
+    "anticipos": "0",
+    "bonificaciones": "0",
+    "descuentos": "0",
     "detalles": [
      {
       "fecha": "2026-08-03",
@@ -1020,18 +1020,18 @@
     "estado": "anulada",
     "le_queda_debiendo": "0",
     "neto_a_pagar": "146725.89",
-    "pagado": "0.00",
+    "pagado": "0",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 12778BC8 Estado: ANULADA Emitido: 20/08/2026 00:43 Transportador Alex A Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica A 180,2 L $185,40 $33.409,08 03/08/2026 Napoles A 55,05 L $255 $14.037,75 05/08/2026 Fabrica A 70,15 L $185,40 $13.005,81 05/08/2026 Napoles A 234,2 L $255 $59.721 09/08/2026 Fabrica A 88,75 L $185,40 $16.454,25 09/08/2026 Napoles A 39,6 L $255 $10.098 Resumen de liquidación Total litros 667,95 L Valor transporte $146.725,89 VALOR TOTAL $146.725,89 Anticipos aplicados - $0 SALDO A PAGAR $146.725,89 Entregué conforme Quesera A Recibí conforme Alex A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 6FF71ED7 Estado: ANULADA Emitido: 05/09/2026 20:14 Transportador Alex A Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica A 180,2 L $185,40 $33.409,08 03/08/2026 Napoles A 55,05 L $255 $14.037,75 05/08/2026 Fabrica A 70,15 L $185,40 $13.005,81 05/08/2026 Napoles A 234,2 L $255 $59.721 09/08/2026 Fabrica A 88,75 L $185,40 $16.454,25 09/08/2026 Napoles A 39,6 L $255 $10.098 Resumen de liquidación Total litros 667,95 L Valor transporte $146.725,89 VALOR TOTAL $146.725,89 Anticipos aplicados - $0 SALDO A PAGAR $146.725,89 Entregué conforme Quesera A Recibí conforme Alex A",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "219.67",
     "saldo": "146725.89",
-    "saldo_anterior": "0.00",
+    "saldo_anterior": "0",
     "tercero": null,
     "tipo": "transportador",
     "total_litros": "667.95",
-    "valor_bruto": "0.00",
+    "valor_bruto": "0",
     "valor_total": "146725.89",
     "valor_transporte": "146725.89"
    },
@@ -1088,7 +1088,7 @@
     "neto_a_pagar": "158739.81",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:43 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º C2C657AD Estado: BORRADOR Emitido: 20/08/2026 00:43 Transportador Alex A Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica A 180,2 L $185,40 $33.409,08 03/08/2026 Napoles A 55,05 L $255 $14.037,75 05/08/2026 Fabrica A 134,95 L $185,40 $25.019,73 05/08/2026 Napoles A 234,2 L $255 $59.721 09/08/2026 Fabrica A 88,75 L $185,40 $16.454,25 09/08/2026 Napoles A 39,6 L $255 $10.098 Resumen de liquidación Total litros 732,75 L Valor transporte $158.739,81 VALOR TOTAL $158.739,81 Anticipos aplicados - $0 SALDO A PAGAR $158.739,81 Entregué conforme Quesera A Recibí conforme Alex A",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera A NIT 900A COMPROBANTE DE LIQUIDACIÓN N.º 7A1D89F9 Estado: BORRADOR Emitido: 05/09/2026 20:14 Transportador Alex A Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica A 180,2 L $185,40 $33.409,08 03/08/2026 Napoles A 55,05 L $255 $14.037,75 05/08/2026 Fabrica A 134,95 L $185,40 $25.019,73 05/08/2026 Napoles A 234,2 L $255 $59.721 09/08/2026 Fabrica A 88,75 L $185,40 $16.454,25 09/08/2026 Napoles A 39,6 L $255 $10.098 Resumen de liquidación Total litros 732,75 L Valor transporte $158.739,81 VALOR TOTAL $158.739,81 Anticipos aplicados - $0 SALDO A PAGAR $158.739,81 Entregué conforme Quesera A Recibí conforme Alex A",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "216.64",
@@ -1435,7 +1435,7 @@
   "tablero": {
    "alertas_no_leidas": 0,
    "cartera_pendiente": "0",
-   "fecha": "2026-08-20",
+   "fecha": "2026-09-05",
    "gastos_mes": "0",
    "gastos_mes_anterior": "0",
    "gastos_por_categoria": [],
@@ -1443,24 +1443,12 @@
    "litros_hoy": "0",
    "litros_por_dia": [
     {
-     "fecha": "2026-07-21",
-     "valor": "63.40"
-    },
-    {
-     "fecha": "2026-08-03",
-     "valor": "235.25"
-    },
-    {
-     "fecha": "2026-08-05",
-     "valor": "369.15"
-    },
-    {
      "fecha": "2026-08-09",
      "valor": "128.35"
     }
    ],
    "litros_quincena": "0",
-   "litros_quincena_anterior": "732.75",
+   "litros_quincena_anterior": "0",
    "produccion_kg_mes": "0",
    "produccion_kg_mes_anterior": "0",
    "produccion_por_tipo": [],
@@ -1475,7 +1463,7 @@
  "admin.b": {
   "balance": {
    "cartera_por_cobrar": "0",
-   "fecha_corte": "2026-08-20",
+   "fecha_corte": "2026-09-05",
    "liquidaciones_por_pagar": "3530481.81",
    "saldo_bancos": "0",
    "saldo_cajas": "0",
@@ -1939,7 +1927,7 @@
   },
   "liquidaciones": [
    {
-    "anticipos": "0",
+    "anticipos": "0.00",
     "bonificaciones": "0.00",
     "descuentos": "0.00",
     "detalles": [
@@ -1968,14 +1956,14 @@
     "estado": "borrador",
     "le_queda_debiendo": "0",
     "neto_a_pagar": "247950.00",
-    "pagado": "0",
+    "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 01D91E11 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Aurelio B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 01D91E11 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 47,9 L $1.800 $86.220 17/07/2026 51,1 L $1.800 $91.980 20/07/2026 38,75 L $1.800 $69.750 Resumen de liquidación Total litros 137,75 L Precio promedio $1.800 Valor bruto $247.950 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $247.950 Anticipos aplicados - $0 SALDO A PAGAR $247.950 Entregué conforme Quesera B Recibí conforme Aurelio B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 23B0E587 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Aurelio B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 23B0E587 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 47,9 L $1.800 $86.220 17/07/2026 51,1 L $1.800 $91.980 20/07/2026 38,75 L $1.800 $69.750 Resumen de liquidación Total litros 137,75 L Precio promedio $1.800 Valor bruto $247.950 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $247.950 Anticipos aplicados - $0 SALDO A PAGAR $247.950 Entregué conforme Quesera B Recibí conforme Aurelio B",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "1800.00",
     "saldo": "247950.00",
-    "saldo_anterior": "0",
+    "saldo_anterior": "0.00",
     "tercero": null,
     "tipo": "proveedor",
     "total_litros": "137.75",
@@ -1984,7 +1972,7 @@
     "valor_transporte": "35126.25"
    },
    {
-    "anticipos": "0",
+    "anticipos": "0.00",
     "bonificaciones": "0.00",
     "descuentos": "0.00",
     "detalles": [
@@ -2006,14 +1994,14 @@
     "estado": "borrador",
     "le_queda_debiendo": "0",
     "neto_a_pagar": "395874.00",
-    "pagado": "0",
+    "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 494AEE83 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Marleny B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 494AEE83 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 82,48 L $1.800 $148.464 18/07/2026 137,45 L $1.800 $247.410 Resumen de liquidación Total litros 219,93 L Precio promedio $1.800 Valor bruto $395.874 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $395.874 Anticipos aplicados - $0 SALDO A PAGAR $395.874 Entregué conforme Quesera B Recibí conforme Marleny B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 3998162D Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Marleny B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 3998162D Detalle diario Fecha Litros Precio/L Valor 16/07/2026 82,48 L $1.800 $148.464 18/07/2026 137,45 L $1.800 $247.410 Resumen de liquidación Total litros 219,93 L Precio promedio $1.800 Valor bruto $395.874 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $395.874 Anticipos aplicados - $0 SALDO A PAGAR $395.874 Entregué conforme Quesera B Recibí conforme Marleny B",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "1800.00",
     "saldo": "395874.00",
-    "saldo_anterior": "0",
+    "saldo_anterior": "0.00",
     "tercero": null,
     "tipo": "proveedor",
     "total_litros": "219.93",
@@ -2044,14 +2032,14 @@
     "estado": "borrador",
     "le_queda_debiendo": "0",
     "neto_a_pagar": "423558.00",
-    "pagado": "0",
+    "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 5035AB77 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Rosa B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 5035AB77 Detalle diario Fecha Litros Precio/L Valor 17/07/2026 124,2 L $1.800 $223.560 20/07/2026 111,11 L $1.800 $199.998 Resumen de liquidación Total litros 235,31 L Precio promedio $1.800 Valor bruto $423.558 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $423.558 Anticipos aplicados - $0 SALDO A PAGAR $423.558 Entregué conforme Quesera B Recibí conforme Rosa B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º C939B8E4 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Rosa B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º C939B8E4 Detalle diario Fecha Litros Precio/L Valor 17/07/2026 124,2 L $1.800 $223.560 20/07/2026 111,11 L $1.800 $199.998 Resumen de liquidación Total litros 235,31 L Precio promedio $1.800 Valor bruto $423.558 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $423.558 Anticipos aplicados - $0 SALDO A PAGAR $423.558 Entregué conforme Quesera B Recibí conforme Rosa B",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "1800.00",
     "saldo": "423558.00",
-    "saldo_anterior": "0",
+    "saldo_anterior": "0.00",
     "tercero": null,
     "tipo": "proveedor",
     "total_litros": "235.31",
@@ -2060,7 +2048,7 @@
     "valor_transporte": "52270.79"
    },
    {
-    "anticipos": "0",
+    "anticipos": "0.00",
     "bonificaciones": "0.00",
     "descuentos": "0.00",
     "detalles": [
@@ -2082,14 +2070,14 @@
     "estado": "borrador",
     "le_queda_debiendo": "0",
     "neto_a_pagar": "519120.00",
-    "pagado": "0",
+    "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º C1F6689E Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Henri B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º C1F6689E Detalle diario Fecha Litros Precio/L Valor 18/07/2026 225 L $1.800 $405.000 21/07/2026 63,4 L $1.800 $114.120 Resumen de liquidación Total litros 288,4 L Precio promedio $1.800 Valor bruto $519.120 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $519.120 Anticipos aplicados - $0 SALDO A PAGAR $519.120 Entregué conforme Quesera B Recibí conforme Henri B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º F938ED02 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Henri B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º F938ED02 Detalle diario Fecha Litros Precio/L Valor 18/07/2026 225 L $1.800 $405.000 21/07/2026 63,4 L $1.800 $114.120 Resumen de liquidación Total litros 288,4 L Precio promedio $1.800 Valor bruto $519.120 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $519.120 Anticipos aplicados - $0 SALDO A PAGAR $519.120 Entregué conforme Quesera B Recibí conforme Henri B",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "1800.00",
     "saldo": "519120.00",
-    "saldo_anterior": "0",
+    "saldo_anterior": "0.00",
     "tercero": null,
     "tipo": "proveedor",
     "total_litros": "288.40",
@@ -2098,7 +2086,7 @@
     "valor_transporte": "61378.51"
    },
    {
-    "anticipos": "0",
+    "anticipos": "0.00",
     "bonificaciones": "0.00",
     "descuentos": "0.00",
     "detalles": [
@@ -2120,14 +2108,14 @@
     "estado": "borrador",
     "le_queda_debiendo": "0",
     "neto_a_pagar": "582930.00",
-    "pagado": "0",
+    "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 63AB8AF4 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Gilberto B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 63AB8AF4 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 227,55 L $1.800 $409.590 18/07/2026 96,3 L $1.800 $173.340 Resumen de liquidación Total litros 323,85 L Precio promedio $1.800 Valor bruto $582.930 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $582.930 Anticipos aplicados - $0 SALDO A PAGAR $582.930 Entregué conforme Quesera B Recibí conforme Gilberto B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 96CE10A1 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Gilberto B Período 16/07/2026 al 31/07/2026 Ruta / vereda La Vega Comprobante N.º 96CE10A1 Detalle diario Fecha Litros Precio/L Valor 16/07/2026 227,55 L $1.800 $409.590 18/07/2026 96,3 L $1.800 $173.340 Resumen de liquidación Total litros 323,85 L Precio promedio $1.800 Valor bruto $582.930 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $582.930 Anticipos aplicados - $0 SALDO A PAGAR $582.930 Entregué conforme Quesera B Recibí conforme Gilberto B",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "1800.00",
     "saldo": "582930.00",
-    "saldo_anterior": "0",
+    "saldo_anterior": "0.00",
     "tercero": null,
     "tipo": "proveedor",
     "total_litros": "323.85",
@@ -2153,7 +2141,7 @@
     "neto_a_pagar": "126270.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 3E82D559 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Henri B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 3E82D559 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 70,15 L $1.800 $126.270 Resumen de liquidación Total litros 70,15 L Precio promedio $1.800 Valor bruto $126.270 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $126.270 Anticipos aplicados - $0 SALDO A PAGAR $126.270 Entregué conforme Quesera B Recibí conforme Henri B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 3E029288 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Henri B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 3E029288 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 70,15 L $1.800 $126.270 Resumen de liquidación Total litros 70,15 L Precio promedio $1.800 Valor bruto $126.270 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $126.270 Anticipos aplicados - $0 SALDO A PAGAR $126.270 Entregué conforme Quesera B Recibí conforme Henri B",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -2184,7 +2172,7 @@
     "neto_a_pagar": "159750.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 0310951F Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Ramiro B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 0310951F Detalle diario Fecha Litros Precio/L Valor 09/08/2026 88,75 L $1.800 $159.750 Resumen de liquidación Total litros 88,75 L Precio promedio $1.800 Valor bruto $159.750 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $159.750 Anticipos aplicados - $0 SALDO A PAGAR $159.750 Entregué conforme Quesera B Recibí conforme Ramiro B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 2C5669D4 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Ramiro B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 2C5669D4 Detalle diario Fecha Litros Precio/L Valor 09/08/2026 88,75 L $1.800 $159.750 Resumen de liquidación Total litros 88,75 L Precio promedio $1.800 Valor bruto $159.750 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $159.750 Anticipos aplicados - $0 SALDO A PAGAR $159.750 Entregué conforme Quesera B Recibí conforme Ramiro B",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -2215,7 +2203,7 @@
     "neto_a_pagar": "164340.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º E55E2DB4 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Marleny B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º E55E2DB4 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 91,3 L $1.800 $164.340 Resumen de liquidación Total litros 91,3 L Precio promedio $1.800 Valor bruto $164.340 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $164.340 Anticipos aplicados - $0 SALDO A PAGAR $164.340 Entregué conforme Quesera B Recibí conforme Marleny B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º D6035D83 Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Marleny B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º D6035D83 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 91,3 L $1.800 $164.340 Resumen de liquidación Total litros 91,3 L Precio promedio $1.800 Valor bruto $164.340 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $164.340 Anticipos aplicados - $0 SALDO A PAGAR $164.340 Entregué conforme Quesera B Recibí conforme Marleny B",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -2253,7 +2241,7 @@
     "neto_a_pagar": "170370.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 8C3E6E26 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Aurelio B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 8C3E6E26 Detalle diario Fecha Litros Precio/L Valor 03/08/2026 55,05 L $1.800 $99.090 09/08/2026 39,6 L $1.800 $71.280 Resumen de liquidación Total litros 94,65 L Precio promedio $1.800 Valor bruto $170.370 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $170.370 Anticipos aplicados - $0 SALDO A PAGAR $170.370 Entregué conforme Quesera B Recibí conforme Aurelio B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 038C7EFA Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Aurelio B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 038C7EFA Detalle diario Fecha Litros Precio/L Valor 03/08/2026 55,05 L $1.800 $99.090 09/08/2026 39,6 L $1.800 $71.280 Resumen de liquidación Total litros 94,65 L Precio promedio $1.800 Valor bruto $170.370 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $170.370 Anticipos aplicados - $0 SALDO A PAGAR $170.370 Entregué conforme Quesera B Recibí conforme Aurelio B",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -2284,7 +2272,7 @@
     "neto_a_pagar": "257220.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 1A2C69E2 Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Rosa B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 1A2C69E2 Detalle diario Fecha Litros Precio/L Valor 05/08/2026 142,9 L $1.800 $257.220 Resumen de liquidación Total litros 142,9 L Precio promedio $1.800 Valor bruto $257.220 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $257.220 Anticipos aplicados - $0 SALDO A PAGAR $257.220 Entregué conforme Quesera B Recibí conforme Rosa B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 3C3C54FD Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Rosa B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 3C3C54FD Detalle diario Fecha Litros Precio/L Valor 05/08/2026 142,9 L $1.800 $257.220 Resumen de liquidación Total litros 142,9 L Precio promedio $1.800 Valor bruto $257.220 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $257.220 Anticipos aplicados - $0 SALDO A PAGAR $257.220 Entregué conforme Quesera B Recibí conforme Rosa B",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -2315,7 +2303,7 @@
     "neto_a_pagar": "324360.00",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 025AF7CC Estado: BORRADOR Emitido: 20/08/2026 00:44 Proveedor Gilberto B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 025AF7CC Detalle diario Fecha Litros Precio/L Valor 03/08/2026 180,2 L $1.800 $324.360 Resumen de liquidación Total litros 180,2 L Precio promedio $1.800 Valor bruto $324.360 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $324.360 Anticipos aplicados - $0 SALDO A PAGAR $324.360 Entregué conforme Quesera B Recibí conforme Gilberto B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 3218AABD Estado: BORRADOR Emitido: 05/09/2026 20:14 Proveedor Gilberto B Período 01/08/2026 al 15/08/2026 Ruta / vereda La Vega Comprobante N.º 3218AABD Detalle diario Fecha Litros Precio/L Valor 03/08/2026 180,2 L $1.800 $324.360 Resumen de liquidación Total litros 180,2 L Precio promedio $1.800 Valor bruto $324.360 Bonificaciones + $0 Descuentos - $0 VALOR TOTAL $324.360 Anticipos aplicados - $0 SALDO A PAGAR $324.360 Entregué conforme Quesera B Recibí conforme Gilberto B",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "1800.00",
@@ -2347,11 +2335,11 @@
     "pagado": "19663.51",
     "pagos": [
      {
-      "fecha": "2026-08-20",
+      "fecha": "2026-09-05",
       "valor": "19663.51"
      }
     ],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 0CE8DB4D Estado: PAGADA Emitido: 20/08/2026 00:44 Transportador Beto B Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 21/07/2026 Fabrica B 63,4 L $310,15 $19.663,51 Resumen de liquidación Total litros 63,4 L Valor transporte $19.663,51 VALOR TOTAL $19.663,51 Anticipos aplicados - $0 Pagado - $19.663,51 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 20/08/2026 $19.663,51 Beto B Pago total de la liquidación Entregué conforme Quesera B Recibí conforme Beto B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 8608C036 Estado: PAGADA Emitido: 05/09/2026 20:14 Transportador Beto B Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 21/07/2026 Fabrica B 63,4 L $310,15 $19.663,51 Resumen de liquidación Total litros 63,4 L Valor transporte $19.663,51 VALOR TOTAL $19.663,51 Anticipos aplicados - $0 Pagado - $19.663,51 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 05/09/2026 $19.663,51 Beto B Pago total de la liquidación Entregué conforme Quesera B Recibí conforme Beto B",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "310.15",
@@ -2425,11 +2413,11 @@
     "pagado": "245235.98",
     "pagos": [
      {
-      "fecha": "2026-08-20",
+      "fecha": "2026-09-05",
       "valor": "245235.98"
      }
     ],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 5C8E234E Estado: PAGADA Emitido: 20/08/2026 00:44 Transportador Alex B Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 16/07/2026 Fabrica B 227,55 L $185,40 $42.187,77 16/07/2026 Napoles B 130,38 L $255 $33.246,90 17/07/2026 Napoles B 175,3 L $255 $44.701,50 18/07/2026 Fabrica B 321,3 L $185,40 $59.569,02 18/07/2026 Napoles B 137,45 L $255 $35.049,75 20/07/2026 Fabrica B 111,11 L $185,40 $20.599,79 20/07/2026 Napoles B 38,75 L $255 $9.881,25 Resumen de liquidación Total litros 1.141,84 L Valor transporte $245.235,98 VALOR TOTAL $245.235,98 Anticipos aplicados - $0 Pagado - $245.235,98 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 20/08/2026 $245.235,98 Alex B Pago total de la liquidación Entregué conforme Quesera B Recibí conforme Alex B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 8722573D Estado: PAGADA Emitido: 05/09/2026 20:14 Transportador Alex B Período 16/07/2026 al 31/07/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 16/07/2026 Fabrica B 227,55 L $185,40 $42.187,77 16/07/2026 Napoles B 130,38 L $255 $33.246,90 17/07/2026 Napoles B 175,3 L $255 $44.701,50 18/07/2026 Fabrica B 321,3 L $185,40 $59.569,02 18/07/2026 Napoles B 137,45 L $255 $35.049,75 20/07/2026 Fabrica B 111,11 L $185,40 $20.599,79 20/07/2026 Napoles B 38,75 L $255 $9.881,25 Resumen de liquidación Total litros 1.141,84 L Valor transporte $245.235,98 VALOR TOTAL $245.235,98 Anticipos aplicados - $0 Pagado - $245.235,98 SALDO A PAGAR $0 Pagos y giros realizados Fecha Valor Girado a / Destinatario Observaciones 05/09/2026 $245.235,98 Alex B Pago total de la liquidación Entregué conforme Quesera B Recibí conforme Alex B",
     "periodo_fin": "2026-07-31",
     "periodo_inicio": "2026-07-16",
     "precio_promedio": "214.77",
@@ -2495,7 +2483,7 @@
     "neto_a_pagar": "146725.89",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 909B73DE Estado: ANULADA Emitido: 20/08/2026 00:44 Transportador Alex B Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica B 180,2 L $185,40 $33.409,08 03/08/2026 Napoles B 55,05 L $255 $14.037,75 05/08/2026 Fabrica B 70,15 L $185,40 $13.005,81 05/08/2026 Napoles B 234,2 L $255 $59.721 09/08/2026 Fabrica B 88,75 L $185,40 $16.454,25 09/08/2026 Napoles B 39,6 L $255 $10.098 Resumen de liquidación Total litros 667,95 L Valor transporte $146.725,89 VALOR TOTAL $146.725,89 Anticipos aplicados - $0 SALDO A PAGAR $146.725,89 Entregué conforme Quesera B Recibí conforme Alex B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º A893E537 Estado: ANULADA Emitido: 05/09/2026 20:14 Transportador Alex B Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica B 180,2 L $185,40 $33.409,08 03/08/2026 Napoles B 55,05 L $255 $14.037,75 05/08/2026 Fabrica B 70,15 L $185,40 $13.005,81 05/08/2026 Napoles B 234,2 L $255 $59.721 09/08/2026 Fabrica B 88,75 L $185,40 $16.454,25 09/08/2026 Napoles B 39,6 L $255 $10.098 Resumen de liquidación Total litros 667,95 L Valor transporte $146.725,89 VALOR TOTAL $146.725,89 Anticipos aplicados - $0 SALDO A PAGAR $146.725,89 Entregué conforme Quesera B Recibí conforme Alex B",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "219.67",
@@ -2561,7 +2549,7 @@
     "neto_a_pagar": "158739.81",
     "pagado": "0.00",
     "pagos": [],
-    "pdf": "Generado por Lactis · 20/08/2026 00:44 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 66A65AFD Estado: BORRADOR Emitido: 20/08/2026 00:44 Transportador Alex B Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica B 180,2 L $185,40 $33.409,08 03/08/2026 Napoles B 55,05 L $255 $14.037,75 05/08/2026 Fabrica B 134,95 L $185,40 $25.019,73 05/08/2026 Napoles B 234,2 L $255 $59.721 09/08/2026 Fabrica B 88,75 L $185,40 $16.454,25 09/08/2026 Napoles B 39,6 L $255 $10.098 Resumen de liquidación Total litros 732,75 L Valor transporte $158.739,81 VALOR TOTAL $158.739,81 Anticipos aplicados - $0 SALDO A PAGAR $158.739,81 Entregué conforme Quesera B Recibí conforme Alex B",
+    "pdf": "Generado por Lactis · 05/09/2026 20:14 Página 1 Quesera B NIT 900B COMPROBANTE DE LIQUIDACIÓN N.º 28325A90 Estado: BORRADOR Emitido: 05/09/2026 20:14 Transportador Alex B Período 01/08/2026 al 15/08/2026 Detalle diario Fecha Ruta Litros Precio/L Valor 03/08/2026 Fabrica B 180,2 L $185,40 $33.409,08 03/08/2026 Napoles B 55,05 L $255 $14.037,75 05/08/2026 Fabrica B 134,95 L $185,40 $25.019,73 05/08/2026 Napoles B 234,2 L $255 $59.721 09/08/2026 Fabrica B 88,75 L $185,40 $16.454,25 09/08/2026 Napoles B 39,6 L $255 $10.098 Resumen de liquidación Total litros 732,75 L Valor transporte $158.739,81 VALOR TOTAL $158.739,81 Anticipos aplicados - $0 SALDO A PAGAR $158.739,81 Entregué conforme Quesera B Recibí conforme Alex B",
     "periodo_fin": "2026-08-15",
     "periodo_inicio": "2026-08-01",
     "precio_promedio": "216.64",
@@ -2908,7 +2896,7 @@
   "tablero": {
    "alertas_no_leidas": 0,
    "cartera_pendiente": "0",
-   "fecha": "2026-08-20",
+   "fecha": "2026-09-05",
    "gastos_mes": "0",
    "gastos_mes_anterior": "0",
    "gastos_por_categoria": [],
@@ -2916,24 +2904,12 @@
    "litros_hoy": "0",
    "litros_por_dia": [
     {
-     "fecha": "2026-07-21",
-     "valor": "63.40"
-    },
-    {
-     "fecha": "2026-08-03",
-     "valor": "235.25"
-    },
-    {
-     "fecha": "2026-08-05",
-     "valor": "369.15"
-    },
-    {
      "fecha": "2026-08-09",
      "valor": "128.35"
     }
    ],
    "litros_quincena": "0",
-   "litros_quincena_anterior": "732.75",
+   "litros_quincena_anterior": "0",
    "produccion_kg_mes": "0",
    "produccion_kg_mes_anterior": "0",
    "produccion_por_tipo": [],

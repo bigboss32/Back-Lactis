@@ -1106,6 +1106,223 @@ class ProductoReventaService(BaseService[ProductoReventa]):
         )
 
 
+# ------------------------------ el guardia de la bodega, escrito UNA sola vez
+#
+# LA FAMILIA ENTERA EN UNA FRASE: toda puerta que hace desaparecer una fila que le
+# SUMA inventario —borrarla, anularla, o rehacerla con menos— tiene que preguntar
+# primero si esa mercancía todavía está en la bodega. Si no lo pregunta, el
+# inventario queda en NEGATIVO, y desde ahí ninguna venta vuelve a pasar el control
+# de existencias: el dueño se queda sin poder trabajar sin entender por qué, y lo
+# que ya vendió se queda sin costo de dónde salir, así que la ganancia sale inflada.
+#
+# LAS PUERTAS SON CUATRO Y CADA UNA OPINABA POR SU CUENTA. Medido contra la API:
+#
+#   · EDITAR una compra (y rehacer los renglones de su factura): preguntaba, pero
+#     solo por el producto comprado;
+#   · ANULAR una compra: igual, solo por el producto comprado;
+#   · BORRAR una compra, o su factura entera: NO preguntaba nada. Con 137,45 kg
+#     comprados y 120,23 vendidos, borrarla dejaba el queso en -120,23 kg;
+#   · BORRAR un ajuste: NO preguntaba nada, y ni siquiera tenía dónde (heredaba el
+#     `validar_eliminar` vacío del servicio genérico). Con 44,23 kg pasados a
+#     borona y 40,00 ya vendidos, borrarlo dejaba la borona en -40,00 kg.
+#
+# Y HABÍA UNA QUINTA COSA, que no es un negativo sino un dueño atascado: EL RECHAZO
+# AFIRMABA SIEMPRE "ya se vendió". El disponible baja por DOS caminos —las ventas y
+# los ajustes—, y el guardia solo sabe que no alcanza. Con 137,45 kg de queso, 44,23
+# pasados a borona y CERO vendidos, el rechazo le decía "Anule primero las ventas que
+# se lo llevaron": revisa su lista de ventas, no encuentra ninguna, y se queda con la
+# compra mal anotada sin saber qué deshacer. Un rechazo que señala la salida
+# equivocada cuesta lo mismo que uno sin salida. Lo reparte `_por_donde_salio`.
+#
+# Ahora las cuatro preguntan lo mismo, con las piezas de aquí abajo:
+# `_lo_que_sostiene_la_compra` dice cuánto inventario sostiene una fila y de qué
+# producto, `_sumar_lo_que_se_va` lo acumula por producto, `_por_donde_salio` redacta
+# la salida según por dónde se fue la mercancía, y `_exigir_bodega` rechaza si
+# quitarlo deja alguno en negativo. La regla se escribe una vez, así que las puertas
+# no pueden volver a opinar distinto.
+
+
+@dataclass(frozen=True)
+class _KilosQueSeVan:
+    """Cuánta mercancía de UN producto se lleva la operación, y cómo nombrarla.
+
+    LOS TRES TEXTOS NO SON ADORNO: el dueño tiene que reconocer la cifra del rechazo
+    en su papel. "137,45 que trajo" y "25,36 que llegaron gratis" salen de la MISMA
+    compra y de dos columnas distintas; sin decir cuál es cuál, el mensaje le habla
+    de una cifra que no encuentra por ningún lado y no sabe qué corregir.
+    """
+
+    cantidad: Decimal
+    que: str  # "esta compra", "esta factura", "este ajuste"
+    de_donde: str  # "de esta compra", "que llegó gratis con esta factura"
+    como_entraron: str  # "trajo", "llegaron", "le entraron"
+
+
+def _valor_de(fila: Any, campo: str) -> Any:
+    """El campo de una fila YA GUARDADA o de un renglón todavía en el aire (un dict).
+
+    Las dos formas tienen que medirse con la misma vara: `preparar_renglones` entrega
+    diccionarios y las puertas de borrar y anular trabajan sobre filas de la base. Si
+    cada una leyera a su manera, el guardia de editar y el de borrar volverían a
+    poder opinar distinto sobre la misma compra, que es justo lo que se está cerrando.
+    """
+    return fila.get(campo) if isinstance(fila, dict) else getattr(fila, campo, None)
+
+
+def _sumar_lo_que_se_va(
+    quita: dict[str, _KilosQueSeVan], clave: str | None, kilos: _KilosQueSeVan
+) -> None:
+    """Acumula POR PRODUCTO, sumando y no pisando.
+
+    Se suma porque una misma operación puede llevarse el mismo inventario por dos
+    caminos: una factura puede traer el mismo producto en varios renglones, y una
+    compra DE borona a la que además le llegó borona gratis encima sostiene las dos
+    cifras del mismo inventario. Quedándose con una sola, un borrado que se lleva la
+    suma de las dos pasaría el control.
+
+    Cuando los dos caminos se juntan, el mensaje deja de hablar de uno solo ("que
+    trajo") y pasa a hablar del total ("que le entraron"): decir "de 30,36 que trajo"
+    cuando 25,36 llegaron gratis sería mandarlo a buscar una cifra que no existe.
+    """
+    if not clave or kilos.cantidad <= CERO:
+        return
+    anterior = quita.get(clave)
+    if anterior is None:
+        quita[clave] = kilos
+        return
+    junta = anterior.cantidad + kilos.cantidad
+    if anterior.de_donde == kilos.de_donde:
+        quita[clave] = replace(anterior, cantidad=junta)
+        return
+    quita[clave] = replace(
+        anterior,
+        cantidad=junta,
+        de_donde=f"de {anterior.que}",
+        como_entraron="le entraron",
+    )
+
+
+def _lo_que_sostiene_la_compra(
+    fila: Any, catalogo: CatalogoReventa, *, que: str
+) -> dict[str, _KilosQueSeVan]:
+    """El inventario que una compra está sosteniendo, PRODUCTO POR PRODUCTO.
+
+    SON DOS COSAS Y NO UNA, y la segunda es la que se olvidaba en todas partes:
+
+      1. la cantidad de lo comprado, en la unidad de SU producto (kilos si se pesa,
+         unidades si se cuenta: la otra columna vale cero);
+      2. los kilos que llegaron GRATIS encima (`borona_kilos`), a nombre del producto
+         que la fila nombró (`subproducto_tipo`).
+
+    ESA SEGUNDA MERCANCÍA ES LA MÁS FRÁGIL DE TODAS PORQUE NO TIENE COMPRA PROPIA: si
+    la compra que la trajo desaparece, no queda ninguna otra fila sosteniéndola y su
+    inventario se va a negativo aunque el producto comprado ni se toque. Medido: una
+    compra de 137,45 kg de queso con 25,36 kg de borona gratis encima, con 20,11 kg de
+    esa borona ya vendidos, dejaba la borona en -20,11 kg al borrarla — y el guardia
+    de anular, que sí miraba el queso, tampoco la veía.
+
+    Y CADA CIFRA VA AL INVENTARIO DE SU PRODUCTO, nunca a una canasta común: los kilos
+    de la panela no compensan los del queso (ver `existencias.py`).
+    """
+    clave = _valor_de(fila, "tipo") or TIPO_QUESO
+    sostiene: dict[str, _KilosQueSeVan] = {}
+    cantidad = (
+        Decimal(_valor_de(fila, "kilos_netos") or CERO)
+        if catalogo.se_pesa(clave)
+        else Decimal(_valor_de(fila, "barras") or CERO)
+    )
+    _sumar_lo_que_se_va(
+        sostiene,
+        clave,
+        _KilosQueSeVan(cantidad, que, f"de {que}", "trajo"),
+    )
+    _sumar_lo_que_se_va(
+        sostiene,
+        _valor_de(fila, "subproducto_tipo"),
+        _KilosQueSeVan(
+            Decimal(_valor_de(fila, "borona_kilos") or CERO),
+            que,
+            f"que llegó gratis con {que}",
+            "llegaron",
+        ),
+    )
+    return sostiene
+
+
+def _por_donde_salio(
+    existencias: ExistenciasReventa, clave: str | None
+) -> tuple[str, str, str]:
+    """Cómo nombrar en el rechazo lo que ya salió, según POR DÓNDE salió.
+
+    EL DISPONIBLE BAJA POR DOS CAMINOS y el guardia solo sabe que no alcanza: las
+    ventas y los ajustes (pasar kilos a un subproducto, o darlos por merma). Afirmar
+    "ya se vendió" cuando lo que se los llevó fue un ajuste es mandar al dueño a
+    revisar una lista de ventas donde no va a encontrar nada, y ahí se queda: con la
+    compra mal anotada y sin saber qué deshacer. Medido contra la API: 137,45 kg de
+    queso, 44,23 pasados a borona, CERO vendidos, y borrar la compra rebotaba con
+    "Queso de esta compra ya se vendió ... Anule primero las ventas".
+
+    Cuando hubo ajustes NO se afirma cuál de los dos fue —puede haber sido cualquiera,
+    o los dos— y se le ofrecen las dos salidas. Cuando no hubo ninguno, la única
+    explicación posible es una venta y el mensaje lo dice derecho, que es más útil.
+
+    Devuelve las tres piezas que cambian: el verbo, cómo llamar a lo que queda, y qué
+    deshacer primero.
+    """
+    nombre = existencias.nombre(clave)
+    if existencias.salio_por_ajustes(clave) > CERO:
+        return (
+            "ya salió de la bodega",
+            "sin usar",
+            f"Deshaga primero las ventas o los ajustes de {nombre} que se lo llevaron",
+        )
+    return (
+        "ya se vendió",
+        "sin vender",
+        f"Anule primero las ventas de {nombre} que se lo llevaron",
+    )
+
+
+def _exigir_bodega(
+    existencias: ExistenciasReventa,
+    quita: dict[str, _KilosQueSeVan],
+    *,
+    accion: str,
+    remate: str,
+) -> None:
+    """Rechaza si quitarle eso a la bodega deja ALGÚN producto en negativo.
+
+    SE MIRAN TODOS LOS PRODUCTOS QUE TOCA LA OPERACIÓN y no solo el principal, que es
+    la mitad que faltaba: una compra toca dos (lo comprado y lo que llegó gratis) y
+    una factura toca tantos como renglones tenga.
+
+    EL RECORRIDO VA EN ORDEN DE CLAVE a propósito: con dos productos cortos, el
+    mensaje tiene que ser SIEMPRE el mismo y no el que salga primero del diccionario,
+    o el mismo rechazo le hablaría hoy de la borona y mañana del queso.
+
+    LA SALIDA SE ARMA EN DOS PEDAZOS, y ninguno es opcional: un rechazo sin salida lo
+    deja con la plata anotada mal y sin saber por dónde arreglarla.
+
+      · qué DESHACER primero lo decide `_por_donde_salio`, porque depende de por dónde
+        se fue la mercancía y no de qué puerta se está cerrando;
+      · `remate` es lo que solo sabe la puerta: corregir en vez de borrar, corregir en
+        vez de anular, o —en un ajuste, que no se corrige ni se anula— volver a
+        intentar el borrado después.
+    """
+    for clave in sorted(quita, key=lambda c: c or ""):
+        se_va = quita[clave]
+        disponible = existencias.disponible(clave)
+        if disponible - se_va.cantidad >= CERO:
+            continue
+        unidad = existencias.rotulo_de_unidad(clave)
+        salio, queda, deshacer = _por_donde_salio(existencias, clave)
+        raise BusinessError(
+            f"No se puede {accion}: {existencias.nombre(clave)} {se_va.de_donde} "
+            f"{salio}. Solo quedan {disponible} {unidad} {queda} de "
+            f"{se_va.cantidad} que {se_va.como_entraron}. {deshacer}{remate}"
+        )
+
+
 class CompraQuesoService(BaseService[CompraQueso]):
     repository_cls = CompraQuesoRepository
     modulo = "reventa"
@@ -1340,44 +1557,59 @@ class CompraQuesoService(BaseService[CompraQueso]):
         mozzarella, así que bajarle los kilos a una compra de panela se validaba
         contra el queso: con queso en bodega se podía dejar el inventario de la panela
         en negativo, y desde ahí ninguna venta de panela volvía a pasar el control.
+
+        Y CUENTA TAMBIÉN LOS KILOS QUE LLEGARON GRATIS, que era el otro medio hueco de
+        esta puerta: la compra sostiene DOS inventarios (ver
+        `_lo_que_sostiene_la_compra`), y este guardia solo miraba el del producto
+        comprado. Editar una compra para quitarle los kilos de borona que traía encima
+        —o rehacer los renglones de su factura sin ellos— dejaba la borona en negativo
+        con el mismo resultado de siempre: sus ventas legítimas rebotando.
         """
         existencias = ExistenciasReventa(self.db, self.ctx)
         # Lo que la factura va a dejar de cada producto, y lo que le quita. Las dos
         # cuentas van POR CLAVE: los kilos de un producto no compensan los de otro.
-        nuevas: dict[str, Decimal] = {}
+        nuevas: dict[str, _KilosQueSeVan] = {}
         for data in datos:
-            clave = data.get("tipo") or TIPO_QUESO
-            cantidad = (
-                Decimal(data.get("barras") or CERO)
-                if not existencias.catalogo.se_pesa(clave)
-                else Decimal(data.get("kilos_netos") or CERO)
-            )
-            nuevas[clave] = nuevas.get(clave, CERO) + cantidad
-        viejas: dict[str, Decimal] = {}
+            for clave, kilos in _lo_que_sostiene_la_compra(
+                data, existencias.catalogo, que="esta compra"
+            ).items():
+                _sumar_lo_que_se_va(nuevas, clave, kilos)
+        viejas: dict[str, _KilosQueSeVan] = {}
         for fila in devolviendo:
             if fila.estado == ESTADO_ANULADA:
                 # Una compra anulada no está sosteniendo ningún inventario, así
                 # que quitarla no le quita kilos a nadie.
                 continue
-            clave = fila.tipo or TIPO_QUESO
-            cantidad = (
-                Decimal(fila.barras)
-                if not existencias.catalogo.se_pesa(clave)
-                else Decimal(fila.kilos_netos)
-            )
-            viejas[clave] = viejas.get(clave, CERO) + cantidad
+            for clave, kilos in _lo_que_sostiene_la_compra(
+                fila, existencias.catalogo, que="esta compra"
+            ).items():
+                _sumar_lo_que_se_va(viejas, clave, kilos)
 
         for clave in sorted(set(nuevas) | set(viejas), key=lambda c: (c or "")):
-            quita = viejas.get(clave, CERO) - nuevas.get(clave, CERO)
+            antes = viejas[clave].cantidad if clave in viejas else CERO
+            ahora = nuevas[clave].cantidad if clave in nuevas else CERO
+            quita = antes - ahora
             if quita <= CERO:
                 continue
             disponible = existencias.disponible(clave)
             if disponible - quita < CERO:
+                # EL MISMO MENSAJE QUE LAS OTRAS TRES PUERTAS, y por la misma razón:
+                # el rechazo decía "ya salieron vendidas" —falso cuando lo que se los
+                # llevó fue un ajuste— y no le decía al dueño NADA de qué hacer. Se
+                # queda sin corregir la compra y sin saber por dónde. Aquí la salida
+                # es además distinta: no hay que borrar nada, basta con no bajarla
+                # tanto, y por eso el remate dice la cifra hasta donde sí se puede.
                 unidad = existencias.rotulo_de_unidad(clave)
+                salio, queda, deshacer = _por_donde_salio(existencias, clave)
+                # LO MENOS QUE PUEDE DEJARLE es lo que sostiene hoy menos lo que
+                # todavía está en bodega: de ahí para abajo empieza a faltar. Con
+                # 137,45 kg y 17,22 sin vender, el piso son 120,23 —justo lo vendido—.
+                tope = antes - disponible
                 raise BusinessError(
-                    f"No se pueden quitar tantas cantidades de "
-                    f"{existencias.nombre(clave)}: de esta compra ya salieron "
-                    f"vendidas. Solo quedan {disponible} {unidad} sin vender"
+                    f"No se le puede quitar tanto {existencias.nombre(clave)} a esta "
+                    f"compra: {salio}. Solo quedan {disponible} {unidad} {queda} y le "
+                    f"está quitando {quita}. {deshacer}, o déjele al menos {tope} "
+                    f"{unidad}"
                 )
 
     def escribir_renglones(
@@ -1472,6 +1704,13 @@ class CompraQuesoService(BaseService[CompraQueso]):
         gratis = data.get("borona_kilos")
         if gratis is None:
             gratis = actual.borona_kilos
+        # SE ESCRIBE DE VUELTA EN `data` aunque el payload no lo haya mandado, y eso
+        # es lo que hace que el guardia de la bodega mida bien: por PUT llega un
+        # payload PARCIAL, así que sin esta línea `exigir_cantidades` leería cero
+        # kilos gratis en la compra que va a quedar contra los 25,36 que tenía, y
+        # rechazaría —"la borona ya se vendió"— una corrección de precio que no le
+        # mueve un kilo a nadie. Guardar el mismo valor que ya tenía no cambia nada.
+        data["borona_kilos"] = Decimal(gratis or CERO)
         if Decimal(gratis or CERO) > CERO and actual.subproducto_tipo:
             # SI LA FILA YA NOMBRÓ A SU PRODUCTO, SE RESPETA TAL CUAL. La edición no
             # acepta cambiar el destinatario (no está en `CompraQuesoUpdate`), así que
@@ -1516,12 +1755,82 @@ class CompraQuesoService(BaseService[CompraQueso]):
         return super().actualizar(entity_id, data)
 
     def validar_eliminar(self, obj: CompraQueso) -> None:
+        """LA PLATA: no se borra una compra que ya tiene abonos encima.
+
+        AQUÍ NO ESTÁ EL GUARDIA DE LA BODEGA, y no por olvido: este método es el
+        gancho del servicio genérico y `BaseService.eliminar` lo vuelve a llamar por
+        dentro, así que no hay forma de apagarlo para el único borrado que SÍ tiene
+        que pasar de largo —el que hace `DocumentoReventaService.actualizar` cuando
+        rehace los renglones de una factura, que borra para volver a escribir y ya
+        validó el conjunto con `exigir_cantidades`—. El guardia vive en
+        `exigir_bodega_al_quitar` y lo llaman las tres puertas de verdad: borrar el
+        renglón, borrar la factura entera y anular.
+        """
         if obj.abonado > CERO:
             raise BusinessError(
                 "No se puede eliminar una compra con abonos; elimine primero los abonos o anúlela"
             )
 
-    def eliminar(self, entity_id: uuid.UUID, *, cuidar_cabecera: bool = True) -> None:
+    def exigir_bodega_al_quitar(
+        self,
+        filas: list[CompraQueso],
+        *,
+        accion: str,
+        que: str,
+        remate: str,
+    ) -> None:
+        """EL MISMO GUARDIA PARA BORRAR Y PARA ANULAR: hacer desaparecer estas compras
+        no puede dejar ningún inventario en negativo.
+
+        Borrar y anular le quitan a la bodega EXACTAMENTE lo mismo —las dos sumas del
+        inventario descartan la fila borrada y la anulada por igual (ver
+        `CompraQuesoRepository.acumulados_por_tipo`)—, así que tienen que exigir lo
+        mismo. Que una de las dos preguntara y la otra no era todo el defecto: se
+        rechazaba anular la compra vendida y se dejaba BORRARLA, que es peor porque
+        además no queda ni rastro de que existió.
+
+        SE MIDE EL CONJUNTO Y NO FILA POR FILA. Una factura de dos renglones de 100 kg
+        con 50 vendidos pasa dos veces un control que mire de a uno —100 cabe en los
+        150 disponibles— y se lleva 200: la bodega queda en -50. Sumando primero, la
+        factura entera se borra solo si la bodega aguanta las dos.
+        """
+        existencias = ExistenciasReventa(self.db, self.ctx)
+        quita: dict[str, _KilosQueSeVan] = {}
+        for fila in filas:
+            if fila.estado == ESTADO_ANULADA:
+                # Una compra anulada ya no sostiene inventario: se le descontó el día
+                # que se anuló, así que quitarla ahora no le quita kilos a nadie.
+                continue
+            for clave, kilos in _lo_que_sostiene_la_compra(
+                fila, existencias.catalogo, que=que
+            ).items():
+                _sumar_lo_que_se_va(quita, clave, kilos)
+        _exigir_bodega(existencias, quita, accion=accion, remate=remate)
+
+    def validar_eliminar_conjunto(self, filas: list[CompraQueso]) -> None:
+        """Los renglones de UNA factura que se va entera: la plata fila por fila y la
+        bodega SUMADA.
+
+        La llama `DocumentoReventaService.eliminar` antes de borrar el primer renglón:
+        si algo va a rebotar, tiene que rebotar antes de que se escriba nada, o una
+        factura de tres renglones quedaría partida por la mitad.
+        """
+        for fila in filas:
+            self.validar_eliminar(fila)
+        self.exigir_bodega_al_quitar(
+            filas,
+            accion="eliminar esta factura",
+            que="esta factura",
+            remate=", o corrija la factura en vez de borrarla",
+        )
+
+    def eliminar(
+        self,
+        entity_id: uuid.UUID,
+        *,
+        cuidar_cabecera: bool = True,
+        revisar_bodega: bool = True,
+    ) -> None:
         """Borra la compra Y se lleva sus soportes de pago.
 
         Se valida PRIMERO y se limpian los soportes después: si se limpiaran
@@ -1534,9 +1843,27 @@ class CompraQuesoService(BaseService[CompraQueso]):
         está borrando ES el servicio de la factura, que ya se encarga de la cabecera
         por su cuenta: si no, al borrar el último renglón la cabecera desaparecería
         en medio de la operación y lo que viene después no la encontraría.
+
+        `revisar_bodega=False` ES PARA UN SOLO CASO Y HAY QUE DEJARLO ESCRITO: el
+        borrado que NO es un borrado, sino la mitad de un reemplazo. Rehacer los
+        renglones de una factura los borra y los vuelve a escribir en la misma
+        transacción, y ese conjunto ya se midió antes con `exigir_cantidades`
+        —devolviéndole a la bodega lo que tenían apartado los que se van—. Preguntar
+        otra vez fila por fila mediría la bodega A MITAD DEL REEMPLAZO, con los
+        renglones viejos ya borrados y los nuevos sin escribir, y una factura de
+        137,45 kg con 120,23 vendidos no se podría ni corregir el precio: rebotaría
+        por un negativo que no llega a existir. Lo mismo cuando la factura se va
+        entera, que valida el conjunto en `validar_eliminar_conjunto`.
         """
         compra = self.repo.get_or_fail(entity_id)
         self.validar_eliminar(compra)
+        if revisar_bodega:
+            self.exigir_bodega_al_quitar(
+                [compra],
+                accion="eliminar esta compra",
+                que="esta compra",
+                remate=", o corrija la compra en vez de borrarla",
+            )
         documento_id = compra.documento_id
         AdjuntoReventaService(self.db, self.ctx).limpiar_de_documento(compra_id=entity_id)
         super().eliminar(entity_id)
@@ -1621,19 +1948,18 @@ class CompraQuesoService(BaseService[CompraQueso]):
         # unidades quedarían en negativo), ni al contrario. Y ya no son tres
         # inventarios con sus nombres escritos aquí: es el de SU producto, sea el
         # queso de siempre o uno que el dueño haya agregado (ver `ExistenciasReventa`).
-        existencias = ExistenciasReventa(self.db, self.ctx)
-        clave = compra.tipo or TIPO_QUESO
-        se_pesa = existencias.catalogo.se_pesa(clave)
-        cantidad = Decimal(compra.kilos_netos) if se_pesa else Decimal(compra.barras)
-        disponible = existencias.disponible(clave)
-        if disponible - cantidad < CERO:
-            unidad = existencias.rotulo_de_unidad(clave)
-            raise BusinessError(
-                f"No se puede anular: {existencias.nombre(clave)} de esta compra ya "
-                f"se vendió. Solo quedan {disponible} {unidad} sin vender de "
-                f"{cantidad} que trajo. Anule primero las ventas que se lo llevaron, "
-                f"o corrija la compra en vez de anularla"
-            )
+        #
+        # ES EL MISMO GUARDIA QUE EL DE BORRAR, y ahora es literalmente el mismo
+        # método: escrito dos veces volvería a pasar lo que ya pasó —una puerta con
+        # la regla completa y la otra sin ella—. De paso trajo la mitad que a esta le
+        # faltaba: los kilos que llegaron GRATIS con la compra, que anular también le
+        # quita a la bodega y este control no miraba.
+        self.exigir_bodega_al_quitar(
+            [compra],
+            accion="anular",
+            que="esta compra",
+            remate=", o corrija la compra en vez de anularla",
+        )
         antes = compra.estado
         compra.estado = ESTADO_ANULADA
         compra.updated_by = self.ctx.user_id
@@ -2010,10 +2336,36 @@ class VentaQuesoService(BaseService[VentaQueso]):
                 "No se puede eliminar una venta con abonos; elimine primero los abonos o anúlela"
             )
 
-    def eliminar(self, entity_id: uuid.UUID, *, cuidar_cabecera: bool = True) -> None:
+    def validar_eliminar_conjunto(self, filas: list[VentaQueso]) -> None:
+        """Los renglones de una factura de VENTA que se va entera: solo la plata.
+
+        AQUÍ NO HAY NADA QUE PREGUNTARLE A LA BODEGA, y eso no es una omisión: borrar
+        una venta le DEVUELVE mercancía al inventario (la venta es el sustraendo, ver
+        `existencias.py`), así que ningún borrado de ventas puede dejar un producto en
+        negativo. El guardia de las ventas está en la puerta contraria —al escribirlas,
+        en `exigir_cantidades`—, que es donde una venta sí puede sacar lo que no hay.
+
+        Existe para que `DocumentoReventaService.eliminar` pueda pedirle lo mismo a los
+        dos servicios sin preguntar cuál es cuál.
+        """
+        for fila in filas:
+            self.validar_eliminar(fila)
+
+    def eliminar(
+        self,
+        entity_id: uuid.UUID,
+        *,
+        cuidar_cabecera: bool = True,
+        revisar_bodega: bool = True,
+    ) -> None:
         """Borra la venta Y se lleva sus soportes de pago, y si era el último renglón
         de su factura, también la factura. Mismo orden y mismas razones que en la
-        compra: ver CompraQuesoService.eliminar."""
+        compra: ver CompraQuesoService.eliminar.
+
+        `revisar_bodega` no se usa —borrar una venta solo devuelve inventario— y está
+        en la firma porque la factura llama al mismo método en los dos servicios sin
+        preguntar si es de compra o de venta.
+        """
         venta = self.repo.get_or_fail(entity_id)
         self.validar_eliminar(venta)
         documento_id = venta.documento_id
@@ -2370,8 +2722,14 @@ class DocumentoReventaService(BaseService[DocumentoReventa]):
             # EL PUESTO EN EL REPARTO SE CONSERVA: los renglones nuevos nacen con la
             # hora de registro que tenía la factura, no con la de hoy.
             hora = self._hora_de_la_factura(renglones)
+            # `revisar_bodega=False`: esto NO es un borrado, es la primera mitad de un
+            # reemplazo que ya se midió entero dos líneas arriba. Con el guardia
+            # puesto, la bodega se preguntaría a mitad de camino —los viejos ya
+            # borrados y los nuevos sin escribir— y corregirle el precio a una factura
+            # de 137,45 kg con 120,23 vendidos rebotaría por un negativo que solo
+            # existe dentro de esta transacción. Ver `CompraQuesoService.eliminar`.
             for renglon in vivos:
-                servicio.eliminar(renglon.id, cuidar_cabecera=False)
+                servicio.eliminar(renglon.id, cuidar_cabecera=False, revisar_bodega=False)
             servicio.escribir_renglones(documento, datos, hora_de_registro=hora)
         else:
             for renglon in renglones:
@@ -2416,6 +2774,14 @@ class DocumentoReventaService(BaseService[DocumentoReventa]):
 
         Cada renglón se va por su propio `eliminar`, que valida que no tenga abonos
         y se lleva sus soportes de pago del almacenamiento.
+
+        LA BODEGA SE MIDE UNA VEZ Y SUMADA, y esa es la diferencia con lo que había.
+        Antes esta puerta llamaba `validar_eliminar` renglón por renglón, que solo
+        miraba los abonos: una factura de compra se borraba entera aunque su queso ya
+        estuviera vendido, y la bodega quedaba en negativo. Y aun con el guardia
+        puesto, preguntar de a un renglón no alcanzaría: una factura de dos renglones
+        de 100 kg con 50 vendidos deja pasar los dos —100 cabe en los 150 que hay— y
+        se lleva 200. Por eso se le pregunta al servicio por el CONJUNTO.
         """
         documento = self.repo.get_or_fail(documento_id)
         servicio = self._servicio_de_renglones(documento.tipo)
@@ -2423,14 +2789,18 @@ class DocumentoReventaService(BaseService[DocumentoReventa]):
         # Se validan TODOS antes de borrar el primero: si el tercero tuviera abonos,
         # una factura de tres renglones quedaría con el primero borrado y los otros
         # dos vivos, o sea partida en dos.
-        for renglon in renglones:
-            servicio.validar_eliminar(renglon)
+        servicio.validar_eliminar_conjunto(renglones)
         # `cuidar_cabecera=False` porque la cabecera la borra este método, dos
         # líneas más abajo: si el último renglón se la llevara, el `get_or_fail` de
         # `super().eliminar` no la encontraría y esto respondería un 404 después de
         # haber borrado todo.
+        #
+        # Y `revisar_bodega=False` porque la bodega ya se midió arriba SUMADA, que es
+        # la única medida que sirve aquí: fila por fila, cada renglón se compararía
+        # contra un disponible del que los anteriores ya se descontaron y el mensaje
+        # hablaría de un renglón cualquiera en vez de la factura.
         for renglon in renglones:
-            servicio.eliminar(renglon.id, cuidar_cabecera=False)
+            servicio.eliminar(renglon.id, cuidar_cabecera=False, revisar_bodega=False)
         super().eliminar(documento_id)
 
     # --------------------------------------------------------------- lecturas
@@ -2782,6 +3152,54 @@ class ConversionBoronaService(BaseService[ConversionBorona]):
                 f"Solo hay {disponible} kg de {producto.nombre} disponibles"
             )
         return super().crear(data)
+
+    def validar_eliminar(self, obj: ConversionBorona) -> None:
+        """BORRAR UN AJUSTE LE QUITA AL SUBPRODUCTO LOS KILOS QUE LE ENTRARON, y eso
+        no se puede hacer si esos kilos ya salieron vendidos.
+
+        ESTE MÉTODO NO EXISTÍA, y esa era exactamente la falla: sin él se heredaba el
+        `validar_eliminar` VACÍO del servicio genérico, así que el ajuste se borraba
+        siempre y sin preguntar nada. Medido contra la API: 137,45 kg de queso, un
+        ajuste que le pasa 44,23 kg a la borona, 40,00 kg de borona vendidos, y
+        borrar el ajuste dejaba la borona en -40,00 kg. Desde ahí ninguna venta de
+        borona vuelve a pasar el control de existencias.
+
+        SOLO SE MIRA EL DESTINO. El ajuste mueve kilos en dos direcciones y únicamente
+        una es peligrosa: al ORIGEN el borrado le DEVUELVE los kilos que le había
+        sacado (su inventario sube, nunca baja), y al DESTINO se los quita. Un ajuste
+        de MERMA no tiene destino —esos kilos se perdieron y no le entraron a nadie—,
+        así que borrarlo solo devuelve y siempre se puede.
+
+        EL MENSAJE NO HABLA DE ANULAR NI DE CORREGIR, y no es un descuido: un ajuste
+        no se anula ni se edita —no hay por dónde, solo se crea y se borra—, así que
+        lo único que se puede ofrecer es deshacer primero lo que se llevó los kilos y
+        volver a intentarlo. Qué fue lo que se los llevó lo decide `_por_donde_salio`:
+        una venta, o un ajuste encadenado (44,23 kg a la borona y 40,00 de esa borona
+        a merma le deja 4,23 sin que se haya vendido nada).
+        """
+        if obj.estado != ESTADO_ACTIVO:
+            # Un ajuste que ya no está activo no está sosteniendo el inventario de
+            # nadie (ver `ConversionBoronaRepository._criterios`): borrarlo no mueve
+            # un kilo.
+            return
+        destino = obj.producto_destino
+        if not destino:
+            return
+        existencias = ExistenciasReventa(self.db, self.ctx)
+        quita = {
+            destino: _KilosQueSeVan(
+                Decimal(obj.kilos), "este ajuste", "que este ajuste le pasó", "le entraron"
+            )
+        }
+        _exigir_bodega(
+            existencias,
+            quita,
+            accion="eliminar este ajuste",
+            # UN AJUSTE NO SE CORRIGE NI SE ANULA —solo se crea y se borra—, así que
+            # aquí el remate no puede ofrecer una alternativa: lo único que hay es
+            # deshacer primero lo que se llevó los kilos y volver a intentarlo.
+            remate=", y después sí borre el ajuste",
+        )
 
 
 # ----------------------------------- adjuntos (soportes de transferencia)

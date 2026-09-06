@@ -170,6 +170,22 @@ def barras(valor: Any) -> str:
     return f"{_miles(numero, 0)} {unidad}"
 
 
+def jornales(valor: Any) -> str:
+    """Días trabajados del recibo de nómina: 15, 12,5, 12,25.
+
+    Mismo criterio que `kilogramos` y `litros` —la precisión que guarda la base
+    (Numeric(6,2)), sin ceros de relleno y con la coma decimal de Colombia—, y
+    existe porque el recibo los imprimía CRUDOS de la base: en un papel donde todo
+    lo demás dice "$771.662,50" los días salían "12.50", con punto decimal y con un
+    cero de relleno. Es el documento que firma el empleado y lo lee una persona.
+
+    NO lleva la palabra "días" pegada: el renglón del recibo ya se llama "Días
+    trabajados" y repetirla lo dejaría diciendo "Días trabajados  12,5 días".
+    """
+    numero = _medio_arriba(valor, DOS_DECIMALES)
+    return _miles(numero, _decimales_utiles(numero, 2))
+
+
 def build_pdf(
     *,
     title: str,
