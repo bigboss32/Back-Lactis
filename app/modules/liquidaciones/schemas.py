@@ -355,6 +355,19 @@ class LiquidacionRead(TenantRead):
     # mostrar un "saldo -$4.955,77" bajo el rótulo "Saldo a pagar", que se lee al
     # revés. El porqué completo está en `Liquidacion.le_queda_debiendo`.
     le_queda_debiendo: Decimal
+    # CUÁNTAS VECES SE EMITIÓ ESTE COMPROBANTE. 1 en todos los que nunca se corrigieron
+    # —o sea, casi todos—. Desde 2, la pantalla pinta la banda de "corregido" y el folio
+    # sale con el sufijo, porque hay un papel viejo circulando con otra cifra.
+    #
+    # LAS CORRECCIONES EN SÍ NO VIAJAN AQUÍ, y es a propósito: `Liquidacion.correcciones`
+    # es una relación diferida, así que declararla en este esquema dispararía UNA
+    # CONSULTA POR FILA cada vez que se lista una página de liquidaciones, para un dato
+    # que en el 99% de las filas está vacío. La pantalla que necesita el motivo —el
+    # detalle— lo pide por `GET /liquidaciones/{id}/correcciones`, que es una sola
+    # consulta y solo cuando hace falta. Con `version` basta para saber si hay que
+    # pedirlo: 1 significa que no hay nada que mostrar.
+    version: int = 1
+    fecha_primera_impresion: datetime | None = None
     # LAS DOS PUNTAS DE LA DEUDA, y las dos se ven en la pantalla:
     #
     # · en la liquidación que DEJÓ la deuda, en cuál se le cobró. Mientras esto no
@@ -390,6 +403,118 @@ class GenerarLiquidacionesResultado(BaseSchema):
 
 class LiquidacionUpdate(BaseSchema):
     observaciones: str | None = None
+
+
+# ------------------------------------- corregir una quincena YA PAGADA
+# Lo pidió el dueño: "que si soy administrador de empresa pueda editar la liquidación
+# que ya está pagada, es que se le olvidó un detalle". Todo lo de abajo existe para que
+# esa corrección deje escrito qué cambió, por qué y contra qué cifra — porque el
+# productor ya tiene un papel en la mano con la cifra vieja.
+
+
+class PrecioDeUnDia(BaseSchema):
+    """El precio nuevo de UN día que ya está en el comprobante.
+
+    El tope de 1.000.000 es el mismo de `LiquidacionDetallePrecioUpdate` y por la misma
+    razón: el precio del litro anda por los $1.800 y quien teclea "1800000" por error se
+    lleva una quincena de cientos de millones. Va como entero porque el manejador de
+    errores de validación serializa el contexto a JSON tal cual, y un Decimal ahí
+    devuelve un 500 en vez del 422.
+    """
+
+    detalle_id: uuid.UUID
+    precio_litro: Decimal = Field(gt=0, le=1_000_000)
+
+
+class CorregirLiquidacionPayload(BaseSchema):
+    """Lo que se manda para corregir una quincena pagada.
+
+    EL MOTIVO ES OBLIGATORIO, con `min_length` de verdad y no como texto opcional: es lo
+    único que después le explica a alguien por qué el papel que el productor guardó dice
+    otra cifra. Una corrección sin motivo escrito no se distingue de un error.
+
+    LAS DOS FORMAS DE CORREGIR VAN EN LA MISMA PETICIÓN Y SON UNA SOLA OPERACIÓN: entrar
+    días que se quedaron sueltos, y corregir el precio de días que ya están. Separarlas
+    en dos llamadas dejaría el comprobante a medio corregir entre una y otra, con una
+    versión, un papel y un saldo intermedios que nunca existieron.
+
+    Los días se escogen UNO POR UNO y no "todo lo que esté suelto en el período": si hay
+    dos días olvidados y el dueño solo quería uno, el otro entraría sin que lo viera.
+    """
+
+    motivo: str = Field(min_length=3, max_length=500)
+    recepciones_a_incluir: list[uuid.UUID] = []
+    precios: list[PrecioDeUnDia] = []
+
+
+class DiaSueltoRead(BaseSchema):
+    """Un día del período que NO está en ninguna liquidación: candidato a entrar.
+
+    Trae el valor ya calculado para que la pantalla muestre la casilla con la cifra
+    puesta y el dueño reconozca el día antes de marcarlo.
+    """
+
+    recepcion_id: uuid.UUID
+    fecha: date
+    litros: Decimal
+    precio_litro: Decimal
+    valor: Decimal
+    # Qué le va a pasar al FLETE de ese día, que es el papel de OTRA persona: o entra
+    # normal en el próximo comprobante del transportador, o vale $0,00 porque ese viaje
+    # ya se cobró por día completo. El dueño que suma a mano va a preguntar por qué ese
+    # día no tiene flete, y hay que responderle en el diálogo y no en soporte.
+    nota_flete: str | None = None
+
+
+class PrevisualizacionCorreccion(BaseSchema):
+    """El antes y el después de la corrección, SIN escribir nada.
+
+    Es la calculadora del dueño puesta en la pantalla antes de que se mueva un peso: ve
+    la cifra que va a quedar y la compara con el papel que tiene al lado. Que exista
+    este paso es la mitad de la seguridad de la operación.
+    """
+
+    dias_sueltos: list[DiaSueltoRead] = []
+    valor_total_antes: Decimal
+    valor_total_despues: Decimal
+    neto_antes: Decimal
+    neto_despues: Decimal
+    pagado: Decimal
+    saldo_antes: Decimal
+    saldo_despues: Decimal
+    estado_antes: str
+    estado_despues: str
+    # Cuánto hay que entregarle todavía, o cuánto se le pagó de más. Los DOS en
+    # positivo y en campos separados, porque son dos frases distintas y la pantalla no
+    # tiene que deducir cuál decir a partir del signo de un saldo.
+    queda_por_entregar: Decimal
+    se_le_pago_de_mas: Decimal
+    version_actual: int
+    # Lo que el sistema sabe y el dueño no: qué pasa con el flete, que el período queda
+    # reservado, y cuántas veces se ha corregido ya esta quincena. Se muestran en el
+    # diálogo ANTES de confirmar.
+    avisos: list[str] = []
+
+
+class CorreccionRead(BaseSchema):
+    """Una corrección ya hecha, como se lee en la pantalla y en el papel."""
+
+    id: uuid.UUID
+    version_nueva: int
+    motivo: str
+    corregido_por_nombre: str | None
+    created_at: datetime
+    valor_total_antes: Decimal
+    valor_total_despues: Decimal
+    neto_antes: Decimal
+    neto_despues: Decimal
+    pagado_al_momento: Decimal
+    saldo_antes: Decimal
+    saldo_despues: Decimal
+    estado_antes: str
+    estado_despues: str
+    dias_agregados: list[Any] = []
+    precios_corregidos: list[Any] = []
 
 
 class LiquidacionDetallePrecioUpdate(BaseSchema):

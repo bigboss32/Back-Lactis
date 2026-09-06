@@ -319,15 +319,21 @@ _NOMBRE_DE_CAMPO: dict[str, str] = dict(_ETIQUETAS)
 
 
 def _ya_salio_plata(liquidacion: Liquidacion) -> bool:
-    """Si contra esta liquidación ya se le entregó plata al tercero.
+    """Si contra esta liquidación ya salió plata O ya salió papel.
 
-    Es "tiene algún pago", no "está en pagada": con un solo abono hecho, cambiar
-    las cifras deja ese abono contra un total que ya no existe. Se mira además el
-    estado 'pagada' porque hay un camino que la marca pagada SIN registrar pago
-    —cuando los anticipos se comieron EXACTO todo el saldo— y ahí tampoco hay nada
-    que corregir: esa plata salió como anticipo, en la mano.
+    NO REPITE LA REGLA: la importa. La misma pregunta la hacen otros cuatro guardias del
+    lado de liquidaciones (borrar un pago, anular, eliminar, y el candado de los
+    anticipos), y tenerla escrita en dos sitios fue exactamente lo que dejó pasar el
+    último hueco: se le agregó la tercera situación —la quincena ya corregida— aquí y se
+    olvidó allá, así que corregir un comprobante lo devolvía a 'aprobada' y desde ahí se
+    le podía mover el anticipo que lo saldaba.
+
+    El porqué de las tres situaciones está escrito una sola vez, en
+    `liquidaciones/service.py::ya_salio_papel_o_plata`.
     """
-    return liquidacion.tiene_pagos or liquidacion.estado == ESTADO_PAGADA
+    from app.modules.liquidaciones.service import ya_salio_papel_o_plata
+
+    return ya_salio_papel_o_plata(liquidacion)
 
 
 def _traba_el_dia(liquidacion: Liquidacion) -> bool:

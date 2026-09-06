@@ -13,6 +13,8 @@ from app.modules.liquidaciones.schemas import (
     AnticipoCreate,
     AnticipoRead,
     AnticipoUpdate,
+    CorreccionRead,
+    CorregirLiquidacionPayload,
     EnlaceSoporteCompartido,
     GenerarLiquidaciones,
     GenerarLiquidacionesResultado,
@@ -21,6 +23,7 @@ from app.modules.liquidaciones.schemas import (
     LiquidacionUpdate,
     PagoLiquidacionCreate,
     PreLiquidacionRead,
+    PrevisualizacionCorreccion,
     PrevisualizarLiquidacion,
 )
 from app.modules.liquidaciones.service import (
@@ -167,6 +170,81 @@ def recalcular(
     ctx: RequestContext = Depends(require_permission("liquidaciones", "editar")),
 ) -> LiquidacionRead:
     return _to_read(LiquidacionService(db, ctx).recalcular(entity_id))
+
+
+# --------------------- corregir una quincena que ya se pagó
+# Lo pidió el dueño: "que si soy administrador de empresa pueda editar la liquidación
+# que ya está pagada, es que se le olvidó un detalle".
+#
+# PERMISO 'administrar', que es el MISMO que exige registrar un pago y aprobar, y que en
+# el seed tiene EXACTAMENTE UN ROL: Administrador Empresa. Ese es literalmente lo que el
+# dueño pidió, y no hay que inventar ningún mecanismo nuevo para conseguirlo.
+#
+# Y NO SE CUELGA DE LOS ENDPOINTS QUE YA EXISTEN —`PUT /{id}` y
+# `PUT /{id}/detalles/{detalle_id}`— aunque hubiera sido más corto: esos dos piden
+# 'editar', que el rol Compras también tiene. Aflojarles la guarda de estado le
+# entregaría a Compras el precio por litro de una quincena pagada (81,99 L de $1.750 a
+# $1.800 y el comprobante de $143.482,50 pasa a $147.582 sin que intervenga nadie con
+# permiso de plata). La corrección entra por su propia puerta, con su propio permiso.
+@router.post(
+    "/{entity_id}/corregir/previsualizar",
+    response_model=PrevisualizacionCorreccion,
+    summary="Cómo quedaría la quincena corregida, SIN escribir nada",
+)
+def previsualizar_correccion(
+    entity_id: uuid.UUID,
+    payload: CorregirLiquidacionPayload,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "administrar")),
+) -> PrevisualizacionCorreccion:
+    """Devuelve los días sueltos del período y el antes/después de las cifras.
+
+    Es la calculadora del dueño puesta en la pantalla antes de que se mueva un peso: él
+    compara la cifra que va a quedar con el papel que tiene al lado. Que exista este
+    paso es la mitad de la seguridad de la operación.
+    """
+    return LiquidacionService(db, ctx).previsualizar_correccion(entity_id, payload)
+
+
+@router.post(
+    "/{entity_id}/corregir",
+    response_model=LiquidacionRead,
+    summary="Corregir una quincena ya pagada y emitir la versión siguiente del comprobante",
+)
+def corregir(
+    entity_id: uuid.UUID,
+    payload: CorregirLiquidacionPayload,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "administrar")),
+) -> LiquidacionRead:
+    """Entra los días que se quedaron sueltos y corrige el precio de los que ya están.
+
+    NO borra ningún pago ni ningún soporte, NO suelta ninguna marca y NO pasa por
+    borrador. Si el total sube, la quincena queda en 'parcial' y el saldo se paga por la
+    puerta de siempre; si baja, queda con saldo negativo y la quincena siguiente lo
+    descuenta sola, que es el mecanismo que ya existe.
+    """
+    return _to_read(LiquidacionService(db, ctx).corregir_pagada(entity_id, payload))
+
+
+@router.get(
+    "/{entity_id}/correcciones",
+    response_model=list[CorreccionRead],
+    summary="Las correcciones hechas a esta quincena después de pagada",
+)
+def correcciones(
+    entity_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "consultar")),
+) -> list[CorreccionRead]:
+    """Va por su propia ruta y no dentro de la liquidación: la relación es diferida, así
+    que meterla en el esquema dispararía una consulta POR FILA al listar una página,
+    para un dato que en casi todas está vacío. Con `version` la pantalla ya sabe si
+    tiene que pedirlo."""
+    return [
+        CorreccionRead.model_validate(c)
+        for c in LiquidacionService(db, ctx).correcciones_de(entity_id)
+    ]
 
 
 @router.post("/{entity_id}/aprobar", response_model=LiquidacionRead, summary="Aprobar liquidación")

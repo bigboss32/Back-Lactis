@@ -3,6 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Date,
     DateTime,
@@ -96,6 +97,36 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
         ForeignKey("liquidaciones.id"), index=True
     )
 
+    # CUÁNTAS VECES SE EMITIÓ ESTE COMPROBANTE. Arranca en 1; sube con cada corrección.
+    #
+    # Lo pidió el dueño: "que si soy administrador de empresa pueda editar la
+    # liquidación que ya está pagada, es que se le olvidó un detalle". Corregir una
+    # quincena pagada tiene una consecuencia que no es de software: EL PRODUCTOR YA
+    # TIENE UN PAPEL EN LA MANO con la cifra vieja. Esta columna es lo que hace que la
+    # hoja nueva se pueda distinguir de la vieja —el folio pasa a ser 'A3F2B1C9-v2'—, y
+    # sin ella las dos se llaman igual y dicen cifras distintas.
+    #
+    # ARRANCA EN 1 Y CON server_default: las liquidaciones que ya existen quedan en la
+    # v1 y siguen imprimiendo su folio pelado, así que ningún comprobante ya entregado
+    # cambia de nombre por esta migración.
+    version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
+
+    # CUÁNDO SALIÓ EL PAPEL POR PRIMERA VEZ, para poder nombrar el que se reemplaza.
+    #
+    # Hoy el "Emitido" del comprobante es la hora en que se baja el PDF y no se guarda
+    # en ninguna parte: dos reimpresiones del MISMO comprobante intacto ya salen con
+    # horas distintas. Así no se puede escribir "reemplaza al comprobante emitido el
+    # 15/06/2026 09:32", que es justo lo que necesita quien recibe la hoja nueva para
+    # emparejarla con la que tiene guardada.
+    #
+    # Anulable, y el nulo también dice algo: si nunca se imprimió, no hay papel que
+    # recoger y el aviso de la corrección no tiene que pedirlo.
+    fecha_primera_impresion: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
     # Lo que ya se le entregó al tercero, sumando todos los pagos parciales.
     # Se guarda como columna (en vez de sumar `pagos` cada vez) por lo mismo que
     # `abonado` en reventa: el tablero y la contabilidad suman esta cifra en SQL
@@ -178,6 +209,20 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
     rutas_cobradas: Mapped[list["LiquidacionRuta"]] = relationship(
         back_populates="liquidacion", lazy="select", cascade="all, delete-orphan",
         order_by="LiquidacionRuta.ruta_id",
+    )
+
+    # LAS CORRECCIONES QUE SE LE HICIERON DESPUÉS DE PAGADA, de la más vieja a la más
+    # nueva. Es la memoria de por qué el papel que el productor tiene en la mano no
+    # dice lo mismo que la pantalla.
+    #
+    # `lazy="select"` y NO "selectin" ni "joined", por la misma razón que
+    # `rutas_cobradas`: esta colección no puede meterle un LEFT JOIN a la consulta del
+    # candado (`SELECT ... FOR UPDATE`, que Postgres rechaza con 0A000) ni dispararse
+    # sola mientras el candado está puesto. `corregir_pagada` toma ese candado desde el
+    # primer renglón, así que va apagada y se lee cuando la respuesta la pide.
+    correcciones: Mapped[list["CorreccionLiquidacion"]] = relationship(
+        back_populates="liquidacion", lazy="select", cascade="all, delete-orphan",
+        order_by="CorreccionLiquidacion.version_nueva",
     )
 
     @property
@@ -594,6 +639,74 @@ class LiquidacionRuta(Base):
     )
 
     liquidacion: Mapped[Liquidacion] = relationship(back_populates="rutas_cobradas")
+
+
+class CorreccionLiquidacion(HoraDeRegistroMixin, TenantMixin, AuditMixin, Base):
+    """UNA corrección hecha a una quincena que YA ESTABA PAGADA. Una fila por vez.
+
+    POR QUÉ EXISTE. El dueño pidió poder corregir una quincena pagada porque "se le
+    olvidó un detalle". Cuando eso pasa hay algo que el software no puede deshacer: EL
+    PRODUCTOR YA TIENE EL PAPEL VIEJO EN LA MANO, con otra cifra. Esta fila es lo único
+    que después puede explicar por qué la hoja de $500.000 que Henri guardó y la
+    pantalla que dice $680.000 hablan de la misma quincena.
+
+    Sin ella, corregir una pagada sería exactamente la operación que sirve para tapar
+    plata: la cifra grande cambia y nadie sabe quién, cuándo, ni por qué.
+
+    LAS CIFRAS VAN EN COLUMNAS Numeric, NO DENTRO DEL JSON. Son las que el dueño suma
+    con calculadora contra el papel viejo, y las que un reporte va a querer leer en SQL.
+    Un Decimal serializado a JSON depende de cómo lo escribió quien lo guardó; una
+    columna Numeric(14,2) no. En el JSON van los DESGLOSES —qué días entraron y qué
+    precios se corrigieron—, que son listas de largo variable y no se suman en SQL.
+
+    EL MOTIVO ES OBLIGATORIO Y NO TIENE DEFAULT, a propósito: una corrección sin motivo
+    escrito no se distingue de un error, y el motivo es lo que se imprime en el papel
+    nuevo para que quien lo recibe entienda qué pasó.
+
+    LA HORA LA ESCRIBE LA APLICACIÓN, CON MICROSEGUNDOS (`HoraDeRegistroMixin`), porque
+    estas filas se leen EN ORDEN —la v2, luego la v3— y en Postgres `now()` es la hora
+    de la TRANSACCIÓN: dos correcciones dentro de la misma petición quedarían con el
+    mismo instante. Es el mismo remedio de la bitácora y de los soportes de pago.
+    """
+
+    __tablename__ = "liquidaciones_correcciones"
+
+    liquidacion_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("liquidaciones.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # La versión que ESTE renglón dejó puesta: la primera corrección deja la 2.
+    version_nueva: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Sin default y sin server_default: el servicio lo exige no vacío tras strip.
+    motivo: Mapped[str] = mapped_column(String(500), nullable=False)
+    # El nombre de quien corrigió, congelado. El id va en `created_by` (AuditMixin),
+    # que es la única fuente de ese dato; esto es un hecho distinto: si mañana el
+    # usuario se borra o le cambian el nombre, el papel tiene que seguir diciendo quién
+    # lo corrigió.
+    corregido_por_nombre: Mapped[str | None] = mapped_column(String(150), default=None)
+
+    # LA FOTO DE LA PLATA, antes y después. Es el desglose que permite emparejar el
+    # papel viejo con el nuevo sumando, que es como el dueño lo verifica.
+    valor_total_antes: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    valor_total_despues: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    neto_antes: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    neto_despues: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    # Lo que ya se le había entregado cuando se corrigió. No cambia con la corrección
+    # —no se toca un solo pago— pero se congela aquí porque es la cifra contra la que
+    # se resta el neto nuevo, y sin ella el renglón no se puede releer solo.
+    pagado_al_momento: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    saldo_antes: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    saldo_despues: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    estado_antes: Mapped[str] = mapped_column(String(20), nullable=False)
+    estado_despues: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    # Los desgloses. `dias_agregados`: [{fecha, litros, precio_litro, valor}].
+    # `precios_corregidos`: [{fecha, litros, precio_antes, precio_despues, valor_antes,
+    # valor_despues}]. Van en JSON porque son listas de largo variable que no se suman
+    # en SQL; las cifras que SÍ se suman están arriba, en columnas.
+    dias_agregados: Mapped[list | None] = mapped_column(JSON, default=list)
+    precios_corregidos: Mapped[list | None] = mapped_column(JSON, default=list)
+
+    liquidacion: Mapped[Liquidacion] = relationship(back_populates="correcciones")
 
 
 class PagoLiquidacion(AuditMixin, Base):

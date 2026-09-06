@@ -4,7 +4,7 @@ replicando el proceso que la quesera llevaba en Excel.
 """
 import uuid
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Any, Iterable, NamedTuple, Sequence
 
@@ -18,6 +18,7 @@ from app.core.imagenes import leer_y_validar_soporte
 from app.core.logging_config import get_logger
 from app.core.pagination import PageParams
 from app.core.storage import (
+    HORA_COLOMBIA,
     MENSAJE_NO_CONFIGURADO,
     R2Client,
     borrar_del_bucket_al_confirmar,
@@ -1345,6 +1346,106 @@ def _refrescar_saldo(liquidacion: Liquidacion) -> None:
     liquidacion.saldo = liquidacion.neto_a_pagar - Decimal(liquidacion.pagado or 0)
 
 
+def _en_hora_de_colombia(momento: datetime | None) -> str:
+    """'06/09/2026 16:01' — un instante como lo lee una persona en Colombia.
+
+    EL PAPEL NO PUEDE CONTRADECIRSE A SÍ MISMO. El "Emitido" del encabezado se arma con
+    la hora local del servidor, así que imprimir la letra chica en UTC dejaba las dos
+    horas del MISMO documento con cinco horas de diferencia: arriba "Emitido 16:01" y
+    abajo "Corregido a las 21:01", o sea que se corrigió antes de existir. Y peor: la
+    frase que empareja las dos hojas —"reemplaza al comprobante emitido el ..."— mandaba
+    al productor a buscar una hora que no está impresa en ningún papel.
+
+    Lo que llega de la base puede venir sin zona (SQLite no la guarda): en ese caso se
+    asume UTC, que es como lo escribe `generar_pdf`, antes de convertir. Es la misma
+    pieza y el mismo criterio que ya usa `app/core/storage.py` para decirle a quien
+    comparte un soporte hasta cuándo le sirve el enlace.
+    """
+    if momento is None:
+        return "—"
+    if momento.tzinfo is None:
+        momento = momento.replace(tzinfo=timezone.utc)
+    return momento.astimezone(HORA_COLOMBIA).strftime("%d/%m/%Y %H:%M")
+
+
+def _fecha_iso_a_texto(iso: str | None) -> str:
+    """'2026-06-12' -> '12/06/2026', sin pasar por `date.fromisoformat` ni por `now`.
+
+    Va sobre el texto y no sobre un objeto fecha porque las cifras del renglón de
+    corrección viven en un JSON —donde las fechas son cadenas— y porque convertirlas a
+    `datetime` para volver a formatearlas es la clase de vuelta que un día corre un día
+    la fecha por la zona horaria. En Colombia (UTC-5) eso se ve: el papel diría 11/06
+    donde el sistema dice 12/06.
+    """
+    if not iso:
+        return "—"
+    partes = str(iso).split("-")
+    return "/".join(reversed(partes)) if len(partes) == 3 else str(iso)
+
+
+def ya_salio_papel_o_plata(liquidacion: Liquidacion) -> bool:
+    """¿De esta quincena ya salió algo que no se puede deshacer por dentro?
+
+    UNA SOLA PREGUNTA PARA LOS CINCO GUARDIAS, y esta función existe porque tenerla
+    escrita cinco veces ya costó plata. Son tres situaciones y las tres significan lo
+    mismo para quien va a mover una cifra:
+
+      1. HAY PAGOS. Se le entregó plata contra este comprobante; cambiar el total deja
+         esa entrega contra un neto que ya no existe.
+      2. ESTÁ 'pagada'. Incluye el caso que `tiene_pagos` no ve: la quincena que los
+         anticipos cubrieron EXACTO y se cerró por la rama `pendiente <= CERO` de
+         `pagar`, con `pagado = $0`. Esa plata salió igual, como anticipo y en la mano.
+      3. YA SE CORRIGIÓ (`version > 1`). Esta es la que agregó la corrección de
+         quincenas pagadas, y sin ella se abrió un hueco nuevo: corregir manda el
+         documento a 'parcial', así que en la familia del punto 2 —pagado en cero— las
+         otras DOS preguntas caen a la vez y todos los candados se sueltan de golpe.
+         Medido: borrar el pago de una corregida la devolvía a 'aprobada', y desde ahí
+         se reabrían el anticipo de $180.000 y el botón Anular; anularla soltaba sus
+         días y sus anticipos, y la próxima corrida de Generar volvía a cobrar los
+         $270.000 completos de un período que ya se pagó.
+
+    Que un comprobante haya emitido papel es tan definitivo como que haya movido plata:
+    el productor tiene una hoja en la mano y hay otra persona que puede reclamar contra
+    ella. Por eso las tres van juntas.
+
+    La usan `eliminar_pago`, `anular`, `validar_eliminar`, el candado de los anticipos
+    y —importándola, no repitiéndola— `RecepcionService._ya_salio_plata`.
+    """
+    return (
+        liquidacion.tiene_pagos
+        or liquidacion.estado == ESTADO_PAGADA
+        or int(getattr(liquidacion, "version", 1) or 1) > 1
+    )
+
+
+def _estado_tras_corregir(liquidacion: Liquidacion) -> str:
+    """El estado de una quincena que se acaba de corregir DESPUÉS de pagada.
+
+    NO ES `_estado_pago`, Y LA DIFERENCIA VALE UN CANDADO. `_estado_pago` devuelve
+    APROBADA cuando `pagado <= 0`, y donde se usa hoy es correcto: al borrar el último
+    pago el documento vuelve al estado del que salió. Aquí sería un retroceso, porque
+    existe una familia de quincenas marcadas 'pagada' CON `pagado = $0` — las que los
+    anticipos cubrieron exacto y se cerraron por la rama `pendiente <= CERO` de `pagar`.
+
+    Con `_estado_pago`, corregir una de esas la mandaría a 'aprobada'. Y el candado de
+    Recepción diaria pregunta `tiene_pagos or estado == 'pagada'` (`_ya_salio_plata`,
+    en recepcion/service.py): con `pagado = $0` las dos partes caen a la vez y TODOS los
+    candados del período desaparecen de un golpe, incluidos los del comprobante del
+    TRANSPORTADOR, que es de otra persona y ni siquiera sale en esta pantalla.
+
+    Así que aquí el estado no va nunca para atrás: si todavía queda algo por entregar la
+    quincena queda 'parcial', y si no queda nada, 'pagada'. Las dos son la verdad y las
+    dos las pintan ya la lista, el stepper y los filtros — que es la razón de no inventar
+    un estado nuevo (ver la nota al lado de `_estado_pago`).
+
+    OJO, PORQUE NO ALCANZA SOLO: 'parcial' con `pagado = $0` TAMPOCO traba los días, por
+    lo mismo de arriba. Lo que los traba es `version > 1`, que `_ya_salio_plata` mira
+    desde este trabajo: una quincena que ya emitió papel y se corrigió no se toca por la
+    puerta de Recepción diaria, se corrige por el botón.
+    """
+    return ESTADO_PARCIAL if Decimal(liquidacion.saldo) > CERO else ESTADO_PAGADA
+
+
 def _no_sale_un_peso_por_la_deuda(liquidacion: Liquidacion) -> str | None:
     """El aviso cuando el neto se fue a cero (o menos) por la deuda arrastrada.
 
@@ -2653,6 +2754,509 @@ class LiquidacionService(BaseService[Liquidacion]):
         )
         return liquidacion
 
+    # =====================================================================
+    # CORREGIR UNA QUINCENA QUE YA SE PAGÓ
+    # =====================================================================
+    # Lo pidió el dueño: "que si soy administrador de empresa pueda editar la
+    # liquidación que ya está pagada, es que se le olvidó un detalle".
+    #
+    # ES LA PRIMERA VEZ EN EL SISTEMA QUE SE ESCRIBE LA CIFRA GRANDE DE UNA PAGADA, y
+    # conviene decirlo así de claro. El único precedente —`refrescar_transporte_
+    # informativo`— toca `valor_transporte` en la del proveedor, que es INFORMATIVA: no
+    # entra en el valor total, ni en el saldo, ni en el PDF, "así que ponerla al día no
+    # desdice ningún papel firmado". Esto cae del otro lado de esa línea: toca litros,
+    # valor total y saldo, que son las tres cifras que el productor tiene IMPRESAS.
+    #
+    # La regla que reemplaza a "no se toca" es "NO SE TOCA SIN QUE EL PAPEL LO DIGA":
+    # permiso que tiene un solo rol, motivo escrito obligatorio, la cifra a la vista
+    # antes de escribir, la versión del folio que sube, y el renglón de corrección con
+    # las dos cifras. Nada de eso es adorno: son las cinco cosas que hacen que esta
+    # operación no sirva para tapar plata.
+    #
+    # LO QUE **NO** HACE, y cada "no" es una guarda que se queda cerrada:
+    #  · NO pasa por borrador. Si pasara, `_aplicar_anticipos_pendientes` se despertaría
+    #    y un anticipo registrado tarde se lo tragaría el comprobante ya entregado.
+    #  · NO llama a `recalcular` ni a `recuadrar`, por lo mismo y porque el segundo es
+    #    automático: corregir una pagada tiene que ser un botón, no un efecto secundario.
+    #  · NO borra ni toca un solo pago, ni sus soportes. `pagado` no se mueve.
+    #  · NO suelta una sola marca (`liquidacion_id` de las recepciones, anticipos,
+    #    deudas). Esa marca es LO ÚNICO que impide que los días ya pagados se cobren
+    #    otra vez, porque `solapada_para_periodo` deja pasar a propósito a las pagadas.
+    #  · NO quita días, solo agrega o corrige el precio de los que ya están. Quitar uno
+    #    exige apagarlo —y se iría AL MISMO TIEMPO del papel del flete, que es la misma
+    #    fila de recepciones— o soltarle la marca, y entonces la próxima corrida se lo
+    #    cobra de nuevo.
+    #  · NO toca liquidaciones de FLETE. Ahí el renglón es (día, ruta), el recálculo
+    #    hace `detalles.clear()` y esos renglones son la memoria que dice qué viaje ya
+    #    se cobró; borrarlos hace que el mismo viaje se pague dos veces.
+    def _dias_sueltos_del_periodo(self, liquidacion: Liquidacion) -> list[RecepcionLeche]:
+        """Los días de ese proveedor, dentro del período, que NO están en ninguna
+        liquidación: los candidatos a entrar.
+
+        `liquidacion_id IS NULL` es la pregunta entera. Un día que ya está en OTRO
+        comprobante no puede entrar en este —se cobraría dos veces— y uno que ya está en
+        este tampoco: para esos está la corrección del precio.
+        """
+        stmt = (
+            RecepcionRepository(self.db, self.ctx.empresa_id)
+            .base_query()
+            .where(
+                RecepcionLeche.proveedor_id == liquidacion.proveedor_id,
+                RecepcionLeche.liquidacion_id.is_(None),
+                RecepcionLeche.estado == "activo",
+                RecepcionLeche.fecha >= liquidacion.periodo_inicio,
+                RecepcionLeche.fecha <= liquidacion.periodo_fin,
+            )
+            .order_by(RecepcionLeche.fecha)
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def _exigir_corregible(self, liquidacion: Liquidacion) -> None:
+        """Las cinco condiciones para poder corregir. En este orden y sin saltarse una.
+
+        El orden importa: `_exigir_deuda_no_trasladada` va de PRIMERO porque es el
+        único caso en el que la respuesta es "no se puede, y esto es lo que hay que
+        hacer primero" — el mensaje nombra la otra liquidación. Si fuera de último, el
+        dueño leería antes un "solo se corrigen las de proveedor" que no le sirve.
+        """
+        # LA VENTANA DE LA CORRECCIÓN SE CIERRA CUANDO LA DEUDA VIAJA, y no se abre ni
+        # para el Administrador Empresa. La razón está en el papel, no en la política:
+        # el renglón del resumen sale de la COLUMNA CONGELADA `saldo_anterior` de la
+        # otra liquidación, mientras la nota al pie imprime `le_queda_debiendo` EN VIVO
+        # desde esta. Mover un peso aquí hace que esa hoja se contradiga sola: "− $120.000"
+        # arriba y "donde quedó debiendo $60.000" abajo, en un papel que el dueño suma
+        # con calculadora. Y esa hoja también puede estar ya en la mano del productor.
+        _exigir_deuda_no_trasladada(liquidacion, "corregir")
+        if liquidacion.tipo != TIPO_PROVEEDOR:
+            raise BusinessError(
+                "Solo se puede corregir una quincena de leche. Para el flete, genere un "
+                "segundo comprobante del período: una liquidación pagada no reserva sus "
+                "fechas, así que el día anotado tarde entra ahí"
+            )
+        if liquidacion.estado not in (ESTADO_PAGADA, ESTADO_PARCIAL):
+            raise BusinessError(
+                f"Esta liquidación está en '{liquidacion.estado}': la corrección es solo "
+                "para las que ya se pagaron. Esta todavía se puede editar por el camino "
+                "normal"
+            )
+
+    def _nombre_de_quien_corrige(self) -> str | None:
+        usuario = getattr(self.ctx, "user", None)
+        if usuario is None:
+            return None
+        nombre = getattr(usuario, "nombre", "") or ""
+        apellido = getattr(usuario, "apellido", "") or ""
+        return f"{nombre} {apellido}".strip()[:150] or None
+
+    def _nota_del_flete(self, liquidacion: Liquidacion, recepcion: RecepcionLeche) -> str | None:
+        """Qué le va a pasar al FLETE del día que se está por agregar.
+
+        ES EL PAPEL DE OTRA PERSONA y esta operación no lo toca. El dueño que suma a
+        mano va a preguntar por qué ese día no trae flete —o por qué sí—, y se le
+        responde EN EL DIÁLOGO, no en soporte. Son TRES respuestas y hay que darlas en
+        ESTE orden, porque preguntar al revés hizo mentir a las dos primeras versiones
+        de esta función:
+
+        1. EL FLETE DE ESE DÍA YA ESTÁ EN UN COMPROBANTE DEL TRANSPORTADOR
+           (`liquidacion_transporte_id` puesto). Va de PRIMERO. Antes no se preguntaba, y
+           por eso la nota se contestaba a sí misma: el renglón que `viajes_ya_cobrados`
+           encontraba reservado era EL DEL PROPIO DÍA que se estaba agregando, así que
+           anunciaba "$0,00" de un flete de $150.000 que ya se le había pagado al
+           conductor.
+        2. ES DE DÍA FIJO Y ESE VIAJE YA SE COBRÓ en otro renglón. Ahí sí vale $0,00, y
+           es correcto: una tarifa por día completo no se vuelve a cobrar por recoger un
+           proveedor más.
+        3. CUALQUIER OTRO CASO: entra normal, y se dice CON LA CIFRA, que es la que el
+           dueño va a sumar.
+
+        `viajes_ya_cobrados` SOLO SE CONSULTA EN DÍA FIJO, que es para quien está
+        escrita. Preguntarla por litro daba por gratis fletes reales —medido: 100 L a
+        $242,76 son $24.276,00 anunciados como $0,00— porque por litro cada litro se paga
+        aparte y la leche anotada tarde SÍ suma flete nuevo.
+        """
+        if recepcion.transportador_id is None:
+            return None
+        if recepcion.liquidacion_transporte_id is not None:
+            return (
+                "El flete de este día ya está liquidado en un comprobante del "
+                "transportador: agregarlo aquí no le mueve un peso a ese papel"
+            )
+        tarifa = _tarifa_de_hoy(recepcion)
+        if tarifa.es_dia_fijo:
+            ya_cobrados = self.repo.viajes_ya_cobrados(recepcion.transportador_id)
+            if (recepcion.fecha, recepcion.ruta_id) in ya_cobrados:
+                return (
+                    "Ese viaje ya se le cobró al transportador por día completo: el "
+                    "flete de este día vale $0,00 y así se queda"
+                )
+            return (
+                "El flete de este día todavía no se ha liquidado: entra por día "
+                f"completo ({pesos(tarifa.valor)}) en el próximo comprobante del "
+                "transportador"
+            )
+        cuanto = _centavos(Decimal(recepcion.cantidad_litros) * tarifa.valor)
+        return (
+            "El flete de este día todavía no se ha liquidado: entra por litro "
+            f"({litros(recepcion.cantidad_litros)} x {pesos(tarifa.valor)} = "
+            f"{pesos(cuanto)}) en el próximo comprobante del transportador"
+        )
+
+    def _simular_correccion(
+        self,
+        liquidacion: Liquidacion,
+        recepciones_a_incluir: list[uuid.UUID],
+        precios: list[Any],
+    ) -> tuple[Decimal, Decimal, Decimal, list[RecepcionLeche], dict[uuid.UUID, Decimal]]:
+        """Calcula cómo quedarían las cifras SIN escribir nada, y valida de paso.
+
+        Devuelve (valor_total_nuevo, neto_nuevo, saldo_nuevo, días que entran, precios
+        por recepción). La previsualización y la corrección de verdad llaman a ESTA
+        MISMA función: si cada una hiciera su cuenta, el diálogo podría mostrar una
+        cifra y el botón escribir otra — y esa es exactamente la clase de diferencia que
+        el dueño descubre con la calculadora cuando ya es tarde.
+        """
+        sueltos = {r.id: r for r in self._dias_sueltos_del_periodo(liquidacion)}
+        entran: list[RecepcionLeche] = []
+        # SIN REPETIDOS, y con `dict.fromkeys` en vez de `set` para conservar el orden en
+        # que el dueño marcó las casillas —que es el orden en que va a leer el desglose—.
+        #
+        # Un doble clic, un reintento o una lista que se duplica al reabrir el diálogo
+        # mandaban el mismo día dos veces, y eso abría el hueco EXACTO que el docstring
+        # de esta función promete que no existe: la previsualización sumaba el día dos
+        # veces y anunciaba VALOR TOTAL $860.000 con $360.000 por entregar, mientras el
+        # botón escribía $680.000 con $180.000 —porque el recálculo relee de la base y
+        # una fila marcada dos veces sigue siendo una fila—. El dueño aprobaba una cifra
+        # y salía a buscar $360.000 en efectivo para un saldo de $180.000.
+        #
+        # Y arreglarlo AQUÍ arregla también el rastro: `corregir_pagada` arma
+        # `dias_agregados` recorriendo el `entran` que devuelve esta función, así que el
+        # desglose ya no puede sumar $360.000 al lado de una cifra grande que subió
+        # $180.000 — que es la regla de la casa rota dentro del propio soporte de la
+        # corrección.
+        for recepcion_id in dict.fromkeys(recepciones_a_incluir):
+            recepcion = sueltos.get(recepcion_id)
+            if recepcion is None:
+                raise BusinessError(
+                    "Uno de los días que escogió ya no está suelto: puede que otra "
+                    "liquidación se lo haya llevado. Vuelva a abrir la corrección"
+                )
+            entran.append(recepcion)
+
+        # El precio nuevo se resuelve contra la RECEPCIÓN del día, que es donde vive de
+        # verdad: el renglón del comprobante es su reflejo. Igual que en
+        # `actualizar_precio_detalle`.
+        nuevos_precios: dict[uuid.UUID, Decimal] = {}
+        actuales = {r.fecha: r for r in self._recepciones_de(liquidacion)}
+        for cambio in precios:
+            detalle = next(
+                (
+                    d
+                    for d in liquidacion.detalles
+                    if d.id == cambio.detalle_id and d.deleted_at is None
+                ),
+                None,
+            )
+            if detalle is None:
+                raise NotFoundError("Ese día no pertenece a la liquidación")
+            recepcion = actuales.get(detalle.fecha)
+            if recepcion is None:
+                raise BusinessError(
+                    "No se encontró la recepción de ese día; no se puede corregir su precio"
+                )
+            precio = _centavos(cambio.precio_litro)
+            nuevo_bruto = _centavos(Decimal(recepcion.cantidad_litros) * precio)
+            nuevo_neto = (
+                nuevo_bruto
+                + Decimal(recepcion.bonificaciones)
+                - Decimal(recepcion.descuentos)
+            )
+            # Se valida ANTES de escribir nada, igual que en `actualizar_precio_detalle`:
+            # un precio que deja el día en rojo no puede dejar a medias ni la recepción
+            # ni el comprobante.
+            if nuevo_neto < CERO:
+                raise BusinessError(
+                    "Con ese precio el valor del día queda negativo: revise los descuentos"
+                )
+            nuevos_precios[recepcion.id] = precio
+
+        # LAS SUMAS SALEN DE LA MISMA FUNCIÓN QUE USA EL RECÁLCULO DE VERDAD.
+        def bruto_de(recepcion: RecepcionLeche) -> Decimal:
+            precio = nuevos_precios.get(recepcion.id)
+            if precio is None:
+                return Decimal(recepcion.valor_bruto)
+            return _centavos(Decimal(recepcion.cantidad_litros) * precio)
+
+        todas = list(actuales.values()) + entran
+        valor_bruto = sum((bruto_de(r) for r in todas), CERO)
+        bonificaciones = sum((Decimal(r.bonificaciones) for r in todas), CERO)
+        descuentos = sum((Decimal(r.descuentos) for r in todas), CERO)
+        valor_total = valor_bruto + bonificaciones - descuentos
+        # El neto se arma con la MISMA resta que la propiedad del modelo, y con las
+        # columnas que la corrección NO toca: anticipos y saldo_anterior se quedan como
+        # están, porque ya quedaron aplicados cuando se generó la quincena.
+        neto = valor_total - Decimal(liquidacion.anticipos or 0) - Decimal(
+            liquidacion.saldo_anterior or 0
+        )
+        saldo = neto - Decimal(liquidacion.pagado or 0)
+        return valor_total, neto, saldo, entran, nuevos_precios
+
+    def previsualizar_correccion(self, entity_id: uuid.UUID, payload: Any) -> Any:
+        """El antes y el después, sin escribir un peso.
+
+        Es la calculadora del dueño puesta en la pantalla: ve la cifra que va a quedar y
+        la compara con el papel que tiene al lado ANTES de confirmar. No toma el candado
+        de escritura a propósito —no escribe— pero por eso mismo su resultado es una
+        foto: la corrección de verdad vuelve a calcular todo con el candado puesto.
+        """
+        from app.modules.liquidaciones.schemas import (
+            DiaSueltoRead,
+            PrevisualizacionCorreccion,
+        )
+
+        liquidacion = self.repo.get_or_fail(entity_id)
+        self._exigir_corregible(liquidacion)
+
+        sueltos = self._dias_sueltos_del_periodo(liquidacion)
+        valor_total, neto, saldo, _entran, _precios = self._simular_correccion(
+            liquidacion,
+            list(payload.recepciones_a_incluir or []),
+            list(payload.precios or []),
+        )
+
+        avisos: list[str] = []
+        if liquidacion.version > 1:
+            avisos.append(
+                f"Esta quincena ya se corrigió {liquidacion.version - 1} "
+                f"{'vez' if liquidacion.version == 2 else 'veces'}: el productor puede "
+                f"tener {liquidacion.version} hojas de la misma quincena. Recójale las "
+                "anteriores"
+            )
+        if saldo > CERO:
+            avisos.append(
+                "Esto NO le entrega la plata: deja pendiente lo que falta. Después hay "
+                "que oprimir Pagar"
+            )
+        if saldo < CERO:
+            avisos.append(
+                "Se le pagó de más. Esa plata ya salió de la caja en efectivo y se "
+                "recupera descontándola de la quincena siguiente, igual que un anticipo; "
+                "si el productor deja de entregar leche, no vuelve"
+            )
+            avisos.append(
+                "Mientras esa deuda no se le cobre, este productor sale en 'omitidas' si "
+                "se intenta generar otro comprobante que se pise con este período. Se "
+                "destraba generándole la quincena siguiente"
+            )
+
+        return PrevisualizacionCorreccion(
+            dias_sueltos=[
+                DiaSueltoRead(
+                    recepcion_id=r.id,
+                    fecha=r.fecha,
+                    litros=Decimal(r.cantidad_litros),
+                    precio_litro=Decimal(r.precio_litro),
+                    valor=Decimal(r.valor_bruto)
+                    + Decimal(r.bonificaciones)
+                    - Decimal(r.descuentos),
+                    nota_flete=self._nota_del_flete(liquidacion, r),
+                )
+                for r in sueltos
+            ],
+            valor_total_antes=Decimal(liquidacion.valor_total),
+            valor_total_despues=valor_total,
+            neto_antes=liquidacion.neto_a_pagar,
+            neto_despues=neto,
+            pagado=Decimal(liquidacion.pagado or 0),
+            saldo_antes=Decimal(liquidacion.saldo),
+            saldo_despues=saldo,
+            estado_antes=liquidacion.estado,
+            estado_despues=(ESTADO_PARCIAL if saldo > CERO else ESTADO_PAGADA),
+            queda_por_entregar=saldo if saldo > CERO else CERO,
+            se_le_pago_de_mas=-saldo if saldo < CERO else CERO,
+            version_actual=liquidacion.version,
+            avisos=avisos,
+        )
+
+    def corregir_pagada(self, entity_id: uuid.UUID, payload: Any) -> Liquidacion:
+        """Corrige una quincena YA PAGADA y emite la versión siguiente del comprobante.
+
+        LOS PASOS VAN EN ESTE ORDEN Y NINGUNO SOBRA. Están numerados porque el orden es
+        la mitad de la corrección: validar después de escribir deja el comprobante a
+        medias, y marcar los días después de recalcular hace que el recálculo no los vea
+        —`_recepciones_de` solo relee las que YA tienen la marca puesta, así que sin el
+        paso 6 la operación es un no-op silencioso que sube la versión y no cambia una
+        cifra—.
+
+        CÓMO QUEDA LA PLATA, con las cifras del dueño:
+
+        · SUBE (el día olvidado). Quincena de $500.000 pagada con $500.000. Entra el día
+          del 12/06 por $180.000: valor_total $680.000, neto $680.000, `pagado` NO SE
+          TOCA y sigue en $500.000, saldo = 680.000 − 500.000 = $180.000, estado
+          'parcial'. El comprobante dice: VALOR TOTAL $680.000 − Anticipos $0 − Pagado
+          $500.000 = QUEDA POR ENTREGARLE $180.000. Cuadra al centavo, y el renglón
+          'Pagado' ya se imprime hoy.
+        · BAJA (el precio mal tecleado). El día del 08/06 se liquidó a $2.000 y era
+          $1.500: el total baja a $400.000 contra $500.000 ya entregados. saldo =
+          −$100.000, `le_queda_debiendo` = $100.000, estado 'pagada' — y es la verdad:
+          salió toda la plata y $100.000 de más. El cobro YA FUNCIONA sin escribir una
+          línea: `_solo_las_que_deben` pide saldo < 0 y `deuda_trasladada_a_id` nulo, y
+          NO excluye a las pagadas, así que la quincena siguiente se lo descuenta sola.
+        """
+        from app.modules.liquidaciones.models import CorreccionLiquidacion
+
+        # (1) y (2): la liquidación, y el candado ANTES de mirarle una cifra.
+        # `_bloquear` (FOR UPDATE) es obligatorio y aquí no se puede ahorrar: `recalcular`
+        # y `recuadrar` se lo ahorran porque exigen borrador, y a un borrador nadie le
+        # está registrando un pago al mismo tiempo. Esta operación corre justamente sobre
+        # documentos vivos que sí reciben pagos: sin el candado, una corrección y un pago
+        # simultáneos leen el mismo `pagado` y el segundo escribe encima del primero.
+        liquidacion = self.repo.get_or_fail(entity_id)
+        liquidacion = _bloquear(self.db, liquidacion)
+
+        # (3), (4) y (5): deuda no trasladada, tipo proveedor, estado pagada o parcial.
+        self._exigir_corregible(liquidacion)
+
+        # (6) el motivo, que es lo que hace que esto no sirva para tapar plata.
+        motivo = (payload.motivo or "").strip()
+        if not motivo:
+            raise BusinessError(
+                "Escriba por qué se corrige esta quincena: queda impreso en el "
+                "comprobante nuevo y es lo que le explica al productor por qué su papel "
+                "dice otra cifra"
+            )
+
+        recepciones_a_incluir = list(payload.recepciones_a_incluir or [])
+        precios = list(payload.precios or [])
+        if not recepciones_a_incluir and not precios:
+            raise BusinessError(
+                "No se escogió ningún día ni ningún precio: no hay nada que corregir"
+            )
+
+        # (7) y (8): se valida TODO —los días sueltos y los precios— y se calcula el
+        # resultado, antes de escribir el primer peso. Si algo no sirve, el comprobante
+        # no se queda a medias.
+        _valor_total, _neto, _saldo, entran, nuevos_precios = self._simular_correccion(
+            liquidacion, recepciones_a_incluir, precios
+        )
+
+        antes = serialize_entity(liquidacion)
+        valor_total_antes = Decimal(liquidacion.valor_total)
+        neto_antes = liquidacion.neto_a_pagar
+        saldo_antes = Decimal(liquidacion.saldo)
+        estado_antes = liquidacion.estado
+        pagado_al_momento = Decimal(liquidacion.pagado or 0)
+
+        # (9) LA MARCA. Sin esto la operación no hace nada: `_recepciones_de` solo relee
+        # las recepciones que ya apuntan a esta liquidación. Y es también lo que impide
+        # que ese día se lo lleve otra corrida después.
+        dias_agregados: list[dict[str, Any]] = []
+        for recepcion in entran:
+            recepcion.liquidacion_id = liquidacion.id
+            recepcion.updated_by = self.ctx.user_id
+            dias_agregados.append(
+                {
+                    "fecha": recepcion.fecha.isoformat(),
+                    "litros": str(Decimal(recepcion.cantidad_litros)),
+                    "precio_litro": str(Decimal(recepcion.precio_litro)),
+                    "valor": str(
+                        Decimal(recepcion.valor_bruto)
+                        + Decimal(recepcion.bonificaciones)
+                        - Decimal(recepcion.descuentos)
+                    ),
+                }
+            )
+
+        # (10) el precio nuevo se escribe en la RECEPCIÓN, que es donde vive: el renglón
+        # del comprobante es su reflejo y lo rearma el recálculo del paso 11.
+        precios_corregidos: list[dict[str, Any]] = []
+        recepciones_actuales = {r.id: r for r in self._recepciones_de(liquidacion)}
+        for recepcion_id, precio in nuevos_precios.items():
+            recepcion = recepciones_actuales[recepcion_id]
+            bruto_nuevo = _centavos(Decimal(recepcion.cantidad_litros) * precio)
+            precios_corregidos.append(
+                {
+                    "fecha": recepcion.fecha.isoformat(),
+                    "litros": str(Decimal(recepcion.cantidad_litros)),
+                    "precio_antes": str(Decimal(recepcion.precio_litro)),
+                    "precio_despues": str(precio),
+                    "valor_antes": str(Decimal(recepcion.valor_bruto)),
+                    "valor_despues": str(bruto_nuevo),
+                }
+            )
+            recepcion.precio_litro = precio
+            recepcion.valor_bruto = bruto_nuevo
+            recepcion.valor_neto = (
+                bruto_nuevo
+                + Decimal(recepcion.bonificaciones)
+                - Decimal(recepcion.descuentos)
+            )
+            recepcion.updated_by = self.ctx.user_id
+
+        # La sesión no hace autoflush: sin este flush el recálculo volvería a consultar
+        # las recepciones y leería los valores viejos.
+        self.db.flush()
+
+        # (11) EL RECÁLCULO DIRECTO, nunca `recalcular()`. La diferencia vale plata:
+        # `recalcular` llama a `_aplicar_anticipos_pendientes`, y un anticipo registrado
+        # tarde con fecha dentro del período se lo tragaría este comprobante ya
+        # entregado — el papel en la mano diría PAGADA $180.000 mientras el sistema dice
+        # que debe $300.000 sobre el mismo folio.
+        self._recalcular_desde_recepciones(liquidacion)
+
+        # (12) EL ESTADO SE VUELVE A DEDUCIR, cosa que hoy no hace ningún camino de
+        # recálculo. Es UNA línea y es la que hace que las tres pantallas y las dos
+        # guardas de pago se arreglen solas: con 'parcial', `_exigir_pagable` deja abonar,
+        # la lista pinta la insignia "por pagar" y el tablero cuenta los $180.000. Sin
+        # ella el comprobante se queda colgado en 'pagada' con saldo pendiente: esos
+        # $180.000 quedan invisibles en las tres pantallas y además IMPAGABLES ("no se
+        # puede pasar de 'pagada' a 'pagada'").
+        liquidacion.estado = _estado_tras_corregir(liquidacion)
+
+        # (13) la versión, que es lo que hace que el papel nuevo se llame distinto.
+        liquidacion.version = int(liquidacion.version or 1) + 1
+        liquidacion.updated_by = self.ctx.user_id
+
+        # (14) el renglón de corrección: la memoria de por qué el papel del productor
+        # dice otra cifra. Las cifras van en columnas Numeric y no dentro del JSON
+        # porque son las que el dueño suma con calculadora contra la hoja vieja.
+        correccion = CorreccionLiquidacion(
+            empresa_id=self.ctx.empresa_id,
+            liquidacion_id=liquidacion.id,
+            version_nueva=liquidacion.version,
+            motivo=motivo,
+            corregido_por_nombre=self._nombre_de_quien_corrige(),
+            valor_total_antes=valor_total_antes,
+            valor_total_despues=Decimal(liquidacion.valor_total),
+            neto_antes=neto_antes,
+            neto_despues=liquidacion.neto_a_pagar,
+            pagado_al_momento=pagado_al_momento,
+            saldo_antes=saldo_antes,
+            saldo_despues=Decimal(liquidacion.saldo),
+            estado_antes=estado_antes,
+            estado_despues=liquidacion.estado,
+            dias_agregados=dias_agregados,
+            precios_corregidos=precios_corregidos,
+            created_by=self.ctx.user_id,
+            updated_by=self.ctx.user_id,
+        )
+        self.db.add(correccion)
+        self.db.flush()
+
+        # (15) la bitácora, con VERBO PROPIO y no el 'editar' genérico: en el libro esto
+        # tiene que poder buscarse como lo que es.
+        self._audit("corregir", liquidacion.id, antes, serialize_entity(liquidacion))
+        return liquidacion
+
+    def correcciones_de(self, entity_id: uuid.UUID) -> list[Any]:
+        """Las correcciones de una quincena, de la más vieja a la más nueva.
+
+        Va por su propio endpoint y no dentro de `LiquidacionRead` a propósito: la
+        relación es diferida, así que meterla en el esquema dispararía una consulta POR
+        FILA al listar una página, para un dato que en casi todas está vacío.
+        """
+        liquidacion = self.repo.get_or_fail(entity_id)
+        return list(liquidacion.correcciones)
+
     # ------------------------------------------------- anticipos del borrador
     def _anticipos_de(self, liquidacion: Liquidacion) -> list[Anticipo]:
         """Los anticipos que hoy están marcados contra esta liquidación.
@@ -3264,7 +3868,21 @@ class LiquidacionService(BaseService[Liquidacion]):
         AdjuntoPagoLiquidacionService(self.db, self.ctx).limpiar_de_pago(pago.id)
         liquidacion.pagado = max(Decimal(liquidacion.pagado) - valor, CERO)
         _refrescar_saldo(liquidacion)
-        liquidacion.estado = _estado_pago(liquidacion.neto_a_pagar, liquidacion.pagado)
+        # EL ESTADO DE UNA QUINCENA YA CORREGIDA NO PUEDE IR PARA ATRAS. `_estado_pago`
+        # devuelve APROBADA cuando `pagado <= 0`, y para el caso normal es lo correcto:
+        # se borro el ultimo pago y el documento vuelve al estado del que salio. Pero de
+        # una corregida ya salio PAPEL: mandarla a 'aprobada' —que significa "cifras en
+        # firme por las que no ha salido plata"— reabre de un golpe el anticipo que la
+        # salda y el boton Anular. Medido: quincena de $180.000 cubierta exacto por un
+        # anticipo de $180.000, corregida a $270.000 y pagada; al borrarle ese pago
+        # quedaba en 'aprobada' con version 2, y desde ahi se le podia mover el anticipo
+        # (el neto del papel entregado pasaba de $90.000 a $260.000) o anularla, que
+        # suelta sus dias para que Generar los vuelva a cobrar completos.
+        liquidacion.estado = (
+            _estado_tras_corregir(liquidacion)
+            if int(liquidacion.version or 1) > 1
+            else _estado_pago(liquidacion.neto_a_pagar, liquidacion.pagado)
+        )
         liquidacion.updated_by = self.ctx.user_id
         self.db.delete(pago)
         self.db.flush()
@@ -3331,7 +3949,7 @@ class LiquidacionService(BaseService[Liquidacion]):
             PagoLiquidacionCreate(
                 fecha=date.today(),
                 valor=pendiente,
-                observaciones="Pago total de la liquidación",
+                observaciones="Pago del saldo pendiente de la liquidación",
             ),
         )
 
@@ -3342,15 +3960,38 @@ class LiquidacionService(BaseService[Liquidacion]):
         # a ese comprobante cobrando una deuda de un documento anulado. El mensaje
         # nombra cuál anular primero.
         _exigir_deuda_no_trasladada(liquidacion, "anular")
-        if liquidacion.estado == ESTADO_PAGADA:
-            raise BusinessError("No se puede anular una liquidación ya pagada")
+        # EL ORDEN DE ESTOS DOS GUARDIAS ESTABA AL REVÉS, y dejaba al dueño contra un
+        # muro mudo. Una quincena pagada casi siempre tiene pagos, así que el primero en
+        # dispararse era el de 'pagada' —que dice "no se puede" y nada más— y el mensaje
+        # que SÍ nombra la salida ("elimine primero los pagos") no se alcanzaba nunca. Lo
+        # que el dueño necesita al chocar con esto no es enterarse de que no se puede,
+        # sino saber por dónde salir.
+        #
         # Anular suelta las recepciones y los anticipos para volver a liquidar el
-        # período. Con un abono hecho eso dejaría un pago colgando de un
-        # documento que ya no representa nada: primero se borra el pago.
+        # período. Con un abono hecho eso dejaría un pago colgando de un documento que ya
+        # no representa nada: primero se borra el pago.
         if liquidacion.tiene_pagos:
             raise BusinessError(
-                "No se puede anular una liquidación con pagos registrados: "
-                "elimine primero los pagos"
+                "No se puede anular una liquidación con pagos registrados: elimine "
+                "primero los pagos. Si lo único que necesita es arreglarle una cifra "
+                "—un día que faltó o un precio mal digitado— use 'Corregir esta "
+                "quincena': eso conserva los pagos y sus soportes"
+            )
+        if liquidacion.estado == ESTADO_PAGADA:
+            raise BusinessError(
+                "No se puede anular una liquidación ya pagada. Si lo que necesita es "
+                "arreglarle una cifra, use 'Corregir esta quincena'"
+            )
+        # Y TAMPOCO LA QUE YA EMITIO UN COMPROBANTE CORREGIDO, aunque ahora este en
+        # 'parcial' y sin pagos. Anular suelta sus dias y sus anticipos, asi que la
+        # proxima corrida de Generar volveria a cobrar el periodo completo — y el
+        # productor se queda con DOS hojas que ya no se pueden cuadrar contra nada.
+        if int(liquidacion.version or 1) > 1:
+            raise BusinessError(
+                f"De esta quincena ya salieron {liquidacion.version} comprobantes (el "
+                "original y sus correcciones): no se puede anular. Si hay que rehacerla "
+                "por completo, primero elimine los pagos y hable con quien tenga los "
+                "papeles entregados"
             )
         self._soltar_lo_apartado(
             liquidacion, "se anuló la liquidación que se estaba cobrando esta deuda"
@@ -3459,6 +4100,28 @@ class LiquidacionService(BaseService[Liquidacion]):
     # `test_21b_no_hay_forma_de_borrar_una_liquidacion_por_la_api`. El día que se agregue
     # el DELETE, esa prueba falla y dice, con nombre y apellido, que estos dos métodos
     # pasaron a estar vivos y que hay que probarlos midiendo la plata.
+    def validar_actualizar(self, obj: Liquidacion, data: dict[str, Any]) -> None:
+        """Las observaciones de un comprobante YA ENTREGADO no se reescriben a la brava.
+
+        ESTE GUARDIA NO EXISTÍA. `PUT /liquidaciones/{id}` caía directo en
+        `BaseService.actualizar` sin ninguna pregunta sobre el estado, y lo único que lo
+        contenía era que el esquema solo trae `observaciones`. Pero las observaciones SE
+        IMPRIMEN en el comprobante: cualquiera con permiso de 'editar' —que también
+        tiene el rol Compras— podía reescribirle el texto a una quincena pagada que ya
+        está en la mano del productor, y la reimpresión diría algo distinto al papel
+        entregado sin que ninguna cifra descuadrara.
+
+        Va ANTES de abrir las cifras y no después: sería absurdo poner motivo, versión y
+        renglón de corrección para el valor total, y dejar el texto que se imprime al
+        lado abierto de par en par.
+        """
+        if obj.estado in (ESTADO_PAGADA, ESTADO_PARCIAL) or obj.tiene_pagos:
+            raise BusinessError(
+                "Esta quincena ya se pagó: sus observaciones se imprimen en el "
+                "comprobante que el tercero tiene en la mano. Use 'Corregir esta "
+                "quincena', que deja escrito el motivo y sube la versión del papel"
+            )
+
     def validar_eliminar(self, obj: Liquidacion) -> None:
         """Lo que tiene que estar en orden antes de borrar en suave una liquidación.
 
@@ -3476,6 +4139,23 @@ class LiquidacionService(BaseService[Liquidacion]):
             raise BusinessError(
                 "No se puede eliminar una liquidación con pagos registrados: "
                 "elimine primero los pagos"
+            )
+        # Y TAMPOCO LA QUE ESTÁ MARCADA PAGADA AUNQUE `pagado` ESTÉ EN CERO. Este
+        # renglón faltaba, y `anular` sí lo tiene. La diferencia no es teórica: hay una
+        # familia de quincenas 'pagada' con `pagado = $0` —las que los anticipos
+        # cubrieron exacto, por la rama `pendiente <= CERO` de `pagar`—, y esas pasaban
+        # el guardia de arriba porque `tiene_pagos` es `pagado > 0`. Borrar una suelta
+        # sus días y sus anticipos, y la próxima corrida de "Generar" se los vuelve a
+        # liquidar completos: los $180.000 de leche que ya se saldaron con $180.000 de
+        # anticipo salen otra vez por la caja. Hoy solo lo salva que el router no exponga
+        # el DELETE; un guardia que depende de que nadie escriba una ruta no es un
+        # guardia.
+        # La pregunta completa —pagos, 'pagada', o ya corregida— en una sola funcion:
+        # corregir manda el documento a 'parcial', asi que preguntar solo por 'pagada'
+        # dejaba pasar justo a la que ya emitio dos papeles.
+        if ya_salio_papel_o_plata(obj):
+            raise BusinessError(
+                "No se puede eliminar una liquidación de la que ya salió plata o papel"
             )
 
     def eliminar(self, entity_id: uuid.UUID) -> None:
@@ -3587,12 +4267,39 @@ class LiquidacionService(BaseService[Liquidacion]):
         # va corto a propósito: meterle el nombre del tercero desbordaría la celda con
         # un "María Fernanda Gutiérrez". El nombre ya está arriba, en el bloque
         # "Proveedor / Transportador" del encabezado.
+        # Y EL RÓTULO CAMBIA OTRA VEZ CUANDO EL NEGATIVO NO VINO DE LOS ANTICIPOS SINO
+        # DE PLATA ENTREGADA DE MÁS. Pasa desde que una quincena pagada se puede
+        # corregir: el total baja por debajo de lo que ya se le entregó y el saldo queda
+        # negativo. "LE QUEDA DEBIENDO" es cierto —el tercero le debe al negocio— pero
+        # está escrito para el caso de los anticipos y manda a buscar un adelanto que
+        # aquí no existe: lo que hubo fue efectivo que salió de más. La palabra tiene que
+        # decir de dónde salió el negativo, porque el dueño y el productor van a discutir
+        # ese renglón con las dos hojas en la mano.
+        # LA PREGUNTA ES DE DÓNDE SALIÓ EL NEGATIVO, y hay que hacerla bien:
+        #
+        #   · si el NETO ya venía negativo, el negativo lo pusieron los anticipos (o la
+        #     deuda arrastrada): $180.000 de quincena contra $300.000 de adelanto dejan
+        #     el neto en -$120.000 sin que se haya entregado un peso en efectivo POR ESTE
+        #     comprobante. Ahí la palabra correcta sigue siendo LE QUEDA DEBIENDO;
+        #   · solo cuando el neto es CERO O POSITIVO y aun así se le entregó MÁS que eso,
+        #     el negativo es plata que salió de la caja de más. Eso pasa desde que una
+        #     quincena pagada se puede corregir hacia abajo, y no antes.
+        #
+        # Preguntar solo "¿pagado > neto?" MEZCLA LOS DOS CASOS, y lo hace callado: con
+        # el neto en -$120.000 y pagado en $0, cero es mayor que menos ciento veinte mil,
+        # así que el papel diría "SE LE PAGÓ DE MÁS $120.000" sobre una quincena en la
+        # que no salió un peso en efectivo — y mandaría al dueño a buscar un pago que no
+        # existe. Reproducido: lo cantaron cuatro pruebas de
+        # tests/test_liquidacion_saldo_anterior.py y de test_liquidacion_saldo_negativo.py.
         debe = Decimal(liquidacion.le_queda_debiendo or 0)
-        saldo_row = (
-            ("LE QUEDA DEBIENDO", pesos(debe), True)
-            if debe > CERO
-            else ("SALDO A PAGAR", pesos(liquidacion.saldo), True)
-        )
+        pagado_actual = Decimal(liquidacion.pagado or 0)
+        neto_actual = liquidacion.neto_a_pagar
+        if debe > CERO and neto_actual >= CERO and pagado_actual > neto_actual:
+            saldo_row = ("SE LE PAGÓ DE MÁS", pesos(debe), True)
+        elif debe > CERO:
+            saldo_row = ("LE QUEDA DEBIENDO", pesos(debe), True)
+        else:
+            saldo_row = ("SALDO A PAGAR", pesos(liquidacion.saldo), True)
 
         # EL RENGLÓN DE LA DEUDA QUE SE ARRASTRA, con las palabras del dueño. Solo
         # aparece cuando de verdad se le está cobrando algo: en el 99% de los
@@ -3684,13 +4391,67 @@ class LiquidacionService(BaseService[Liquidacion]):
             resumen_rows=resumen_rows,
             # LAS NOTAS DEL DÍA FIJO VAN PRIMERO: explican cómo se lee la tabla que el
             # conductor acaba de mirar, y eso se lee antes que de dónde vino un descuento.
+            # LAS DE LA CORRECCIÓN VAN DE ÚLTIMAS, y a propósito: las dos primeras
+            # explican cómo se lee la tabla que el tercero acaba de mirar, y esta dice
+            # que este papel reemplaza a otro. Es lo que se lee al final y con lo que se
+            # queda, justo antes de firmar.
             notas_resumen=(
                 self._notas_del_dia_fijo(liquidacion.detalles)
                 + self._notas_de_la_deuda(liquidacion)
+                + self._notas_de_la_correccion(liquidacion)
             ),
             anticipos_rows=anticipos_rows,
             pagos_rows=pagos_rows,
             observaciones=liquidacion.observaciones,
+            # La banda del encabezado, solo desde la v2. Sin ella, las dos hojas de la
+            # misma quincena se ven iguales a un metro de distancia: lo único que las
+            # distingue es el '-v2' pegado al folio, en gris y a 7 puntos.
+            marca=(
+                f"COMPROBANTE CORREGIDO (v{int(liquidacion.version or 1)})"
+                if int(liquidacion.version or 1) > 1
+                else None
+            ),
+        )
+        # SE ANOTA CUÁNDO SALIÓ EL PAPEL POR PRIMERA VEZ, y SOLO la primera.
+        #
+        # Hace falta para que el comprobante corregido pueda decir "reemplaza al
+        # comprobante emitido el 15/06/2026 09:32": el "Emitido" que se imprime es la
+        # hora de bajar el PDF, así que dos reimpresiones del MISMO comprobante intacto
+        # ya salen con horas distintas y no sirve de marca. Sin esta columna, la línea de
+        # reemplazo no puede nombrar el papel que el productor tiene en la mano.
+        #
+        # SÍ, ESTO ESCRIBE EN UNA LECTURA, y es deliberado: bajar el PDF es el único
+        # momento en que el sistema se entera de que salió papel. No mueve un peso —no
+        # toca ninguna columna de plata, ni el estado, ni la versión— y si la petición se
+        # cae, el rollback lo deja como estaba y la próxima impresión lo vuelve a anotar.
+        # SOLO MIENTRAS VA EN LA v1: si la quincena se corrigió ANTES de imprimirse
+        # nunca hubo papel anterior, y estampar la fecha aquí haría que la v2 dijera
+        # "reemplaza al comprobante emitido el ..." con la hora de ESTA impresión, sobre
+        # una hoja que nunca salió. El nulo tiene que sobrevivir a la corrección.
+        if liquidacion.fecha_primera_impresion is None and int(liquidacion.version or 1) <= 1:
+            liquidacion.fecha_primera_impresion = datetime.now(timezone.utc)
+
+        # Y QUEDA EN LA BITÁCORA QUÉ CIFRAS SALIERON IMPRESAS. Hoy este camino no
+        # auditaba nada, frente a quince llamadas en el resto del servicio. Desde que un
+        # comprobante puede cambiar después de entregado, saber qué decía el papel que
+        # salió deja de ser un lujo: es lo que permite responderle a un productor que
+        # vuelve con una hoja vieja. No se guarda el PDF —eso es otro trabajo— sino la
+        # foto de las cifras. Es el mismo molde con que reventa audita la exportación
+        # del estado de cuenta.
+        self._audit(
+            "imprimir",
+            liquidacion.id,
+            None,
+            {
+                "folio": self._folio(liquidacion),
+                "version": int(liquidacion.version or 1),
+                "tercero": tercero,
+                "periodo": periodo,
+                "valor_total": float(liquidacion.valor_total or 0),
+                "pagado": float(liquidacion.pagado or 0),
+                "saldo": float(liquidacion.saldo or 0),
+                "estado": liquidacion.estado,
+            },
         )
         filename = f"liquidacion_{tercero}_{liquidacion.periodo_inicio.isoformat()}.pdf".replace(" ", "_")
         return pdf, filename
@@ -3699,11 +4460,91 @@ class LiquidacionService(BaseService[Liquidacion]):
     def _folio(liquidacion: Liquidacion) -> str:
         """El N.º con que se nombra un comprobante en el papel: los 8 primeros del id.
 
-        Está en un solo sitio porque ahora un comprobante nombra a OTRO (la liquidación
-        que se cobró su deuda) y los dos papeles tienen que llamarla igual: si el folio
-        se armara de dos formas, el dueño no podría emparejarlos.
+        Está en un solo sitio porque un comprobante nombra a OTRO (la liquidación que se
+        cobró su deuda) y los dos papeles tienen que llamarla igual: si el folio se
+        armara de dos formas, el dueño no podría emparejarlos.
+
+        Y DESDE LA v2 LLEVA LA VERSIÓN PEGADA: 'A3F2B1C9-v2'. Sin eso, la hoja corregida
+        y la que el productor tiene guardada se llaman IGUAL y dicen cifras distintas, y
+        no hay forma de saber cuál manda. Las que nunca se corrigieron —que son casi
+        todas— siguen imprimiendo el folio pelado, así que ningún comprobante ya
+        entregado cambia de nombre.
+
+        No hay conflicto con la nota de la deuda, que nombra a la otra liquidación por su
+        folio: la corrección se cierra justo cuando la deuda viaja
+        (`_exigir_deuda_no_trasladada`), así que para cuando la otra hoja imprime este
+        folio, la versión ya está congelada.
         """
-        return str(liquidacion.id)[:8].upper()
+        base = str(liquidacion.id)[:8].upper()
+        version = int(getattr(liquidacion, "version", 1) or 1)
+        return base if version <= 1 else f"{base}-v{version}"
+
+    def _notas_de_la_correccion(self, liquidacion: Liquidacion) -> list[str]:
+        """La letra chica que empareja este papel con el que el productor ya tiene.
+
+        ES LA PIEZA QUE HACE QUE LA CORRECCIÓN NO ROMPA NADA EN EL MUNDO REAL. El dueño
+        va a corregir la quincena, pero al productor no siempre le puede recoger la hoja
+        vieja: vuelve en quince días, o ya la guardó. Con estas dos frases el que recibe
+        el papel nuevo puede poner los dos lado a lado y ver que la cuenta cuadra:
+
+            'El comprobante anterior N.º A3F2B1C9 decía VALOR TOTAL $500.000,00.'
+            'Entró el día del 12/06/2026 (100,00 L a $1.800,00 = $180.000,00).'
+            'El VALOR TOTAL pasó de $500.000,00 a $680.000,00.'
+
+        Se imprimen TODAS las correcciones, no solo la última: si la quincena va en la
+        v3, el productor puede tener dos hojas viejas y las dos tienen que poder
+        emparejarse. Y va la fecha y el motivo con el nombre de quien corrigió, porque un
+        comprobante que cambia después de entregado sin decir quién lo cambió es
+        exactamente la operación que sirve para tapar plata.
+        """
+        correcciones = list(liquidacion.correcciones or [])
+        if not correcciones:
+            return []
+
+        primera = correcciones[0]
+        # SI NUNCA SALIÓ PAPEL, NO SE LE PIDE QUE DEVUELVA NINGUNO. Pasa a diario: la
+        # quincena se paga por transferencia el mismo día y el comprobante se imprime
+        # cuando el productor pasa por la quesera. Pedirle una hoja de $500.000 que nunca
+        # existió, sobre una quincena que ya vale $680.000, es mandarlo a buscar un papel
+        # imposible — y es justo lo que el nulo de `fecha_primera_impresion` está ahí
+        # para evitar.
+        hubo_papel = liquidacion.fecha_primera_impresion is not None
+        cuando = (
+            f", emitido el {_en_hora_de_colombia(liquidacion.fecha_primera_impresion)}"
+            if hubo_papel
+            else ""
+        )
+        devolucion = " Por favor devuelva el papel anterior." if hubo_papel else ""
+        notas = [
+            f"Este comprobante REEMPLAZA al N.º {str(liquidacion.id)[:8].upper()}"
+            + cuando
+            + f", que decía VALOR TOTAL {pesos(primera.valor_total_antes)}."
+            + devolucion
+        ]
+        for correccion in correcciones:
+            cambios: list[str] = []
+            for dia in correccion.dias_agregados or []:
+                cambios.append(
+                    f"entró el día del {_fecha_iso_a_texto(dia.get('fecha'))} "
+                    f"({litros(Decimal(dia.get('litros', '0')))} a "
+                    f"{pesos(Decimal(dia.get('precio_litro', '0')))} = "
+                    f"{pesos(Decimal(dia.get('valor', '0')))})"
+                )
+            for precio in correccion.precios_corregidos or []:
+                cambios.append(
+                    f"el día del {_fecha_iso_a_texto(precio.get('fecha'))} pasó de "
+                    f"{pesos(Decimal(precio.get('precio_antes', '0')))} a "
+                    f"{pesos(Decimal(precio.get('precio_despues', '0')))} el litro"
+                )
+            detalle = "; ".join(cambios) if cambios else "se corrigieron las cifras"
+            quien = f" por {correccion.corregido_por_nombre}" if correccion.corregido_por_nombre else ""
+            notas.append(
+                f"Corregido el {_en_hora_de_colombia(correccion.created_at)}{quien} "
+                f"(v{correccion.version_nueva}): {detalle}. El VALOR TOTAL pasó de "
+                f"{pesos(correccion.valor_total_antes)} a {pesos(correccion.valor_total_despues)}. "
+                f"Motivo: {correccion.motivo}"
+            )
+        return notas
 
     @staticmethod
     def _notas_del_dia_fijo(detalles: Sequence[Any]) -> list[str]:
@@ -4027,6 +4868,18 @@ class AnticipoService(BaseService[Anticipo]):
                 "descontó ya se pagó. Si la cifra está mala, registre el ajuste en "
                 "la quincena siguiente"
             )
+        # Y LA QUE YA SE CORRIGIO, aunque ahora este en 'parcial' y sin pagos. Es el
+        # mismo hueco que se tapo en Recepcion diaria: corregir manda el documento a
+        # 'parcial', y en la familia que los anticipos cubrieron exacto —pagado en $0—
+        # las otras dos preguntas caen a la vez. Medido: moverle el anticipo de $180.000
+        # a una quincena corregida la mandaba a 'borrador' y la recalculaba, y el neto
+        # del papel que el productor ya tiene pasaba de $90.000 a $260.000.
+        if int(liquidacion.version or 1) > 1:
+            raise BusinessError(
+                f"No se puede {verbo} este anticipo: la quincena en la que se descontó "
+                "ya emitió un comprobante corregido. Si hay que arreglarle una cifra, "
+                "use 'Corregir esta quincena'"
+            )
         if liquidacion.tiene_pagos:
             raise BusinessError(
                 f"No se puede {verbo} este anticipo: la liquidación en la que se "
@@ -4068,7 +4921,10 @@ class AnticipoService(BaseService[Anticipo]):
                 .where(Liquidacion.id.in_(ids))
             )
             estados = {
-                liq.id: (liq.estado, liq.tiene_pagos or liq.estado == ESTADO_PAGADA)
+                # La MISMA pregunta que traba de verdad (`ya_salio_papel_o_plata`), y no
+                # una copia parecida: si la pantalla dijera que se puede y el servidor
+                # rebotara, el dueño oprimiria un boton que siempre falla.
+                liq.id: (liq.estado, ya_salio_papel_o_plata(liq))
                 for liq in self.db.scalars(stmt).all()
             }
         for anticipo in anticipos:

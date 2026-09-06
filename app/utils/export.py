@@ -256,9 +256,16 @@ def build_liquidacion_pdf(
     anticipos_rows: Sequence[Sequence[Any]] = (),
     pagos_rows: Sequence[Sequence[Any]] = (),
     observaciones: str | None = None,
+    marca: str | None = None,
 ) -> bytes:
     """Comprobante de liquidación con membrete, resumen, anticipos, pagos y firmas.
     Ajustado para caber SIEMPRE en una sola hoja.
+
+    `marca` es la banda del encabezado para un comprobante que NO es lo que parece —hoy
+    solo "COMPROBANTE CORREGIDO (v2)"—. Va arriba y en grande a propósito: el sufijo del
+    folio va en letra gris de 7 puntos, así que con las dos hojas sobre la mesa (una de
+    $500.000 y otra de $680.000) se ven iguales, y la explicación queda al pie, después
+    del resumen. Quien recibe el papel tiene que enterarse antes de leerlo entero.
     """
     buffer = io.BytesIO()
     styles = getSampleStyleSheet()
@@ -290,6 +297,12 @@ def build_liquidacion_pdf(
         Paragraph(f"Estado: <b>{_texto(estado.upper())}</b>", st_docmeta),
         Paragraph(f"Emitido: {_texto(emitido)}", st_docmeta),
     ]
+    if marca:
+        # En el color de marca y en negrita, JUSTO DEBAJO del título: es lo segundo que
+        # se lee, antes que el número y que el estado.
+        doc_block.insert(
+            1, Paragraph(f'<font color="{BRAND}"><b>{_texto(marca)}</b></font>', st_docmeta)
+        )
     logo_cell: Any = (
         RLImage(str(LOGO_PATH), width=1.2 * cm, height=1.2 * cm) if LOGO_PATH.exists() else ""
     )
