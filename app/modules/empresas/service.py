@@ -100,7 +100,7 @@ class EmpresaService(BaseService[Empresa]):
         from app.modules.bancos.models import MovimientoBancario
         from app.modules.caja.models import CajaDiaria, MovimientoCaja
         from app.modules.empleados.models import PagoEmpleado
-        from app.modules.gastos.models import Gasto
+        from app.modules.gastos.models import AdjuntoGasto, Gasto
         from app.modules.inventario.models import MovimientoInventario
         from app.modules.liquidaciones.models import (
             AdjuntoPagoLiquidacion,
@@ -136,9 +136,10 @@ class EmpresaService(BaseService[Empresa]):
 
         borrados: dict[str, int] = {}
 
-        # 0) Los ARCHIVOS de los soportes, antes de borrar sus filas. Los DOS
-        # tipos: los de reventa (compras y ventas) y los de los pagos de
-        # liquidación (la transferencia al productor y al transportador).
+        # 0) Los ARCHIVOS de los soportes, antes de borrar sus filas. Los TRES
+        # tipos: los de reventa (compras y ventas), los de los pagos de
+        # liquidación (la transferencia al productor y al transportador) y las
+        # FACTURAS DE LOS GASTOS.
         #
         # Borrar solo las filas dejaría las fotos de las transferencias en el
         # bucket de Cloudflare para siempre: sin fila que las nombre, nadie las
@@ -171,6 +172,10 @@ class EmpresaService(BaseService[Empresa]):
                 select(AdjuntoPagoLiquidacion.object_key).where(
                     AdjuntoPagoLiquidacion.empresa_id == entity_id
                 )
+            ).all()
+        ) + list(
+            self.db.scalars(
+                select(AdjuntoGasto.object_key).where(AdjuntoGasto.empresa_id == entity_id)
             ).all()
         )
         if claves:
@@ -232,11 +237,16 @@ class EmpresaService(BaseService[Empresa]):
         # ON DELETE SET NULL porque lo que hay que borrar son las cabeceras
         # también: dejarlas vivas sería dejar facturas de una empresa que se supone
         # que quedó en ceros.
+        # AdjuntoGasto va aquí por lo mismo que AdjuntoReventa: tiene empresa_id
+        # propio y `reversed(sorted_tables)` lo borra ANTES que `gastos`, de quien
+        # depende. Explícito y no confiado al ON DELETE CASCADE porque en SQLite
+        # las llaves foráneas están apagadas por defecto y ahí las facturas
+        # sobrevivirían al reinicio, apuntando a un gasto que ya no existe.
         transaccionales = {
             Pago, MovimientoInventario, MovimientoCaja, MovimientoBancario,
             AdjuntoReventa, ConversionBorona, PagoEmpleado, Anticipo, Notificacion,
             RecepcionLeche, Venta, Liquidacion, Produccion, CompraQueso, VentaQueso,
-            DocumentoReventa, Gasto, CajaDiaria, SaldoAnterior, Temporada,
+            DocumentoReventa, AdjuntoGasto, Gasto, CajaDiaria, SaldoAnterior, Temporada,
         }
         tablas = {m.__table__ for m in transaccionales}
         for table in reversed(Base.metadata.sorted_tables):
