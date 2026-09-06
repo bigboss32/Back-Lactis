@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -210,6 +210,12 @@ class PagoLiquidacionRead(BaseSchema):
     valor: Decimal
     destinatario: str | None = None
     observaciones: str | None = None
+    # Cuántos soportes de pago tiene. SOLO EL NÚMERO: los soportes con sus
+    # enlaces se piden aparte, porque cada enlace hay que FIRMARLO y firmar los
+    # de todos los pagos de una quincena para pintar una lista sería regalar
+    # accesos que casi nadie va a abrir. Con el número alcanza para que la
+    # pantalla ponga el clip al lado del pago que sí tiene la foto.
+    adjuntos_count: int = 0
 
 
 class PagoLiquidacionCreate(BaseSchema):
@@ -219,6 +225,64 @@ class PagoLiquidacionCreate(BaseSchema):
     valor: Decimal = plata(gt=0)
     destinatario: str | None = Field(default=None, max_length=150)
     observaciones: str | None = None
+
+
+# ------------------------- soportes de pago (fotos de la transferencia en R2)
+class AdjuntoPagoRead(BaseSchema):
+    """Un soporte de un pago, con un enlace TEMPORAL para verlo.
+
+    `url` NO está guardada en ninguna parte: se firma cada vez que se pide esta
+    lista y se muere sola a los pocos minutos. Por eso viene siempre acompañada
+    de `url_expira`: si la pantalla se queda abierta media hora, los enlaces que
+    tiene en memoria ya no sirven y hay que volver a pedir la lista.
+
+    Es `None` cuando el almacenamiento no está configurado: en ese caso la fila
+    igual se muestra (nombre, tamaño, quién lo subió) pero sin poder abrirla.
+    """
+
+    id: uuid.UUID
+    pago_id: uuid.UUID
+    nombre_archivo: str
+    content_type: str
+    tamano_bytes: int
+    es_imagen: bool
+    subido_por_nombre: str | None
+    created_at: datetime
+    url: str | None = None
+    url_expira: datetime | None = None
+
+
+class AdjuntosPagoLista(BaseSchema):
+    """Los soportes de UN pago de liquidación.
+
+    `disponible` en false significa que el almacenamiento no está configurado en
+    este servidor. Se responde 200 con el aviso y no un error, porque no es una
+    falla de quien pregunta y el resto de la pantalla —la liquidación, sus
+    renglones, sus pagos— tiene que seguir usable.
+    """
+
+    disponible: bool
+    mensaje: str | None = None
+    # Cuántos soportes más caben (el tope por pago menos los que ya hay)
+    cupo_restante: int = 0
+    adjuntos: list[AdjuntoPagoRead] = []
+
+
+class EnlaceSoporteCompartido(BaseSchema):
+    """Enlace de MÁS duración para mandar UN soporte por fuera (WhatsApp).
+
+    `expira_texto` viene armado desde el backend, en hora de Colombia y en
+    cristiano ("hasta el martes 5 de agosto a las 3:00 p. m."), porque quien
+    reparte el enlace a un comprobante de pago tiene que saber hasta cuándo sirve
+    lo que está repartiendo. Si la frase la armara cada pantalla, tarde o
+    temprano una la mostraría en UTC —cinco horas corridas— o no la mostraría.
+    """
+
+    url: str
+    nombre_archivo: str
+    expira: datetime
+    expira_texto: str
+    dias: int
 
 
 class LiquidacionReferencia(BaseSchema):

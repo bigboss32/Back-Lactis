@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import lazyload
 
 from app.common.repository import BaseRepository
@@ -13,9 +13,11 @@ from app.modules.liquidaciones.models import (
     ESTADO_PARCIAL,
     TIPO_PROVEEDOR,
     TIPO_TRANSPORTADOR,
+    AdjuntoPagoLiquidacion,
     Anticipo,
     Liquidacion,
     LiquidacionDetalle,
+    PagoLiquidacion,
 )
 
 
@@ -485,5 +487,59 @@ class AnticipoRepository(BaseRepository[Anticipo]):
             Anticipo.empleado_id == empleado_id,
             Anticipo.pago_empleado_id.is_(None),
             Anticipo.fecha <= hasta,
+        )
+        return list(self.db.scalars(stmt).all())
+
+
+class AdjuntoPagoLiquidacionRepository(BaseRepository[AdjuntoPagoLiquidacion]):
+    """Soportes de pago de las liquidaciones (leche y flete).
+
+    Todo pasa por `base_query()` del repositorio genérico, que ya mete
+    `empresa_id = <la del contexto>` y `deleted_at IS NULL`. Eso es lo que impide
+    que alguien firme un enlace de un archivo de otra quesera: el soporte
+    simplemente no aparece y sale un 404, no un 403 que confirmaría que existe.
+    """
+
+    model = AdjuntoPagoLiquidacion
+    default_order_by = "created_at"
+
+    def de_pago(self, pago_id: uuid.UUID) -> list[AdjuntoPagoLiquidacion]:
+        """Los soportes de UN pago, del más viejo al más nuevo.
+
+        Ese orden es el que espera quien subió las fotos: primero la que mandó
+        primero. Al revés, "la última que subí" quedaría arriba en la lista y
+        abajo en la pantalla del que la recibe.
+        """
+        stmt = (
+            self.base_query()
+            .where(AdjuntoPagoLiquidacion.pago_id == pago_id)
+            .order_by(AdjuntoPagoLiquidacion.created_at)
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def contar_de(self, pago_id: uuid.UUID) -> int:
+        """Cuántos soportes vigentes tiene el pago (para el tope por pago)."""
+        stmt = self.base_query().where(AdjuntoPagoLiquidacion.pago_id == pago_id)
+        return int(self.db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+
+    def de_liquidacion(self, liquidacion_id: uuid.UUID) -> list[AdjuntoPagoLiquidacion]:
+        """TODOS los soportes de TODOS los pagos de una liquidación.
+
+        Es lo que hay que barrer del bucket cuando se va la liquidación entera.
+        El `in_` sobre los pagos de esa liquidación va en la misma consulta —y no
+        recorriendo los pagos en Python— para que el filtro de empresa del
+        `base_query()` siga puesto: la lista de pagos de un objeto ya cargado no
+        lo lleva.
+        """
+        stmt = (
+            self.base_query()
+            .where(
+                AdjuntoPagoLiquidacion.pago_id.in_(
+                    select(PagoLiquidacion.id).where(
+                        PagoLiquidacion.liquidacion_id == liquidacion_id
+                    )
+                )
+            )
+            .order_by(AdjuntoPagoLiquidacion.created_at)
         )
         return list(self.db.scalars(stmt).all())

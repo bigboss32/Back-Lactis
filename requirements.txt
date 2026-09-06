@@ -18,4 +18,54 @@ httpx==0.28.1
 # está instalado o no hay llaves, la aplicación arranca igual y lo único que
 # falla es la parte de adjuntos, con un mensaje legible.
 boto3==1.35.99
+# Pillow: le baja el peso a las fotos de los comprobantes ANTES de subirlas
+# (1600 px de lado mayor, calidad 75 en JPEG). Una foto de celular de 3,4 MB queda
+# en unos 220 KB y se sigue leyendo el monto, la cuenta y la referencia.
+#
+# YA ESTABA INSTALADA DESDE SIEMPRE, y esta línea no cambió eso: reportlab==4.4.1
+# —el que imprime las liquidaciones en PDF— declara `pillow>=9.0.0` entre sus
+# propias dependencias, así que pip la venía trayendo al servidor desde el primer
+# despliegue. (Acá decía que "estaba en el portátil pero no acá, así que el
+# servidor no la tenía". Era falso. En este proyecto los comentarios se leen para
+# decidir, y uno que miente es peor que ninguno.)
+#
+# ENTONCES POR QUÉ SE ESCRIBE. Porque ahora el código la usa DE FRENTE, en
+# app/core/imagenes.py, y una dependencia que solo se tiene de rebote es una que
+# se puede perder sin aviso: el día que reportlab cambie de librería de imágenes,
+# el despliegue seguiría verde y lo que se rompería en silencio sería la
+# compresión. Se declara lo que se usa, y se fija la versión por lo de siempre:
+# que el servidor corra lo que se probó acá.
+#
+# Y QUE NO SE VUELVA A ESCRIBIR QUE PILLOW ES OPCIONAL: no lo es. Sin ella la
+# aplicación NI ARRANCA, porque reportlab hace `from PIL import Image` al cargarse
+# y de app/utils/export.py cuelgan liquidaciones, reventa, transporte, ventas y
+# notificaciones. El import perezoso de imagenes.py se conserva igual —deja probar
+# ese módulo solo, y aguanta el día que reportlab suelte a Pillow—, pero no es lo
+# que mantiene la aplicación en pie.
+Pillow==12.3.0
+# pillow-heif: lo que le enseña a Pillow a abrir las fotos de un iPhone.
+#
+# EL iPHONE GRABA EN HEIC DE FÁBRICA y el dueño fotografía las transferencias con
+# el celular: es la foto de todos los días, no un caso raro. Sin esta línea esas
+# fotos se rechazaban con un mensaje que lo mandaba a los Ajustes del teléfono a
+# cambiar el formato — trabajo de más, todos los días, para el que ya está
+# haciendo el favor de mandar el soporte.
+#
+# CUESTA 27 MB EN LA IMAGEN (5,6 MB de descarga; medido abriendo la rueda, no
+# estimado) y los vale. Es una rueda manylinux ya compilada que trae adentro sus
+# propias librerías —libheif, libde265 y libx265—, así que NO hay que agregarle
+# nada con apt al python:3.12-slim del Dockerfile ni se compila nada al desplegar.
+# De esos 27 MB, 23 son libx265, que es el CODIFICADOR: la aplicación solo LEE
+# HEIC (nunca las escribe), así que ese pedazo no se usa en producción, pero viene
+# adentro del paquete y no se puede quitar por partes.
+#
+# Con ella las HEIC entran por el MISMO camino que las demás —se abren, se encogen
+# a 1600 px y se guardan como JPEG—, así que de paso dejan de ser un formato que
+# el navegador del productor no sabe dibujar.
+#
+# Se importa perezosa y se registra UNA sola vez, y solo cuando de verdad llega
+# una HEIC (`app/core/imagenes.py::heic_disponible`): el proceso que en toda su
+# vida solo recibe JPEG no carga nada de esto. Si algún día faltara, esas fotos
+# vuelven a rechazarse pero con el mensaje que dice qué hacer, no con un error seco.
+pillow-heif==1.6.0
 pytest==8.3.5

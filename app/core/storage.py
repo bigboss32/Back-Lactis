@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from app.core.config import settings
 from app.core.exceptions import BusinessError
@@ -212,3 +213,58 @@ def texto_caducidad(momento: datetime) -> str:
 def caducidad_utc(segundos: int) -> datetime:
     """Momento exacto (UTC) en que muere un enlace firmado de `segundos`."""
     return datetime.now(timezone.utc) + timedelta(seconds=segundos)
+
+
+def borrar_del_bucket_al_confirmar(db: Any, claves: list[str], motivo: str) -> None:
+    """Manda a borrar esos objetos de R2, pero SOLO cuando la transacción cuaje.
+
+    ES EL ORDEN QUE IMPORTA, y va en esta dirección por una razón sencilla: la
+    fila de la base se puede resucitar con un rollback, el archivo del bucket no.
+    Así que el borrado que NO se puede deshacer se hace de último, cuando ya no
+    queda nada que pueda fallar y devolver las filas a la vida. Al revés —que era
+    como estaba— un fallo después de limpiar el bucket dejaba filas vivas
+    apuntando a archivos que ya no existían: soportes que la pantalla lista y que
+    no abren nunca, y ninguna forma de saber que se perdieron.
+
+    EL COMMIT OCURRE AFUERA DE LOS SERVICIOS (`app/core/database.py::get_db`), así
+    que la única manera de ser "lo último" es engancharse al `after_commit` de la
+    sesión. Si la transacción se cae, este gancho no corre: los archivos siguen en
+    el bucket y las filas también, que es lo consistente. Lo peor que puede pasar
+    entonces es que sobre un archivo, y para eso está el barrido del reinicio de
+    empresa.
+
+    VIVE ACÁ, EN `storage.py`, Y NO EN CADA MÓDULO. Es la misma regla para los
+    soportes de un pago de liquidación, para los adjuntos de reventa y para el
+    reinicio de una empresa: los tres borran archivos de R2 dentro de una
+    transacción que todavía puede caerse. Escrita tres veces terminaría aplicada
+    en dos sitios y olvidada en el tercero, que fue exactamente lo que pasó.
+
+    Lo de adentro es de MEJOR ESFUERZO y no puede levantar nada: para cuando
+    corre ya se le respondió al dueño y la operación es un hecho. Lo que no se
+    pudo borrar queda en el log.
+    """
+    from sqlalchemy import event
+
+    if not claves:
+        return
+
+    def _al_confirmar(_sesion: Any) -> None:
+        if not r2_configurado():
+            logger.warning(
+                "Quedaron %d objetos en R2 al %s: no hay llaves configuradas, "
+                "hay que borrarlos a mano",
+                len(claves),
+                motivo,
+            )
+            return
+        cliente = R2Client()
+        for clave in claves:
+            try:
+                cliente.borrar(clave)
+            except Exception:
+                logger.warning("Quedó un objeto en R2 al %s: %s", motivo, clave)
+
+    # `once=True`: el gancho se quita solo después de dispararse, así que estas
+    # claves no se vuelven a intentar en el siguiente commit de la misma sesión
+    # (en las pruebas la sesión se reusa entre peticiones).
+    event.listen(db, "after_commit", _al_confirmar, once=True)

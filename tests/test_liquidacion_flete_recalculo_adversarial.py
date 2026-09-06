@@ -10,6 +10,8 @@ Cada aserción trae las cifras en el mensaje: si falla, el mensaje tiene que ser
 para explicarle el defecto al dueño sin volver a leer el código.
 """
 import random
+import time
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 import pytest
@@ -847,11 +849,35 @@ def test_generar_con_la_tarifa_en_cero_no_borra_el_flete_de_los_dias(client, bas
 # 5. ESTADO Y BITÁCORA
 # ===========================================================================
 def _auditoria(client, h, accion="editar"):
+    """La bitácora COMO LA DEVUELVE EL API: de la más NUEVA a la más VIEJA.
+
+    Ojo con esto, que ya costó una prueba que temblaba: el listado viene ordenado
+    por `created_at` DESCENDENTE (ver `BaseRepository.list_paginated`), así que el
+    renglón más reciente es el PRIMERO de la lista, no el último. Estas pruebas
+    leen "lo último que pasó" con `ultimo_recalculo`, no con `[-1]`.
+    """
     res = client.get(
         AUD, params={"modulo": "liquidaciones", "accion": accion, "size": 100}, headers=h
     )
     assert res.status_code == 200, res.text
     return res.json()["items"]
+
+
+def recalculos_de(client, h, liq_id):
+    """Los renglones de bitácora que dejó el botón Recalcular sobre ESE comprobante,
+    del más nuevo al más viejo (el orden en que los devuelve el API)."""
+    return [
+        e
+        for e in _auditoria(client, h)
+        if e["entidad_id"] == liq_id and (e["despues"] or {}).get("recalculo")
+    ]
+
+
+def ultimo_recalculo(client, h, liq_id):
+    """El ÚLTIMO recálculo del comprobante: el primero de la lista, que viene al revés."""
+    entradas = recalculos_de(client, h, liq_id)
+    assert entradas, "el recálculo no dejó entrada de bitácora con el antes y el después"
+    return entradas[0]["despues"]["recalculo"]
 
 
 def test_la_bitacora_registra_el_antes_y_el_despues_del_recalculo(client, base_datos):
@@ -863,13 +889,7 @@ def test_la_bitacora_registra_el_antes_y_el_despues_del_recalculo(client, base_d
     assert recalcular(client, h, liq["id"]).status_code == 200
     j = leer_liq(client, h, liq["id"])
 
-    entradas = [
-        e
-        for e in _auditoria(client, h)
-        if e["entidad_id"] == liq["id"] and (e["despues"] or {}).get("recalculo")
-    ]
-    assert entradas, "el recálculo no dejó entrada de bitácora con el antes y el después"
-    r = entradas[-1]["despues"]["recalculo"]
+    r = ultimo_recalculo(client, h, liq["id"])
     assert D(str(r["valor_transporte_antes"])) == total_antes, (
         f"la bitácora dice que antes valía {r['valor_transporte_antes']} y valía "
         f"{total_antes}"
@@ -903,12 +923,12 @@ def test_la_bitacora_no_anota_dias_cambiados_cuando_no_cambio_nada(client, base_
     assert papel(leer_liq(client, h, liq["id"])) == primero, "el papel se movió"
     assert fotos_de(client, h, recs) == fotos_primero, "las fotos se movieron"
 
-    entradas = [
-        e
-        for e in _auditoria(client, h)
-        if e["entidad_id"] == liq["id"] and (e["despues"] or {}).get("recalculo")
-    ]
-    ultima = entradas[-1]["despues"]["recalculo"]
+    # EL ÚLTIMO renglón de la bitácora, que es el PRIMERO de la lista: el API la
+    # devuelve de la más nueva a la más vieja. Leerla por el otro extremo fue lo que
+    # hizo temblar esta prueba —pasaba o fallaba según si los dos recálculos caían en
+    # el mismo segundo del reloj—; el porqué completo está en `_auditoria` y en
+    # `Auditoria`.
+    ultima = ultimo_recalculo(client, h, liq["id"])
     assert ultima["valor_transporte_antes"] == ultima["valor_transporte_despues"], (
         f"la bitácora del segundo recálculo: {ultima}"
     )
@@ -916,6 +936,73 @@ def test_la_bitacora_no_anota_dias_cambiados_cuando_no_cambio_nada(client, base_
         "el segundo recálculo no movió ni un peso (el papel y las fotos quedaron "
         f"idénticos) y la bitácora anota que le cambió el flete a "
         f"{ultima['dias_con_flete_recalculado']} día(s)"
+    )
+
+
+def _esperar_a_que_arranque_un_segundo():
+    """Deja el reloj recién estrenado un segundo, con casi un segundo entero por
+    delante, para que lo que venga después quepa ADENTRO del mismo segundo.
+
+    Es lo contrario de confiar en la suerte: el temblor que esta prueba vigila salía
+    de si dos renglones de bitácora caían o no en el mismo segundo del reloj de la
+    base, y así el caso queda FORZADO en cada corrida en vez de asomarse una de cada
+    cuatro veces.
+    """
+    time.sleep(1.0 - (time.time() % 1.0) + 0.02)
+
+
+def test_la_bitacora_no_se_desordena_aunque_los_dos_recalculos_caigan_en_el_mismo_segundo(
+    client, base_datos
+):
+    """EL CANDADO CONTRA EL TEMBLOR: la bitácora sigue en orden con el reloj en contra.
+
+    Esta prueba existe por un defecto medido, no por precaución. La de arriba
+    —"no anota días cambiados cuando no cambió nada"— pasaba o fallaba según la hora:
+    fallaba 1 de cada 4 corridas y después pasaba veintidós veces seguidas. La causa
+    eran dos cosas sumadas:
+
+    · el API devuelve la bitácora de la MÁS NUEVA a la MÁS VIEJA, y la prueba leía el
+      otro extremo; y
+    · los dos renglones podían traer LA MISMA HORA —en SQLite CURRENT_TIMESTAMP va de
+      segundo en segundo; en Postgres `now()` es la hora de la TRANSACCIÓN—, y con la
+      hora empatada cuál sale de primero lo decide el motor. Con eso, el libro contaba
+      la historia al revés: "le cambió el flete a 2 días" en el recálculo que no movió
+      un peso.
+
+    Se arregló poniendo la hora desde la aplicación, con microsegundos
+    (`HoraDeRegistroMixin` en `Auditoria`). Acá se comprueban las dos mitades: que los
+    dos renglones tienen HORAS DISTINTAS aunque los oprima en el mismo segundo, y que
+    el más nuevo es de verdad el segundo recálculo.
+    """
+    h = auth_headers(client, "admin.a")
+    ruta, t, recs = escenario(client, h)
+    liq = generar(client, h)[0]
+    poner_tarifa_ruta(client, h, t, [(ruta, BUENA)])
+
+    _esperar_a_que_arranque_un_segundo()
+    assert recalcular(client, h, liq["id"]).status_code == 200
+    assert recalcular(client, h, liq["id"]).status_code == 200
+
+    entradas = recalculos_de(client, h, liq["id"])
+    assert len(entradas) == 2, (
+        f"se oprimió Recalcular dos veces y la bitácora tiene {len(entradas)}"
+    )
+    # Se comparan como FECHAS y no como texto: en Postgres la hora viene con el
+    # huso pegado y comparar cadenas ahí engaña.
+    horas = [datetime.fromisoformat(e["created_at"]) for e in entradas]
+    assert horas[0] != horas[1], (
+        f"los dos recálculos quedaron con LA MISMA hora ({horas[0]}): con la hora "
+        "empatada, cuál renglón sale de último lo decide el motor y el libro puede "
+        "contar la historia al revés"
+    )
+    assert horas[0] > horas[1], (
+        f"la bitácora no viene de la más nueva a la más vieja: {horas}"
+    )
+    ultima = entradas[0]["despues"]["recalculo"]
+    assert ultima["dias_con_flete_recalculado"] == 0, (
+        "el renglón más nuevo de la bitácora tiene que ser el SEGUNDO recálculo, que "
+        f"no movió ni un peso, y anota que le cambió el flete a "
+        f"{ultima['dias_con_flete_recalculado']} día(s): la bitácora quedó al revés"
     )
 
 

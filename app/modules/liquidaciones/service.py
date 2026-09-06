@@ -12,8 +12,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, lazyload
 
 from app.common.service import BaseService, serialize_entity
+from app.core.config import settings
 from app.core.exceptions import BusinessError, NotFoundError
+from app.core.imagenes import leer_y_validar_soporte
+from app.core.logging_config import get_logger
 from app.core.pagination import PageParams
+from app.core.storage import (
+    MENSAJE_NO_CONFIGURADO,
+    R2Client,
+    borrar_del_bucket_al_confirmar,
+    caducidad_utc,
+    r2_configurado,
+    texto_caducidad,
+)
 from app.modules.empresas.repository import EmpresaRepository
 from app.modules.liquidaciones.models import (
     ESTADO_ANULADA,
@@ -23,16 +34,24 @@ from app.modules.liquidaciones.models import (
     ESTADO_PARCIAL,
     TIPO_PROVEEDOR,
     TIPO_TRANSPORTADOR,
+    AdjuntoPagoLiquidacion,
     Anticipo,
     Liquidacion,
     LiquidacionDetalle,
     LiquidacionRuta,
     PagoLiquidacion,
 )
-from app.modules.liquidaciones.repository import AnticipoRepository, LiquidacionRepository
+from app.modules.liquidaciones.repository import (
+    AdjuntoPagoLiquidacionRepository,
+    AnticipoRepository,
+    LiquidacionRepository,
+)
 from app.modules.liquidaciones.schemas import (
     MOTIVO_FLETE_SIN_TARIFA,
     MOTIVO_PERIODO_CRUZADO,
+    AdjuntoPagoRead,
+    AdjuntosPagoLista,
+    EnlaceSoporteCompartido,
     LiquidacionOmitida,
     PagoLiquidacionCreate,
     PreLiquidacionAnticipo,
@@ -3231,6 +3250,18 @@ class LiquidacionService(BaseService[Liquidacion]):
         if pago is None:
             raise NotFoundError("Pago no encontrado")
         valor = Decimal(pago.valor)
+        # LOS SOPORTES SE VAN CON EL PAGO, y sus FILAS antes de borrarlo. Sin esto,
+        # la foto de la transferencia quedaba en el bucket para siempre: el pago ya
+        # no existe, así que nadie la puede ver ni borrar desde la aplicación, y el
+        # dueño sigue pagando ese almacenamiento sin saberlo. Va aquí —después de
+        # que el pago se encontró y ya se sabe que se va a borrar— y no antes,
+        # para que un pago que no existe no se lleve por delante ningún archivo.
+        #
+        # LOS ARCHIVOS DEL BUCKET NO SE TOCAN TODAVÍA: `_barrer` los deja colgados
+        # del `after_commit` de la sesión, para que el único borrado que no se
+        # puede deshacer ocurra cuando ya nada de lo que sigue —el recálculo, el
+        # flush, el commit de `get_db`— pueda hacer rollback y resucitar las filas.
+        AdjuntoPagoLiquidacionService(self.db, self.ctx).limpiar_de_pago(pago.id)
         liquidacion.pagado = max(Decimal(liquidacion.pagado) - valor, CERO)
         _refrescar_saldo(liquidacion)
         liquidacion.estado = _estado_pago(liquidacion.neto_a_pagar, liquidacion.pagado)
@@ -3460,6 +3491,15 @@ class LiquidacionService(BaseService[Liquidacion]):
         # Los guardias van ANTES de soltar nada: si el borrado va a rebotar, no puede
         # quedar a medio hacer.
         self.validar_eliminar(liquidacion)
+        # Y los soportes de los pagos se van con ella, para no dejar comprobantes
+        # de transferencias en el bucket sin nada que los nombre. Hoy esto no
+        # encuentra nunca nada —`validar_eliminar` rebota si hay pagos, y sin
+        # pagos no hay soportes—, y va igual: el día que ese guardia cambie, lo
+        # que quedaría no sería un error visible sino unos archivos invisibles
+        # cobrando almacenamiento. Ver `limpiar_de_liquidacion`.
+        AdjuntoPagoLiquidacionService(self.db, self.ctx).limpiar_de_liquidacion(
+            liquidacion.id
+        )
         self._soltar_lo_apartado(
             liquidacion, "se borró la liquidación que se estaba cobrando esta deuda"
         )
@@ -4125,3 +4165,371 @@ class AnticipoService(BaseService[Anticipo]):
         super().eliminar(entity_id)
         self.db.flush()
         self._recuadrar(liquidacion, "se eliminó un anticipo aplicado a la liquidación")
+
+
+# ================= soportes de pago (la foto de la transferencia) ============
+logger_adjuntos = get_logger("liquidaciones.adjuntos")
+
+
+class AdjuntoPagoLiquidacionService(BaseService[AdjuntoPagoLiquidacion]):
+    """Los soportes de un PAGO de liquidación, guardados en Cloudflare R2.
+
+    Lo pidió el dueño: "que se le puedan agregar los comprobantes a los pagos de
+    los proveedores". Sirve igual para las liquidaciones de LECHE y las de FLETE,
+    porque las dos usan `PagoLiquidacion`: se le pega el soporte al pago del
+    productor y al del transportador.
+
+    ES EL GEMELO DE `AdjuntoReventaService`, a propósito y hasta en los nombres:
+    los dos guardan lo mismo (la foto de una transferencia) con las mismas reglas,
+    y la parte que de verdad se comparte —qué archivo se acepta, cómo se reconoce
+    y cómo se le baja el peso— vive UNA sola vez, en `app/core/imagenes.py`.
+
+    TRES CAMINOS DISTINTOS PARA MIRAR UN ARCHIVO, igual que en reventa:
+
+    - VER (`listar`): enlaces de minutos, para la pantalla. Se firman de nuevo
+      cada vez que se abre el pago.
+    - COMPARTIR (`compartir`): un enlace de días para UN soporte, para mandarlo
+      por WhatsApp al productor que pregunta si ya le pagaron. Sale con la fecha
+      de caducidad escrita en cristiano y queda en la auditoría: es información de
+      pago saliendo del sistema.
+    - BORRAR (`eliminar_adjunto`): quita la fila Y el objeto en R2.
+
+    LOS TRES EMPIEZAN POR EL MISMO CANDADO MULTIEMPRESA, y no es un `if` suelto:
+    la liquidación se busca con `LiquidacionRepository`, que ya filtra por
+    `empresa_id` y `deleted_at IS NULL`, y el soporte con el repositorio propio,
+    que filtra igual. La liquidación de otra quesera no existe para esta consulta
+    y `get_or_fail` levanta 404 ANTES de que se firme absolutamente nada.
+    """
+
+    repository_cls = AdjuntoPagoLiquidacionRepository
+    modulo = "liquidaciones"
+
+    # ------------------------------------------------------------- utilidades
+    @property
+    def _max_bytes(self) -> int:
+        return settings.ADJUNTOS_MAX_MB * 1024 * 1024
+
+    def _pago(self, liquidacion_id: uuid.UUID, pago_id: uuid.UUID) -> PagoLiquidacion:
+        """El pago, entrando SIEMPRE por su liquidación (que sí filtra por empresa).
+
+        `PagoLiquidacion` no tiene `empresa_id` propio a propósito (ver su
+        docstring), así que buscarlo suelto por su id no tendría ningún filtro de
+        quesera. Se entra por la liquidación —repositorio con filtro— y el pago se
+        busca DENTRO de sus pagos: si la liquidación es de la otra empresa, no
+        aparece y sale 404 sin haber leído un solo pago.
+        """
+        liquidacion = LiquidacionRepository(self.db, self.ctx.empresa_id).get_or_fail(
+            liquidacion_id
+        )
+        pago = next((p for p in liquidacion.pagos if p.id == pago_id), None)
+        if pago is None:
+            raise NotFoundError("Pago no encontrado")
+        return pago
+
+    def _adjunto(self, adjunto_id: uuid.UUID) -> AdjuntoPagoLiquidacion:
+        """El soporte, con el mismo candado: repositorio con filtro de empresa."""
+        return self.repo.get_or_fail(adjunto_id)
+
+    def _clave(self, *, pago_id: uuid.UUID, extension: str) -> str:
+        """`{empresa_id}/liquidaciones/pagos/{pago_id}/{uuid}{ext}`.
+
+        El empresa_id va DENTRO de la llave a propósito: aunque alguien adivinara
+        el resto, la llave de un archivo de otra quesera empieza por un uuid que
+        no es el suyo. Y el nombre del archivo NO entra en la llave: lo escribe
+        quien sube, y un nombre con `../` o con caracteres raros terminaría
+        creando objetos donde no van.
+        """
+        return (
+            f"{self.ctx.empresa_id}/liquidaciones/pagos/{pago_id}/"
+            f"{uuid.uuid4().hex}{extension}"
+        )
+
+    def _nombre_de_quien_sube(self) -> str | None:
+        usuario = getattr(self.ctx, "user", None)
+        if usuario is None:
+            return None
+        nombre = getattr(usuario, "nombre", "") or ""
+        apellido = getattr(usuario, "apellido", "") or ""
+        return f"{nombre} {apellido}".strip()[:150] or None
+
+    def _a_read(
+        self, adjunto: AdjuntoPagoLiquidacion, cliente: R2Client | None
+    ) -> AdjuntoPagoRead:
+        """Fila lista para la pantalla, con enlace corto si hay almacenamiento."""
+        url = None
+        expira = None
+        if cliente is not None:
+            segundos = max(60, settings.R2_URL_VER_MINUTOS * 60)
+            url = cliente.enlace_firmado(
+                clave=adjunto.object_key,
+                segundos=segundos,
+                nombre_descarga=adjunto.nombre_archivo,
+            )
+            expira = caducidad_utc(segundos)
+        return AdjuntoPagoRead(
+            id=adjunto.id,
+            pago_id=adjunto.pago_id,
+            nombre_archivo=adjunto.nombre_archivo,
+            content_type=adjunto.content_type,
+            tamano_bytes=adjunto.tamano_bytes,
+            es_imagen=adjunto.es_imagen,
+            subido_por_nombre=adjunto.subido_por_nombre,
+            created_at=adjunto.created_at,
+            url=url,
+            url_expira=expira,
+        )
+
+    # ------------------------------------------------------------------- ver
+    def listar(self, liquidacion_id: uuid.UUID, pago_id: uuid.UUID) -> AdjuntosPagoLista:
+        """Los soportes del pago, cada uno con su enlace de CORTA duración.
+
+        Sin R2 configurado responde 200 con `disponible: false` en vez de un
+        error: no es culpa de quien pregunta y el resto de la pantalla tiene que
+        poder seguir usándose. Las filas igual salen (nombre, peso, quién lo
+        subió), solo que sin enlace para abrirlas.
+        """
+        self._pago(liquidacion_id, pago_id)
+        filas = self.repo.de_pago(pago_id)
+        cupo = max(0, settings.ADJUNTOS_MAX_POR_DOCUMENTO - len(filas))
+        if not r2_configurado():
+            return AdjuntosPagoLista(
+                disponible=False,
+                mensaje=MENSAJE_NO_CONFIGURADO,
+                cupo_restante=0,
+                adjuntos=[self._a_read(f, None) for f in filas],
+            )
+        cliente = R2Client()
+        return AdjuntosPagoLista(
+            disponible=True,
+            cupo_restante=cupo,
+            adjuntos=[self._a_read(f, cliente) for f in filas],
+        )
+
+    # ----------------------------------------------------------------- subir
+    def subir(
+        self, archivos: list[Any], *, liquidacion_id: uuid.UUID, pago_id: uuid.UUID
+    ) -> AdjuntosPagoLista:
+        """Sube N soportes a un pago de liquidación.
+
+        SE VALIDAN Y SE COMPRIMEN TODOS ANTES DE SUBIR NINGUNO. Si la tercera foto
+        no sirve, no tiene sentido que las dos primeras ya estén en el bucket: el
+        dueño corrige y vuelve a mandar las tres, y las dos buenas quedarían
+        duplicadas y tendría que borrarlas a mano.
+
+        Y si R2 falla a mitad de camino, se borran los objetos que alcanzaron a
+        subir. La excepción hace rollback de la sesión, así que las filas
+        desaparecen; sin este barrido los archivos quedarían en el bucket sin
+        ninguna fila que los nombre — invisibles, imborrables y cobrando.
+        """
+        pago = self._pago(liquidacion_id, pago_id)
+        if not archivos:
+            raise BusinessError("No se recibió ningún archivo")
+        if not r2_configurado():
+            raise BusinessError(MENSAJE_NO_CONFIGURADO, code="r2_no_configurado")
+
+        # Una liquidación anulada es un documento muerto: no se le siguen colgando
+        # soportes de pago. Hoy no debería llegar acá —anular con pagos rebota—,
+        # pero el guardia va igual: si mañana esa regla cambia, lo que no puede
+        # pasar es que quede un comprobante pegado a un documento que dice que no
+        # existió.
+        if pago.liquidacion.estado == ESTADO_ANULADA:
+            raise BusinessError(
+                "La liquidación está anulada: no se le pueden agregar soportes"
+            )
+
+        ya_tiene = self.repo.contar_de(pago_id)
+        tope = settings.ADJUNTOS_MAX_POR_DOCUMENTO
+        if ya_tiene + len(archivos) > tope:
+            raise BusinessError(
+                f"Caben máximo {tope} soportes por pago. Ya hay {ya_tiene} "
+                f"y está mandando {len(archivos)}"
+            )
+
+        validados = [
+            leer_y_validar_soporte(
+                a, max_bytes=self._max_bytes, max_mb=settings.ADJUNTOS_MAX_MB
+            )
+            for a in archivos
+        ]
+
+        cliente = R2Client()
+        subidas: list[str] = []
+        quien = self._nombre_de_quien_sube()
+        try:
+            for contenido, tipo, extension, nombre in validados:
+                clave = self._clave(pago_id=pago_id, extension=extension)
+                cliente.subir(clave=clave, contenido=contenido, content_type=tipo)
+                subidas.append(clave)
+                adjunto = self.repo.create(
+                    self._prepare_create_data(
+                        {
+                            "pago_id": pago_id,
+                            "object_key": clave,
+                            "nombre_archivo": nombre,
+                            "content_type": tipo,
+                            "tamano_bytes": len(contenido),
+                            "subido_por_nombre": quien,
+                        }
+                    )
+                )
+                self._audit("crear", adjunto.id, None, serialize_entity(adjunto))
+        except Exception:
+            for clave in subidas:
+                try:
+                    cliente.borrar(clave)
+                except Exception:  # pragma: no cover - barrido de mejor esfuerzo
+                    logger_adjuntos.warning(
+                        "Quedó un objeto huérfano en R2 tras una subida fallida: %s", clave
+                    )
+            raise
+
+        return self.listar(liquidacion_id, pago_id)
+
+    # ------------------------------------------------------------- compartir
+    def compartir(self, adjunto_id: uuid.UUID) -> EnlaceSoporteCompartido:
+        """Enlace de MÁS duración para UN soporte, para mandarlo por fuera.
+
+        Es el caso de todos los días en el campo: el productor llama a preguntar
+        si ya le consignaron y el dueño le manda la foto del comprobante por
+        WhatsApp. Quince minutos —lo que dura el enlace de la pantalla— no
+        alcanzan cuando el que lo recibe está en una vereda y abre el chat en la
+        noche.
+
+        Queda en la auditoría con su caducidad: es un soporte de pago —con
+        nombres, cuentas y montos— saliendo del sistema hacia un enlace que
+        cualquiera que lo reciba puede reenviar. Que quede escrito quién lo
+        repartió y hasta cuándo sirve.
+        """
+        adjunto = self._adjunto(adjunto_id)
+        if not r2_configurado():
+            raise BusinessError(MENSAJE_NO_CONFIGURADO, code="r2_no_configurado")
+
+        dias = max(1, min(settings.R2_URL_COMPARTIR_DIAS, 7))
+        segundos = dias * 24 * 60 * 60
+        url = R2Client().enlace_firmado(
+            clave=adjunto.object_key,
+            segundos=segundos,
+            nombre_descarga=adjunto.nombre_archivo,
+        )
+        expira = caducidad_utc(segundos)
+        # Se audita el HECHO de compartir, nunca la URL: la URL lleva la firma
+        # dentro, así que guardarla en la auditoría sería guardar el acceso.
+        self._audit(
+            "compartir",
+            adjunto.id,
+            None,
+            {
+                "nombre_archivo": adjunto.nombre_archivo,
+                "pago_id": str(adjunto.pago_id),
+                "expira": expira.isoformat(),
+                "dias": dias,
+            },
+        )
+        return EnlaceSoporteCompartido(
+            url=url,
+            nombre_archivo=adjunto.nombre_archivo,
+            expira=expira,
+            expira_texto=texto_caducidad(expira),
+            dias=dias,
+        )
+
+    # ---------------------------------------------------------------- borrar
+    def _barrer(self, filas: list[AdjuntoPagoLiquidacion], motivo: str) -> int:
+        """Se lleva de la base los soportes de la lista, y del bucket al confirmar.
+
+        EN R2 ES DE MEJOR ESFUERZO, al revés que en `eliminar_adjunto`. Allá el
+        fallo tiene que detener la operación porque borrar el soporte ES la
+        operación; aquí la operación es borrar el pago o la liquidación, y dejarla
+        a medias —o negarla— porque el bucket no respondió sería peor: el dueño
+        quedaría sin poder corregir un pago mal registrado por un problema de red.
+        Lo que no se pudo borrar queda en el log.
+
+        PRIMERO LA BASE, EL BUCKET DE ÚLTIMO Y SOLO SI LA TRANSACCIÓN CUAJÓ. Antes
+        los archivos se borraban de una, en el mismo momento, y eso abría un hueco
+        de una sola dirección: el borrado de R2 no se deshace. Si algo reventaba
+        después —la validación de más abajo, el `flush`, o el commit que ocurre
+        afuera, en `get_db`— la sesión hacía rollback, las filas RESUCITABAN con su
+        `deleted_at` en nulo... y los archivos que nombraban ya no existían. Quedaba
+        una pantalla llena de soportes que no abren y nadie sabría por qué. Ahora la
+        limpieza del bucket se cuelga del `after_commit` de la sesión: si la
+        operación se cae, los archivos siguen ahí y las filas también — consistente.
+
+        SE AUDITA CADA SOPORTE, uno por uno, igual que cuando se borra suelto por
+        el botón. Un comprobante de pago que desaparece tiene que dejar renglón
+        propio: sin esto, borrar el pago se llevaba las fotos de tres
+        transferencias y en la bitácora solo quedaba "editar liquidación". El
+        motivo va escrito adentro para que se distinga de un borrado a mano.
+        """
+        if not filas:
+            return 0
+        claves = [fila.object_key for fila in filas]
+        for fila in filas:
+            antes = serialize_entity(fila)
+            self.repo.soft_delete(fila, deleted_by=self.ctx.user_id)
+            self._audit(
+                "eliminar", fila.id, antes, serialize_entity(fila) | {"motivo": motivo}
+            )
+        borrar_del_bucket_al_confirmar(self.db, claves, motivo)
+        return len(filas)
+
+    def limpiar_de_pago(self, pago_id: uuid.UUID) -> int:
+        """Se lleva los soportes cuando se borra el PAGO.
+
+        Sin esto, borrar un pago mal registrado dejaba su foto en el bucket para
+        siempre: el pago ya no existe, así que nadie la puede ver ni borrar desde
+        la aplicación, y el dueño sigue pagando ese almacenamiento sin saberlo.
+
+        Lo llama `LiquidacionService.eliminar_pago` ANTES de borrar el pago y
+        después de haber validado que sí se puede borrar: al revés, unos soportes
+        se perderían por un borrado que al final no ocurre.
+        """
+        return self._barrer(self.repo.de_pago(pago_id), "borrar el pago")
+
+    def limpiar_de_liquidacion(self, liquidacion_id: uuid.UUID) -> int:
+        """Se lleva los soportes de TODOS los pagos cuando se borra la liquidación.
+
+        Hoy es una red de seguridad más que un camino: borrar una liquidación con
+        pagos ya rebota (`validar_eliminar`), así que en la práctica cuando llega
+        aquí no queda ninguno. Va igual y no se confía en esa regla ajena, porque
+        el día que alguien afloje ese guardia —o aparezca otro camino que borre
+        liquidaciones en bloque— la consecuencia no sería un error visible sino
+        comprobantes de pago quedándose en el bucket sin nada que los nombre. Es
+        la misma razón por la que el reinicio de empresa los barre aparte.
+        """
+        return self._barrer(
+            self.repo.de_liquidacion(liquidacion_id), "borrar la liquidación"
+        )
+
+    def eliminar_adjunto(self, adjunto_id: uuid.UUID) -> None:
+        """Borra el soporte: PRIMERO la fila, y el objeto en R2 al confirmar.
+
+        ESTE ORDEN ESTABA AL REVÉS Y ERA EL MISMO HUECO QUE YA SE HABÍA TAPADO EN
+        `_barrer`. Dos funciones del mismo archivo defendían órdenes opuestos: se
+        borraba el objeto en R2 de una y solo después se marcaba la fila, con el
+        commit ocurriendo AFUERA, en `get_db`. Bastaba con que ese commit fallara
+        —la conexión con Postgres, un tiempo agotado, un tropiezo insertando el
+        renglón de auditoría— para que la sesión hiciera rollback: la fila REVIVE
+        con su `deleted_at` en nulo y el archivo que nombra YA NO EXISTE. La
+        pantalla lista entonces un soporte que no va a abrir nunca, y no hay
+        forma de recuperarlo. Reproducido, no supuesto.
+
+        EL ARGUMENTO ES DE UNA SOLA DIRECCIÓN, y es el mismo que ya está escrito
+        en `_barrer`: la fila de la base se puede resucitar con un rollback, el
+        archivo del bucket no. Así que lo irreversible va de último.
+
+        LO QUE SE CAMBIA A CAMBIO, dicho claro: si R2 falla DESPUÉS del commit,
+        el dueño ve que el soporte se borró —y se borró de verdad, ya no está en
+        la pantalla ni en la base— pero el archivo se queda ocupando espacio en
+        el bucket sin nada que lo nombre. Eso queda en el log y lo recoge el
+        barrido del reinicio de empresa. Es el mal menor: un archivo de sobra
+        cuesta unos centavos, un soporte de pago que la pantalla muestra y que no
+        abre cuesta una discusión con el productor.
+        """
+        adjunto = self._adjunto(adjunto_id)
+        if not r2_configurado():
+            raise BusinessError(MENSAJE_NO_CONFIGURADO, code="r2_no_configurado")
+        antes = serialize_entity(adjunto)
+        clave = adjunto.object_key
+        self.repo.soft_delete(adjunto, deleted_by=self.ctx.user_id)
+        self._audit("eliminar", adjunto.id, antes, serialize_entity(adjunto))
+        borrar_del_bucket_al_confirmar(self.db, [clave], "borrar el soporte")

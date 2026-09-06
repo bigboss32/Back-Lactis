@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     UniqueConstraint,
@@ -17,7 +18,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.common.models import AuditMixin, TenantMixin
+from app.common.models import AuditMixin, HoraDeRegistroMixin, TenantMixin
 from app.core.database import Base
 from app.modules.transportadores.models import MODO_DIA_FIJO, MODO_POR_LITRO
 
@@ -619,6 +620,122 @@ class PagoLiquidacion(AuditMixin, Base):
     observaciones: Mapped[str | None] = mapped_column(String(300))
 
     liquidacion: Mapped[Liquidacion] = relationship(back_populates="pagos")
+    # Los soportes vivos del pago. El filtro por `deleted_at` va DENTRO del join y
+    # no en quien lea: sin él, la lista seguiría contando los que ya se borraron.
+    # Es de SOLO LECTURA para que el ORM no intente cascadas por su cuenta: borrar
+    # un soporte tiene que pasar por el servicio, que además borra el archivo del
+    # bucket.
+    #
+    # `selectin` (una consulta más por página) y NO `joined`: un LEFT JOIN de por
+    # medio hace que Postgres rechace el `SELECT ... FOR UPDATE` con un 0A000, y
+    # ese candado es justo lo que evita que dos pagos simultáneos se pisen (ver
+    # `_bloquear` en el servicio). Y tampoco `select` a secas: la lista de
+    # liquidaciones trae los pagos de toda la página, así que una carga diferida
+    # dispararía una consulta POR PAGO solo para poder decir cuántas fotos tiene.
+    adjuntos: Mapped[list["AdjuntoPagoLiquidacion"]] = relationship(
+        primaryjoin=(
+            "and_(PagoLiquidacion.id == AdjuntoPagoLiquidacion.pago_id, "
+            "AdjuntoPagoLiquidacion.deleted_at.is_(None))"
+        ),
+        viewonly=True,
+        lazy="selectin",
+        order_by="AdjuntoPagoLiquidacion.created_at",
+    )
+
+    @property
+    def adjuntos_count(self) -> int:
+        """Cuántos soportes tiene. Va en la respuesta para que la pantalla marque
+        de un vistazo cuáles pagos tienen la foto de la transferencia y cuáles no
+        —que es justo lo que el dueño quiere ver cuando revisa una quincena."""
+        return len(self.adjuntos)
+
+
+class AdjuntoPagoLiquidacion(HoraDeRegistroMixin, TenantMixin, AuditMixin, Base):
+    """El soporte de un pago de liquidación: la foto de la transferencia.
+
+    LA HORA LA ESCRIBE LA APLICACIÓN, CON MICROSEGUNDOS (`HoraDeRegistroMixin`),
+    porque estos soportes se listan EN ORDEN: "primero la que mandó primero"
+    (ver `AdjuntoPagoLiquidacionRepository.de_pago`). Y la pantalla los sube TODOS
+    EN UNA SOLA PETICIÓN —dos giros del mismo pago van en el mismo POST—, que es
+    justo el caso donde la hora de la base no alcanza a distinguirlos: en Postgres
+    `now()` es la hora de la TRANSACCIÓN, así que las dos fotos de un mismo envío
+    quedaban con EL MISMO INSTANTE y cuál salía de primera la decidía el motor. Sin
+    esto, la promesa del repositorio no se podía cumplir. Es el mismo remedio que
+    ya llevan la bitácora (`Auditoria`) y el reparto FIFO de reventa, y no cambia
+    el esquema: no hay migración que correr.
+
+    Lo pidió el dueño: "que se le puedan agregar los comprobantes a los pagos de
+    los proveedores". Sirve para los pagos de las liquidaciones de LECHE y las de
+    FLETE, porque las dos usan `PagoLiquidacion`: el soporte se le pega igual al
+    pago de un productor que al de un transportador.
+
+    ES EL MISMO PATRÓN DE `AdjuntoReventa` (reventa/models.py) Y LAS MISMAS TRES
+    DECISIONES, que se repiten acá porque son las que hay que mantener:
+
+    NO SE GUARDA NINGUNA URL. Solo `object_key`, la llave del objeto dentro del
+    bucket privado. La URL para verlo se firma en el momento en que alguien la
+    pide y caduca sola (ver app/core/storage.py). Una URL guardada en una columna
+    es un permiso permanente: quien la viera —en un backup, en un log, en un
+    export— vería el soporte de pago para siempre, con el nombre, la cuenta y el
+    monto de una transferencia real.
+
+    LA LLAVE LLEVA EL empresa_id ADENTRO:
+    `{empresa_id}/liquidaciones/pagos/{pago_id}/{uuid}.jpg`. Además del filtro
+    por empresa en cada consulta, la llave misma queda amarrada a la empresa
+    dueña: si algún día una consulta se escapara sin filtro, la llave que se
+    firmaría seguiría siendo la de un archivo de OTRA empresa y se notaría de
+    inmediato en la auditoría; y como lleva un uuid aleatorio, tampoco se puede
+    adivinar la de nadie.
+
+    Y POR QUÉ ESTA TABLA SÍ LLEVA empresa_id PROPIO cuando su padre —el
+    `PagoLiquidacion` de arriba— decidió a propósito NO llevarlo. La diferencia
+    es por dónde se entra. Al pago solo se llega a través de su liquidación
+    (`/liquidaciones/{id}/pagos/{pago_id}`), así que la empresa la pone el padre
+    y una segunda copia sería una fuente más que se puede desincronizar. Al
+    soporte, en cambio, se entra DIRECTO POR SU PROPIO id para compartirlo y para
+    borrarlo (`/liquidaciones/adjuntos/{adjunto_id}`), sin ningún padre en la
+    ruta: sin `empresa_id` en la fila, el aislamiento entre queseras dependería de
+    acordarse de escribir un JOIN hasta la liquidación en cada consulta, y un
+    filtro que hay que acordarse de escribir es el filtro que un día no se
+    escribe. Con la columna, lo pone solo el repositorio genérico —`empresa_id` +
+    `deleted_at IS NULL`— igual que en `AdjuntoReventa`. No se desincroniza
+    porque el servicio la copia del contexto DESPUÉS de haber comprobado, con el
+    repositorio de liquidaciones, que la liquidación del pago es de esa empresa.
+    """
+
+    __tablename__ = "adjuntos_pago_liquidacion"
+    __table_args__ = (
+        # Con nombre explícito y no con `unique=True` en la columna: así el
+        # nombre es el MISMO que el de la migración y un `alembic revision
+        # --autogenerate` futuro no propone borrarla y volverla a crear.
+        UniqueConstraint("object_key", name="uq_adjuntos_pago_liq_object_key"),
+    )
+
+    # CASCADE igual que el pago con su liquidación. Es la red de abajo, no el
+    # mecanismo: el servicio borra las filas Y los archivos del bucket antes de
+    # borrar el pago, porque una fila que se va sin su archivo deja el archivo
+    # cobrando almacenamiento sin que nadie pueda verlo ni borrarlo.
+    pago_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("pagos_liquidacion.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    object_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    # Nombre con el que llegó el archivo, para mostrarlo y para nombrar la
+    # descarga. NO se usa para armar la llave: el nombre lo escribe quien sube.
+    nombre_archivo: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    # El peso de lo que QUEDÓ en el bucket, ya comprimido, no el de la foto que
+    # salió del celular: es lo que se está pagando y lo que hay que poder sumar
+    # para saber cuánto ocupa la empresa.
+    tamano_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Quién lo subió: el id va en `created_by` (AuditMixin), que es la única
+    # fuente de ese dato. Aquí se guarda solo el NOMBRE tal como estaba al subir,
+    # que es un hecho distinto: si mañana el usuario se borra o se le cambia el
+    # nombre, el soporte tiene que seguir diciendo quién lo aportó.
+    subido_por_nombre: Mapped[str | None] = mapped_column(String(150), default=None)
+
+    @property
+    def es_imagen(self) -> bool:
+        return (self.content_type or "").startswith("image/")
 
 
 class Anticipo(TenantMixin, AuditMixin, Base):

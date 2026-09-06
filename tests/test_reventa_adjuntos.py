@@ -12,29 +12,49 @@ siquiera cuando la máquina tiene llaves configuradas. Mismo patrón que
 `WompiFalso` en tests/test_suscripcion_pse.py: el servicio instancia el cliente
 DENTRO de cada método, así que basta con cambiarle el nombre en el módulo.
 """
+import io
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+from PIL import Image
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.exceptions import BusinessError
 from app.modules.reventa.models import AdjuntoReventa
+from tests.ayudas_imagenes import (
+    EJECUTABLE,
+    JPEG,
+    PDF,
+    PNG,
+    TEXTO_PLANO,
+    bomba_de_pixeles,
+    foto_de_comprobante,
+    foto_heic_de_iphone,
+    heic_se_puede_abrir,
+)
+from tests.ayudas_r2 import R2Falso, enchufar
 from tests.conftest import PASSWORD, auth_headers
 
 API = "/api/v1/reventa"
 
 # ---------------------------------------------------------------- archivos
-# Bytes suficientes para que el detector reconozca cada formato de verdad. El
-# backend NO mira la extensión del nombre ni el Content-Type que manda el
+# IMÁGENES DE VERDAD, armadas con Pillow (ver tests/ayudas_imagenes.py). Antes de
+# la compresión eran una cabecera de JPEG con relleno, y alcanzaba: el backend
+# solo le miraba los primeros bytes al archivo. Desde que las fotos SE COMPRIMEN
+# al subirlas hay que poder abrirlas de verdad, porque un JPEG de mentira lo
+# rechaza el compresor — que es justo lo que tiene que hacer con un archivo que
+# llegó dañado.
+#
+# Las que usan estas pruebas son CHIQUITAS (60 × 40) a propósito: por debajo del
+# tope de 1600 px y con tan poco que ahorrar que el compresor las deja pasar TAL
+# CUAL. Así el tipo con el que entran es el mismo con el que se guardan, y estas
+# pruebas siguen comprobando lo suyo —el flujo, los permisos, el aislamiento
+# entre queseras— sin quedar amarradas a cuánto comprime Pillow. Lo que sí se
+# comprime se mide aparte, en tests/test_compresion_soportes.py.
+#
+# El backend NO mira la extensión del nombre ni el Content-Type que manda el
 # navegador —los dos los pone quien sube—: mira los primeros bytes.
-JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"\x11" * 400
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x22" * 400
-PDF = b"%PDF-1.4\n" + b"comprobante bancolombia " * 20
-TEXTO_PLANO = b"esto no es una imagen, es un archivo de texto cualquiera"
-# Un ejecutable de Windows renombrado a .jpg: el caso que de verdad importa,
-# porque de estos objetos se reparten enlaces que abre otra persona.
-EJECUTABLE = b"MZ\x90\x00\x03" + b"\x00" * 400
 
 
 def foto(nombre="transferencia.jpg", contenido=JPEG, tipo="image/jpeg"):
@@ -43,69 +63,17 @@ def foto(nombre="transferencia.jpg", contenido=JPEG, tipo="image/jpeg"):
 
 
 # -------------------------------------------------------------- doble de R2
-class R2Falso:
-    """Doble del cliente de R2: guarda los objetos en un diccionario.
-
-    Registra TODO lo que se le pidió (qué se subió, qué se firmó y por cuántos
-    segundos, qué se borró) porque varias de estas pruebas verifican justamente
-    eso: que la duración del enlace sea corta, que no se firme nada de otra
-    empresa, y que borrar un adjunto borre también el archivo.
-    """
-
-    objetos: dict[str, tuple[bytes, str]] = {}
-    firmas: list[tuple[str, int]] = []
-    borrados: list[str] = []
-    revienta_al_borrar = False
-    revienta_al_subir_en = -1  # índice de la subida que debe fallar (-1 = ninguna)
-
-    @classmethod
-    def reset(cls):
-        cls.objetos = {}
-        cls.firmas = []
-        cls.borrados = []
-        cls.revienta_al_borrar = False
-        cls.revienta_al_subir_en = -1
-
-    def subir(self, *, clave, contenido, content_type):
-        if R2Falso.revienta_al_subir_en == len(R2Falso.objetos):
-            # El cliente de verdad convierte cualquier fallo de boto3 en un
-            # BusinessError legible (nunca deja salir un 500): el doble tiene
-            # que respetar ese contrato o la prueba estaría probando otra cosa.
-            raise BusinessError(
-                "No fue posible guardar la imagen. Verifique la conexión e intente de nuevo",
-                code="r2_error",
-            )
-        R2Falso.objetos[clave] = (contenido, content_type)
-
-    def enlace_firmado(self, *, clave, segundos, nombre_descarga=None):
-        R2Falso.firmas.append((clave, segundos))
-        # Con la misma pinta de una URL firmada de verdad (SigV4).
-        return (
-            f"https://ejemplo.r2.cloudflarestorage.com/lactis/{clave}"
-            f"?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires={segundos}"
-            f"&X-Amz-Signature=00deadbeef"
-        )
-
-    def borrar(self, clave):
-        if R2Falso.revienta_al_borrar:
-            raise BusinessError(
-                "No fue posible borrar la imagen del almacenamiento. Intente de nuevo",
-                code="r2_error",
-            )
-        R2Falso.borrados.append(clave)
-        R2Falso.objetos.pop(clave, None)
+# Vive en tests/ayudas_r2.py porque lo comparten estas pruebas y las de los
+# soportes de los pagos de liquidación: mismo bucket, mismo cliente, mismas
+# reglas. Dos dobles distintos serían dos contratos que se van separando.
 
 
 @pytest.fixture()
 def r2(monkeypatch):
-    """Enchufa el doble. Se parchean las DOS cosas que consulta el servicio: el
-    cliente y la función que dice si hay llaves configuradas."""
-    R2Falso.reset()
+    """Enchufa el doble (ver `tests/ayudas_r2.py::enchufar`)."""
     import app.modules.reventa.service as servicio
 
-    monkeypatch.setattr(servicio, "R2Client", R2Falso)
-    monkeypatch.setattr(servicio, "r2_configurado", lambda: True)
-    return R2Falso
+    return enchufar(monkeypatch, servicio)
 
 
 # ------------------------------------------------------------------ ayudas
@@ -264,6 +232,45 @@ def test_se_acepta_el_pdf_del_banco(client, base_datos, r2):
     # No es imagen: la pantalla tiene que mostrarle un icono de documento, no
     # intentar dibujar una miniatura que saldría rota.
     assert adjunto["es_imagen"] is False
+    # Y sale IDÉNTICO al que entró: el PDF no pasa por el compresor. Comprimirlo
+    # sería convertir texto nítido en una foto de texto.
+    assert list(R2Falso.objetos.values())[0][0] == PDF
+
+
+def test_la_foto_del_celular_tambien_se_comprime_en_reventa(client, base_datos, r2):
+    """LA COMPRESIÓN TAMBIÉN CORRE POR ACÁ, y eso es la mitad del pedido: "de
+    paso también le reducimos la calidad para ahorrar espacio".
+
+    Reventa es donde el dueño lleva más tiempo pegando fotos, así que es donde
+    más crece el bucket. Se sube la foto tal como sale del celular y se comprueba
+    lo que quedó EN EL ALMACENAMIENTO, que es lo que se paga.
+
+    Lo que ya está subido NO se recomprime: esto corre solo en la subida.
+    """
+    from PIL import Image
+
+    from tests.ayudas_imagenes import foto_de_celular
+
+    h = auth_headers(client, "admin.a")
+    compra = comprar(client, h)
+    original = foto_de_celular()
+
+    r = client.post(
+        f"{API}/compras/{compra['id']}/adjuntos",
+        files=[("files", ("IMG_0421.jpg", original, "image/jpeg"))],
+        headers=h,
+    )
+    assert r.status_code == 201, r.text
+    guardado, tipo = list(R2Falso.objetos.values())[0]
+    imagen = Image.open(io.BytesIO(guardado))
+    print("\n===== LA FOTO SE GUARDA COMPRIMIDA =====")
+    print(f"  entra:  {len(original) / 1024 / 1024:.2f} MB (4032 × 3024)")
+    print(f"  guarda: {len(guardado) / 1024:.0f} KB ({imagen.size[0]} × {imagen.size[1]}) {tipo}")
+    print(f"  ahorro: {100 * (1 - len(guardado) / len(original)):.1f} %")
+    assert len(guardado) < len(original) / 5
+    assert max(imagen.size) == 1600
+    # El peso que se anota es el de lo que QUEDÓ, no el de lo que entró.
+    assert r.json()["adjuntos"][0]["tamano_bytes"] == len(guardado)
 
 
 # ===========================================================================
@@ -437,10 +444,22 @@ def test_borrar_quita_tambien_el_archivo_del_almacenamiento(client, base_datos, 
     assert len(quedan["adjuntos"]) == 1
 
 
-def test_si_el_almacenamiento_falla_al_borrar_la_fila_sobrevive(client, base_datos, r2):
-    """Se borra PRIMERO el archivo y después la fila, a propósito. Si R2 no
-    responde, el dueño tiene que ver que no se borró y volver a intentar; al
-    revés, el archivo quedaría suelto en el bucket sin nada que lo nombre."""
+def test_si_el_almacenamiento_falla_al_borrar_el_soporte_igual_desaparece(
+    client, base_datos, r2
+):
+    """EL MISMO ORDEN QUE EN EL GEMELO, y el mismo cambio a cambio.
+
+    `eliminar_adjunto` borraba PRIMERO el objeto en R2 y después la fila, con el
+    commit ocurriendo afuera, en `get_db`. Si ese commit fallaba, la sesión hacía
+    rollback: la fila REVIVE y el archivo que nombra ya no existe. Ahora primero
+    la base y el bucket al confirmar.
+
+    Lo que se cambia a cambio: si el bucket no responde, el soporte se borra
+    igual y el archivo queda huérfano ocupando espacio. Es el mal menor —lo dice
+    el mismo módulo en `limpiar_de_documento`—: un archivo de sobra cuesta unos
+    centavos; un soporte que la pantalla muestra y que no abre cuesta una
+    discusión sobre si se pagó.
+    """
     h = auth_headers(client, "admin.a")
     compra = comprar(client, h)
     subida = client.post(
@@ -450,15 +469,118 @@ def test_si_el_almacenamiento_falla_al_borrar_la_fila_sobrevive(client, base_dat
 
     R2Falso.revienta_al_borrar = True
     r = client.delete(f"{API}/adjuntos/{adjunto_id}", headers=h)
-    print("\n===== SI FALLA EL BORRADO EN R2 =====")
-    print(f"  DELETE: {r.status_code} · {r.json()['error']['detail']}")
-    assert r.status_code == 422
-    assert r.json()["error"]["code"] == "r2_error"
-
     R2Falso.revienta_al_borrar = False
+    print("\n===== SI FALLA EL BORRADO EN R2 =====")
+    print(f"  DELETE: {r.status_code} (el soporte se borra igual)")
+    assert r.status_code == 204
+
     quedan = client.get(f"{API}/compras/{compra['id']}/adjuntos", headers=h).json()
-    print(f"  el soporte sigue ahí para reintentar: {len(quedan['adjuntos'])}")
-    assert len(quedan["adjuntos"]) == 1
+    print(f"  la lista queda en {len(quedan['adjuntos'])} · y el archivo quedó "
+          f"huérfano en el bucket: {len(R2Falso.objetos)}")
+    assert quedan["adjuntos"] == []
+    assert len(R2Falso.objetos) == 1
+
+
+def test_borrar_la_compra_deja_renglon_propio_por_cada_soporte(
+    client, base_datos, r2, db_session
+):
+    """EL DEFECTO MECÁNICO QUE QUEDÓ ANOTADO: el gemelo no auditaba.
+
+    `AdjuntoPagoLiquidacionService._barrer` ya audita soporte por soporte cuando
+    se borra el pago. `AdjuntoReventaService.limpiar_de_documento` —la clase que
+    el propio docstring del otro llama "el gemelo"— borraba las filas y los
+    archivos sin escribir un solo renglón. Así, borrar una compra se llevaba las
+    fotos de tres transferencias y en la bitácora quedaba únicamente el "eliminar"
+    de la compra: ni un rastro de los soportes.
+
+    Es exactamente el dato que alguien va a buscar cuando pregunte dónde quedó la
+    prueba de una entrega de plata.
+    """
+    from app.modules.auditoria.models import Auditoria
+
+    h = auth_headers(client, "admin.a")
+    compra = comprar(client, h)
+    client.post(
+        f"{API}/compras/{compra['id']}/adjuntos",
+        files=[foto("giro1.jpg"), foto("giro2.jpg"), foto("giro3.jpg")],
+        headers=h,
+    )
+    r = client.delete(f"{API}/compras/{compra['id']}", headers=h)
+    assert r.status_code in (200, 204), r.text
+
+    renglones = db_session.scalars(
+        select(Auditoria).where(
+            Auditoria.entidad == "AdjuntoReventa", Auditoria.accion == "eliminar"
+        )
+    ).all()
+    print("\n===== BORRAR LA COMPRA DEJA RENGLÓN POR CADA SOPORTE =====")
+    for renglon in renglones:
+        print(f"  {renglon.accion} {renglon.entidad} · "
+              f"«{renglon.antes['nombre_archivo']}» · motivo: "
+              f"{renglon.despues['motivo']}")
+    assert len(renglones) == 3, "los soportes desaparecieron sin dejar rastro"
+    assert all(r_.despues["motivo"] == "borrar la compra" for r_ in renglones), (
+        "el renglón no dice por qué desapareció el soporte"
+    )
+    # Con quién los borró y qué eran: la bitácora sirve si se puede leer después.
+    assert all(r_.usuario_id is not None for r_ in renglones)
+    assert {r_.antes["nombre_archivo"] for r_ in renglones} == {
+        "giro1.jpg", "giro2.jpg", "giro3.jpg"
+    }
+
+
+def test_si_el_borrado_de_la_compra_se_cae_a_mitad_no_quedan_filas_sin_archivo(
+    client, base_datos, r2, db_session, monkeypatch
+):
+    """Y el otro lado del mismo arreglo: el bucket, de último.
+
+    `limpiar_de_documento` borraba los objetos de R2 de una, antes del resto del
+    borrado de la compra y mucho antes del commit —que ocurre afuera, en
+    `get_db`—. Un fallo posterior hacía rollback: las filas RESUCITAN con su
+    `deleted_at` en nulo y los archivos que nombran ya no existen. El borrado de
+    R2 no se deshace; el de la fila sí, así que lo irreversible va de último.
+    """
+    import app.modules.reventa.service as servicio
+
+    h = auth_headers(client, "admin.a")
+    compra = comprar(client, h)
+    client.post(
+        f"{API}/compras/{compra['id']}/adjuntos",
+        files=[foto("giro1.jpg"), foto("giro2.jpg")],
+        headers=h,
+    )
+    claves_antes = set(R2Falso.objetos)
+    assert len(claves_antes) == 2
+
+    original = servicio.borrar_del_bucket_al_confirmar
+
+    def _revienta_despues(*a, **k):
+        original(*a, **k)
+        raise RuntimeError("se cayó la luz antes de confirmar")
+
+    monkeypatch.setattr(servicio, "borrar_del_bucket_al_confirmar", _revienta_despues)
+    with pytest.raises(RuntimeError):
+        client.delete(f"{API}/compras/{compra['id']}", headers=h)
+    monkeypatch.setattr(servicio, "borrar_del_bucket_al_confirmar", original)
+
+    print("\n===== EL BORRADO DE LA COMPRA SE CAYÓ A MITAD =====")
+    print(f"  objetos en el bucket: {len(R2Falso.objetos)} (estaban {len(claves_antes)})")
+    print(f"  borrados del bucket:  {len(R2Falso.borrados)}")
+    assert set(R2Falso.objetos) == claves_antes, (
+        "se borraron archivos de una operación que no cuajó"
+    )
+    assert R2Falso.borrados == []
+
+    db_session.rollback()
+    vivas = db_session.scalars(
+        select(AdjuntoReventa).where(AdjuntoReventa.deleted_at.is_(None))
+    ).all()
+    print(f"  filas vivas: {len(vivas)} · y sus llaves siguen en el bucket: "
+          f"{all(v.object_key in R2Falso.objetos for v in vivas)}")
+    assert len(vivas) == 2
+    assert all(v.object_key in R2Falso.objetos for v in vivas), (
+        "quedaron filas apuntando a archivos que ya no existen"
+    )
 
 
 # ===========================================================================
@@ -499,6 +621,99 @@ def test_un_archivo_que_no_es_imagen_ni_pdf_se_rechaza_con_mensaje_claro(
     assert client.get(f"{API}/compras/{compra['id']}/adjuntos", headers=h).json()[
         "adjuntos"
     ] == []
+
+
+def test_la_foto_de_iphone_vuelve_a_entrar_en_reventa(client, base_datos, r2):
+    """REVENTA ACEPTABA FOTOS DE iPHONE Y DEJÓ DE ACEPTARLAS cuando llegó la
+    compresión: Pillow sola no abre HEIC, así que la foto que ANTES se guardaba
+    —cruda, pero se guardaba— empezó a rebotar. Una función que el dueño ya usaba,
+    perdida sin querer y sin que nadie la pidiera.
+
+    Con `pillow-heif` vuelve, y mejor que antes: ya no se guarda cruda —un archivo
+    que el navegador del productor no dibuja— sino comprimida y vuelta JPEG.
+    """
+    assert heic_se_puede_abrir(), "falta pillow-heif: no se está probando nada"
+    h = auth_headers(client, "admin.a")
+    compra = comprar(client, h)
+    heic = foto_heic_de_iphone(2400, 1800)
+
+    r = client.post(
+        f"{API}/compras/{compra['id']}/adjuntos",
+        files=[("files", ("IMG_2201.HEIC", heic, "image/heic"))],
+        headers=h,
+    )
+    assert r.status_code == 201, r.text
+    fila = r.json()["adjuntos"][0]
+    guardado, tipo_guardado = list(R2Falso.objetos.values())[0]
+    adentro = Image.open(io.BytesIO(guardado))
+    print("\n===== e2) LA FOTO DE iPHONE VUELVE A ENTRAR =====")
+    print(f"  sube IMG_2201.HEIC ({len(heic) / 1024:.0f} KB) → queda "
+          f"«{fila['nombre_archivo']}» {fila['content_type']}, un {adentro.format} "
+          f"de {adentro.size[0]} × {adentro.size[1]}")
+    assert (fila["content_type"], fila["nombre_archivo"]) == (
+        "image/jpeg",
+        "IMG_2201.jpg",
+    )
+    assert tipo_guardado == "image/jpeg" and adentro.format == "JPEG"
+
+
+def test_una_foto_de_muchisimos_pixeles_no_tumba_el_servidor(client, base_datos, r2):
+    """El tope de 15 MB no puede ver esto: mide el archivo COMPRIMIDO. Un PNG de un
+    gris plano de 12.000 × 12.000 pesa 157 KB y al abrirlo se lleva 700 MB de
+    memoria — y las dos queseras comparten servidor. Se rebota ANTES de abrirlo,
+    con las medidas dichas para que se entienda qué pasó.
+    """
+    h = auth_headers(client, "admin.a")
+    compra = comprar(client, h)
+    bomba = bomba_de_pixeles(12000, 12000)
+
+    r = client.post(
+        f"{API}/compras/{compra['id']}/adjuntos",
+        files=[("files", ("captura.png", bomba, "image/png"))],
+        headers=h,
+    )
+    detalle = r.json()["error"]["detail"]
+    print("\n===== e3) LA BOMBA DE PÍXELES =====")
+    print(f"  captura.png · {len(bomba) / 1024:.0f} KB en disco, 144 megapíxeles "
+          f"adentro → {r.status_code}")
+    print(f"  {detalle}")
+    assert r.status_code == 422
+    assert "captura.png" in detalle and "demasiado grande" in detalle
+    assert R2Falso.objetos == {}
+    assert (
+        client.get(f"{API}/compras/{compra['id']}/adjuntos", headers=h).status_code == 200
+    )
+
+
+def test_una_captura_png_se_guarda_como_jpg_y_el_nombre_lo_dice(client, base_datos, r2):
+    """El nombre que queda es el `nombre_descarga` del enlace firmado: es con el que
+    el archivo aterriza en el computador de quien abre lo que le mandaron. Si se
+    subió "captura.png", se guardó un JPEG y el nombre siguiera diciendo .png, el
+    que lo recibe se baja algo que su equipo no sabe abrir por creerle al nombre —y
+    el enlace ya caducó, así que no hay a quién preguntarle.
+    """
+    h = auth_headers(client, "admin.a")
+    compra = comprar(client, h)
+    png_grande = io.BytesIO()
+    Image.open(io.BytesIO(foto_de_comprobante(2400, 1800))).save(
+        png_grande, format="PNG"
+    )
+
+    r = client.post(
+        f"{API}/compras/{compra['id']}/adjuntos",
+        files=[("files", ("captura.png", png_grande.getvalue(), "image/png"))],
+        headers=h,
+    )
+    assert r.status_code == 201, r.text
+    fila = r.json()["adjuntos"][0]
+    clave = list(R2Falso.objetos)[0]
+    print("\n===== e4) EL NOMBRE NO MIENTE =====")
+    print(f"  sube «captura.png» image/png → queda «{fila['nombre_archivo']}» "
+          f"{fila['content_type']} · llave …{clave[-8:]}")
+    assert fila["nombre_archivo"] == "captura.jpg"
+    assert fila["content_type"] == "image/jpeg"
+    assert clave.endswith(".jpg")
+    assert Image.open(io.BytesIO(R2Falso.objetos[clave][0])).format == "JPEG"
 
 
 def test_un_archivo_demasiado_grande_se_rechaza_diciendo_cuanto_pesa(
@@ -839,11 +1054,9 @@ def test_reiniciar_la_empresa_se_lleva_los_archivos_del_bucket(
     Se comprueba además que NO se lleva los de la OTRA empresa: es la clase de
     error que solo se nota cuando ya no hay nada que recuperar.
     """
-    import app.modules.empresas.service as servicio_empresas
-
-    monkeypatch.setattr(servicio_empresas, "R2Client", R2Falso, raising=False)
-    # El servicio de empresas importa el cliente dentro de la función, así que se
-    # parchea en el módulo de origen; se hacen las dos cosas por si acaso.
+    # El reinicio ya no instancia el cliente: encarga el borrado a
+    # `borrar_del_bucket_al_confirmar`, que vive en `app.core.storage` y solo
+    # corre si la transacción cuaja. Así que el doble se enchufa AHÍ.
     import app.core.storage as almacenamiento
 
     monkeypatch.setattr(almacenamiento, "R2Client", R2Falso)

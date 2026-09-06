@@ -2,16 +2,18 @@ import uuid
 from datetime import date
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, UploadFile, status
 
 from app.common.crud_router import build_crud_router
 from app.core.context import RequestContext
 from app.core.deps import DbSession, require_permission
 from app.core.pagination import Page, PageParams, page_params
 from app.modules.liquidaciones.schemas import (
+    AdjuntosPagoLista,
     AnticipoCreate,
     AnticipoRead,
     AnticipoUpdate,
+    EnlaceSoporteCompartido,
     GenerarLiquidaciones,
     GenerarLiquidacionesResultado,
     LiquidacionDetallePrecioUpdate,
@@ -21,7 +23,11 @@ from app.modules.liquidaciones.schemas import (
     PreLiquidacionRead,
     PrevisualizarLiquidacion,
 )
-from app.modules.liquidaciones.service import AnticipoService, LiquidacionService
+from app.modules.liquidaciones.service import (
+    AdjuntoPagoLiquidacionService,
+    AnticipoService,
+    LiquidacionService,
+)
 
 router = APIRouter(tags=["Liquidaciones"])
 
@@ -212,7 +218,94 @@ def eliminar_pago(
     # sistema y es la puerta para tapar una entrega de plata.
     ctx: RequestContext = Depends(require_permission("liquidaciones", "eliminar")),
 ) -> LiquidacionRead:
+    """Borra el pago Y SUS SOPORTES, también del almacenamiento: la foto de una
+    transferencia que ya no existe no se queda cobrando espacio en el bucket."""
     return _to_read(LiquidacionService(db, ctx).eliminar_pago(entity_id, pago_id))
+
+
+# ------------------------ soportes del pago (la foto de la transferencia)
+# Lo pidió el dueño: "que se le puedan agregar los comprobantes a los pagos de los
+# proveedores". Cuatro rutas y tres permisos distintos, y la diferencia importa —es
+# el mismo criterio que ya está puesto en los adjuntos de reventa, ajustado a que
+# aquí registrar un pago pide 'administrar' y no 'crear':
+#
+# - SUBIR con 'administrar', EL MISMO PERMISO QUE REGISTRAR EL PAGO. El soporte es
+#   la prueba de esa entrega de plata, así que lo aporta quien la hace. Con 'crear'
+#   —el permiso de generar la quincena, que tiene el rol Compras— cualquiera que
+#   arma liquidaciones podría colgarle un comprobante a un pago que no puede hacer.
+# - VER con 'consultar', que es lo mismo que ver la liquidación y sus pagos.
+# - COMPARTIR con 'exportar': el enlace largo saca información de pago DEL SISTEMA
+#   hacia afuera (se manda por WhatsApp y se puede reenviar). Es la misma acción
+#   que ya exige sacar datos en los demás módulos, y deja fuera a los roles de solo
+#   consulta, que pueden mirar el soporte en pantalla pero no repartirlo.
+# - BORRAR con 'eliminar', A SECAS, igual que borrar el pago. No con 'crear': ya
+#   pasó en este proyecto que un borrado quedó pidiendo 'crear' (los abonos de
+#   reventa) y le dio a media empresa la posibilidad de borrar lo que otro registró.
+@router.post(
+    "/{entity_id}/pagos/{pago_id}/adjuntos",
+    response_model=AdjuntosPagoLista,
+    status_code=status.HTTP_201_CREATED,
+    summary="Adjuntar soportes al pago de una liquidación (varias fotos o PDF)",
+)
+def subir_adjuntos_pago(
+    entity_id: uuid.UUID,
+    pago_id: uuid.UUID,
+    files: list[UploadFile],
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "administrar")),
+) -> AdjuntosPagoLista:
+    """Devuelve la lista completa ya actualizada, con enlaces frescos, para que la
+    pantalla no tenga que pedirla otra vez después de subir.
+
+    Las fotos se COMPRIMEN al entrar (1600 px de lado mayor, calidad 75): una foto
+    de celular de 4 MB queda en unos 300 KB y se sigue leyendo el monto, la cuenta
+    y la referencia. Los PDF del banco pasan derecho, sin tocar.
+    """
+    return AdjuntoPagoLiquidacionService(db, ctx).subir(
+        files, liquidacion_id=entity_id, pago_id=pago_id
+    )
+
+
+@router.get(
+    "/{entity_id}/pagos/{pago_id}/adjuntos",
+    response_model=AdjuntosPagoLista,
+    summary="Soportes del pago, con enlaces firmados de corta duración",
+)
+def listar_adjuntos_pago(
+    entity_id: uuid.UUID,
+    pago_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "consultar")),
+) -> AdjuntosPagoLista:
+    return AdjuntoPagoLiquidacionService(db, ctx).listar(entity_id, pago_id)
+
+
+@router.post(
+    "/adjuntos/{adjunto_id}/compartir",
+    response_model=EnlaceSoporteCompartido,
+    summary="Enlace de más duración para mandar UN soporte por WhatsApp",
+)
+def compartir_adjunto_pago(
+    adjunto_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "exportar")),
+) -> EnlaceSoporteCompartido:
+    """El enlace trae escrito hasta cuándo sirve, en hora de Colombia, porque quien
+    lo reparte tiene que saber qué está repartiendo. Queda en la auditoría."""
+    return AdjuntoPagoLiquidacionService(db, ctx).compartir(adjunto_id)
+
+
+@router.delete(
+    "/adjuntos/{adjunto_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Borrar un soporte (borra también el archivo del almacenamiento)",
+)
+def eliminar_adjunto_pago(
+    adjunto_id: uuid.UUID,
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "eliminar")),
+) -> None:
+    AdjuntoPagoLiquidacionService(db, ctx).eliminar_adjunto(adjunto_id)
 
 
 @router.post("/{entity_id}/anular", response_model=LiquidacionRead, summary="Anular liquidación")

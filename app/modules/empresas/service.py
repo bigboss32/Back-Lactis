@@ -8,13 +8,10 @@ from pydantic import BaseModel
 from app.common.service import BaseService, serialize_entity
 from app.core.config import settings
 from app.core.exceptions import BusinessError, ConflictError, ForbiddenError, NotFoundError
-from app.core.logging_config import get_logger
 from app.core.pagination import PageParams
 from app.modules.empresas.models import Empresa
 from app.modules.empresas.repository import EmpresaRepository
 from app.utils.files import save_upload
-
-logger = get_logger("empresas")
 
 
 class EmpresaService(BaseService[Empresa]):
@@ -106,6 +103,7 @@ class EmpresaService(BaseService[Empresa]):
         from app.modules.gastos.models import Gasto
         from app.modules.inventario.models import MovimientoInventario
         from app.modules.liquidaciones.models import (
+            AdjuntoPagoLiquidacion,
             Anticipo,
             Liquidacion,
             LiquidacionDetalle,
@@ -138,7 +136,9 @@ class EmpresaService(BaseService[Empresa]):
 
         borrados: dict[str, int] = {}
 
-        # 0) Los ARCHIVOS de los soportes de reventa, antes de borrar sus filas.
+        # 0) Los ARCHIVOS de los soportes, antes de borrar sus filas. Los DOS
+        # tipos: los de reventa (compras y ventas) y los de los pagos de
+        # liquidación (la transferencia al productor y al transportador).
         #
         # Borrar solo las filas dejaría las fotos de las transferencias en el
         # bucket de Cloudflare para siempre: sin fila que las nombre, nadie las
@@ -150,30 +150,49 @@ class EmpresaService(BaseService[Empresa]):
         # una operación de superadmin, irreversible y ya confirmada por nombre,
         # y detenerla a la mitad dejaría la empresa medio borrada. Lo que no se
         # pudo borrar queda en el log para limpiarlo a mano.
+        #
+        # Y SE BORRAN AL CONFIRMAR, NO AQUÍ MISMO, que es el mismo hueco que ya se
+        # cerró en los dos servicios de adjuntos y en la peor escala: un reinicio
+        # toca decenas de tablas, así que un fallo a la mitad no es exótico. Antes
+        # los archivos se borraban de una, ANTES del `delete()` de las filas y
+        # mucho antes del commit —que ocurre afuera, en `get_db`—, así que un
+        # tropiezo cualquiera hacía rollback y dejaba una empresa con TODOS sus
+        # comprobantes en la base y NINGUNO en el bucket, sin nada en la respuesta
+        # que lo dijera. El borrado de R2 no se deshace; el de las filas sí.
+        # Reproducido: 2 soportes, reinicio, rollback → 2 filas vivas, 0 objetos.
         claves = list(
             self.db.scalars(
                 select(AdjuntoReventa.object_key).where(
                     AdjuntoReventa.empresa_id == entity_id
                 )
             ).all()
+        ) + list(
+            self.db.scalars(
+                select(AdjuntoPagoLiquidacion.object_key).where(
+                    AdjuntoPagoLiquidacion.empresa_id == entity_id
+                )
+            ).all()
         )
         if claves:
-            from app.core.storage import R2Client, r2_configurado
+            from app.core.storage import borrar_del_bucket_al_confirmar
 
-            if r2_configurado():
-                cliente = R2Client()
-                for clave in claves:
-                    try:
-                        cliente.borrar(clave)
-                    except Exception:
-                        logger.warning("Quedó un objeto en R2 tras reiniciar la empresa: %s", clave)
-            else:
-                logger.warning(
-                    "Se reinició la empresa %s con %d soportes en R2 y sin llaves "
-                    "configuradas: esos archivos hay que borrarlos a mano",
-                    entity_id,
-                    len(claves),
-                )
+            borrar_del_bucket_al_confirmar(
+                self.db, claves, "reiniciar la empresa"
+            )
+
+        # 0.bis) Las filas de los soportes de los pagos de liquidación, ANTES que
+        # los pagos de los que cuelgan. Va aquí y no en la lista de abajo, ni en
+        # el barrido de `transaccionales`, por el orden: los pagos se borran en el
+        # paso 1 y `transaccionales` corre después, así que dejarlo para allá
+        # dejaría estas filas apuntando a un pago que ya no existe. En Postgres el
+        # ON DELETE CASCADE las arrastraría, pero en SQLite las llaves foráneas
+        # vienen apagadas y ahí sobrevivirían al reinicio.
+        res = self.db.execute(
+            delete(AdjuntoPagoLiquidacion).where(
+                AdjuntoPagoLiquidacion.empresa_id == entity_id
+            )
+        )
+        borrados[AdjuntoPagoLiquidacion.__tablename__] = res.rowcount or 0
 
         # 1) Detalles sin empresa_id: se borran por su documento padre de esta empresa.
         detalles = [

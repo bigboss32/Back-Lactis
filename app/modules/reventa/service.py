@@ -1,7 +1,6 @@
 """Reventa de queso: compras a productores con merma y abonos, ventas a
 clientes y resumen de ganancia. Contabilidad separada del libro de la quesera.
 """
-import os
 import re
 import unicodedata
 import uuid
@@ -19,11 +18,13 @@ from app.common.nombres import canonizar_nombre, clave_de_tercero, unir_nombres
 from app.common.service import BaseService, serialize_entity
 from app.core.config import settings
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
+from app.core.imagenes import TIPOS_SOPORTE_PERMITIDOS, leer_y_validar_soporte
 from app.core.logging_config import get_logger
 from app.core.pagination import PageParams
 from app.core.storage import (
     MENSAJE_NO_CONFIGURADO,
     R2Client,
+    borrar_del_bucket_al_confirmar,
     caducidad_utc,
     r2_configurado,
     texto_caducidad,
@@ -3205,75 +3206,14 @@ class ConversionBoronaService(BaseService[ConversionBorona]):
 # ----------------------------------- adjuntos (soportes de transferencia)
 logger_adjuntos = get_logger("reventa.adjuntos")
 
-# Qué se acepta y con qué extensión se guarda en el bucket.
-#
-# SE ACEPTA PDF, y es una decisión, no un descuido: los bancos colombianos
-# (Bancolombia, Nequi, Davivienda) entregan el comprobante de una transferencia
-# como PDF descargable, y ese PDF ES el soporte bueno — más que una foto de la
-# pantalla. Rechazarlo obligaría al dueño a tomarle una foto al comprobante que
-# ya tenía, que es peor soporte y trabajo de más.
-#
-# HEIC/HEIF entran porque es lo que produce un iPhone por defecto. El navegador
-# a veces no sabe dibujar la miniatura, pero rechazar la foto de un iPhone con
-# un "tipo no permitido" sería inexplicable para quien la está mandando.
-#
-# No entran videos ni ofimática: esto es el respaldo de que se pagó, no un
-# archivador. Cada tipo que se abre es un tipo más que hay que servir con un
-# enlace firmado, y un .html o un .svg firmados serían código ejecutándose en el
-# navegador de quien reciba el enlace.
-TIPOS_ADJUNTO_PERMITIDOS: dict[str, str] = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/webp": ".webp",
-    "image/heic": ".heic",
-    "image/heif": ".heif",
-    "application/pdf": ".pdf",
-}
-
-TIPOS_EN_CRISTIANO = "fotos JPG, PNG, WEBP o HEIC, y comprobantes en PDF"
-
-# Marcas HEIF/HEIC: los primeros bytes son el tamaño de la caja, luego 'ftyp' y
-# luego la marca. Se listan las que usan las cámaras de los teléfonos.
-MARCAS_HEIC = {b"heic", b"heix", b"hevc", b"heim", b"heis", b"hevm", b"hevs"}
-MARCAS_HEIF = {b"mif1", b"msf1"}
-
-
-def _detectar_tipo(cabeza: bytes) -> str | None:
-    """Qué es el archivo DE VERDAD, mirándole los primeros bytes.
-
-    No se confía en el Content-Type que manda el navegador ni en la extensión
-    del nombre: los dos los pone quien sube y los dos se cambian solos. Y aquí
-    importa de verdad, porque de estos objetos se reparten enlaces firmados que
-    se abren en el navegador de otra persona: un .html disfrazado de .jpg sería
-    una página que corre en el dominio del almacenamiento con un enlace que el
-    dueño repartió de buena fe por WhatsApp.
-
-    Devuelve el tipo reconocido, o None si no es ninguno de los permitidos.
-    """
-    if cabeza.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if cabeza.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if cabeza[:4] == b"RIFF" and cabeza[8:12] == b"WEBP":
-        return "image/webp"
-    if cabeza[4:8] == b"ftyp":
-        marca = cabeza[8:12]
-        if marca in MARCAS_HEIC:
-            return "image/heic"
-        if marca in MARCAS_HEIF:
-            return "image/heif"
-    if cabeza.startswith(b"%PDF-"):
-        return "application/pdf"
-    return None
-
-
-def _tamano_legible(bytes_: int) -> str:
-    """"4,2 MB" — con coma decimal, que es como se escribe en Colombia."""
-    if bytes_ < 1024:
-        return f"{bytes_} bytes"
-    if bytes_ < 1024 * 1024:
-        return f"{bytes_ / 1024:.0f} KB"
-    return f"{bytes_ / (1024 * 1024):.1f}".replace(".", ",") + " MB"
+# QUÉ SE ACEPTA, CÓMO SE RECONOCE Y CÓMO SE COMPRIME: todo eso se mudó a
+# `app/core/imagenes.py`, que es un módulo hermano de `storage.py`. Vive allá y
+# no aquí porque los soportes de un PAGO DE LIQUIDACIÓN —la foto de la
+# transferencia al productor o al transportador— pasan por exactamente las
+# mismas reglas, y dos copias de "qué archivo se acepta" son dos listas que
+# terminan aceptando cosas distintas. Aquí quedan solo los alias, para que el
+# resto de este módulo se siga leyendo igual.
+TIPOS_ADJUNTO_PERMITIDOS = TIPOS_SOPORTE_PERMITIDOS
 
 
 class AdjuntoReventaService(BaseService[AdjuntoReventa]):
@@ -3334,49 +3274,22 @@ class AdjuntoReventaService(BaseService[AdjuntoReventa]):
         )
 
     def _leer_y_validar(self, archivo: Any) -> tuple[bytes, str, str, str]:
-        """(contenido, tipo real, extension, nombre) — o BusinessError legible.
+        """(contenido YA COMPRIMIDO, tipo resultante, extensión, nombre).
 
-        Se mide ANTES de leer: un archivo de 400 MB no se carga en memoria solo
-        para después decir que no cabe. En el campo la señal es mala y una subida
-        equivocada se nota tarde; lo que no puede pasar es que tumbe el servidor.
+        Delega en `leer_y_validar_soporte`, que es el mismo camino que usan los
+        soportes de un pago de liquidación. Ojo con lo que devuelve: el tipo, la
+        extensión Y EL NOMBRE son los de DESPUÉS de comprimir, así que una foto que
+        llegó como "captura.png" queda con `image/jpeg`, llave `.jpg` y nombre
+        "captura.jpg" — ese nombre es el que viaja en el enlace firmado, y con la
+        extensión vieja el que lo recibe se baja un archivo que su equipo no sabe
+        abrir por creerle al nombre. El `tamano_bytes` que se anota es el del
+        archivo que de verdad quedó en el bucket.
         """
-        nombre = (getattr(archivo, "filename", "") or "").strip() or "soporte"
-        nombre = nombre[:255]
-
-        origen = archivo.file
-        try:
-            origen.seek(0, os.SEEK_END)
-            tamano = origen.tell()
-            origen.seek(0)
-        except (AttributeError, OSError):  # pragma: no cover - flujo no medible
-            tamano = -1
-
-        if tamano == 0:
-            raise BusinessError(f"El archivo «{nombre}» está vacío")
-        if tamano > self._max_bytes:
-            raise BusinessError(
-                f"«{nombre}» pesa {_tamano_legible(tamano)} y el máximo son "
-                f"{settings.ADJUNTOS_MAX_MB} MB. Tome la foto en menor calidad "
-                f"o mande el comprobante en PDF"
-            )
-
-        contenido = origen.read()
-        # Segunda medición, por si la de arriba no se pudo hacer.
-        if len(contenido) > self._max_bytes:
-            raise BusinessError(
-                f"«{nombre}» pesa {_tamano_legible(len(contenido))} y el máximo son "
-                f"{settings.ADJUNTOS_MAX_MB} MB"
-            )
-        if not contenido:
-            raise BusinessError(f"El archivo «{nombre}» está vacío")
-
-        tipo = _detectar_tipo(contenido[:64])
-        if tipo is None or tipo not in TIPOS_ADJUNTO_PERMITIDOS:
-            raise BusinessError(
-                f"«{nombre}» no es una imagen ni un PDF. Solo se aceptan "
-                f"{TIPOS_EN_CRISTIANO}"
-            )
-        return contenido, tipo, TIPOS_ADJUNTO_PERMITIDOS[tipo], nombre
+        return leer_y_validar_soporte(
+            archivo,
+            max_bytes=self._max_bytes,
+            max_mb=settings.ADJUNTOS_MAX_MB,
+        )
 
     def _nombre_de_quien_sube(self) -> str | None:
         usuario = getattr(self.ctx, "user", None)
@@ -3579,6 +3492,23 @@ class AdjuntoReventaService(BaseService[AdjuntoReventa]):
         sin poder corregir un registro equivocado por un problema de red. Lo que
         no se pudo borrar queda en el log.
 
+        PRIMERO LA BASE, EL BUCKET DE ÚLTIMO Y SOLO SI LA TRANSACCIÓN CUAJÓ. Esto
+        estaba al revés y es el mismo hueco que ya se cerró en el gemelo
+        (`AdjuntoPagoLiquidacionService._barrer`): los archivos se borraban de
+        una, en el mismo momento, y el commit ocurre AFUERA, en `get_db`. Si algo
+        reventaba después, la sesión hacía rollback, las filas RESUCITABAN con su
+        `deleted_at` en nulo... y los archivos que nombraban ya no existían. El
+        borrado de R2 no se deshace; el de la fila sí. Así que lo irreversible va
+        de último, colgado del `after_commit`.
+
+        Y SE AUDITA CADA SOPORTE, uno por uno, igual que cuando se borra suelto
+        por el botón. Un soporte de pago que desaparece tiene que dejar renglón
+        propio: sin esto, borrar una compra se llevaba las fotos de tres
+        transferencias y en la bitácora no quedaba ni una línea que las nombrara
+        — que es justo el dato que alguien va a buscar cuando pregunte dónde
+        quedó la prueba de una entrega de plata. El motivo va escrito adentro
+        para que se distinga de un borrado a mano.
+
         Solo lo llaman los servicios de compra y venta, DESPUÉS de haber validado
         que el documento sí se puede borrar: si no, unos soportes se perderían
         por un borrado que al final no ocurre.
@@ -3586,34 +3516,50 @@ class AdjuntoReventaService(BaseService[AdjuntoReventa]):
         filas = self.repo.de_documento(compra_id=compra_id, venta_id=venta_id)
         if not filas:
             return 0
-        cliente = R2Client() if r2_configurado() else None
+        motivo = "borrar la compra" if compra_id is not None else "borrar la venta"
+        claves = [fila.object_key for fila in filas]
         for fila in filas:
-            if cliente is not None:
-                try:
-                    cliente.borrar(fila.object_key)
-                except Exception:
-                    logger_adjuntos.warning(
-                        "Quedó un objeto en R2 al borrar el documento: %s", fila.object_key
-                    )
+            antes = serialize_entity(fila)
             self.repo.soft_delete(fila, deleted_by=self.ctx.user_id)
+            self._audit(
+                "eliminar", fila.id, antes, serialize_entity(fila) | {"motivo": motivo}
+            )
+        borrar_del_bucket_al_confirmar(self.db, claves, motivo)
         return len(filas)
 
     def eliminar_adjunto(self, adjunto_id: uuid.UUID) -> None:
-        """Borra el soporte: PRIMERO el objeto en R2 y después la fila.
+        """Borra el soporte: PRIMERO la fila, y el objeto en R2 al confirmar.
 
-        En ese orden a propósito. Si R2 falla, se propaga el error y la fila
-        sobrevive: el dueño ve que no se borró y vuelve a intentar. Al revés
-        —fila primero— un fallo de R2 dejaría el archivo en el bucket sin nada
-        que lo nombre: nadie podría verlo, nadie podría borrarlo, y se seguiría
-        pagando su almacenamiento para siempre.
+        ESTE ORDEN ESTABA AL REVÉS Y ERA EL MISMO HUECO QUE YA SE HABÍA TAPADO EN
+        `_barrer`. Dos funciones del mismo archivo defendían órdenes opuestos: se
+        borraba el objeto en R2 de una y solo después se marcaba la fila, con el
+        commit ocurriendo AFUERA, en `get_db`. Bastaba con que ese commit fallara
+        —la conexión con Postgres, un tiempo agotado, un tropiezo insertando el
+        renglón de auditoría— para que la sesión hiciera rollback: la fila REVIVE
+        con su `deleted_at` en nulo y el archivo que nombra YA NO EXISTE. La
+        pantalla lista entonces un soporte que no va a abrir nunca, y no hay
+        forma de recuperarlo. Reproducido, no supuesto.
+
+        EL ARGUMENTO ES DE UNA SOLA DIRECCIÓN, y es el mismo que ya está escrito
+        en `_barrer`: la fila de la base se puede resucitar con un rollback, el
+        archivo del bucket no. Así que lo irreversible va de último.
+
+        LO QUE SE CAMBIA A CAMBIO, dicho claro: si R2 falla DESPUÉS del commit,
+        el dueño ve que el soporte se borró —y se borró de verdad, ya no está en
+        la pantalla ni en la base— pero el archivo se queda ocupando espacio en
+        el bucket sin nada que lo nombre. Eso queda en el log y lo recoge el
+        barrido del reinicio de empresa. Es el mal menor: un archivo de sobra
+        cuesta unos centavos, un soporte de pago que la pantalla muestra y que no
+        abre cuesta una discusión con el productor.
         """
         adjunto = self._adjunto(adjunto_id)
         if not r2_configurado():
             raise BusinessError(MENSAJE_NO_CONFIGURADO, code="r2_no_configurado")
-        R2Client().borrar(adjunto.object_key)
         antes = serialize_entity(adjunto)
+        clave = adjunto.object_key
         self.repo.soft_delete(adjunto, deleted_by=self.ctx.user_id)
         self._audit("eliminar", adjunto.id, antes, serialize_entity(adjunto))
+        borrar_del_bucket_al_confirmar(self.db, [clave], "borrar el soporte")
 
 
 class ReventaResumenService:
