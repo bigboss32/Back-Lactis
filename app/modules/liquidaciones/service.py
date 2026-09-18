@@ -1418,6 +1418,32 @@ def ya_salio_papel_o_plata(liquidacion: Liquidacion) -> bool:
     )
 
 
+class _Simulacion(NamedTuple):
+    """CÓMO QUEDARÍA LA QUINCENA SI SE CONFIRMA. Una sola foto, con nombre para cada cosa.
+
+    Era una tupla de cinco sueltos, y creció a nueve cuando entraron los anticipos. Ahí
+    deja de ser una tupla y pasa a ser una trampa: quien la desempaca tiene que acordarse
+    del orden, y en una función que reparte plata un par de campos cambiados de puesto no
+    da error — da una cifra distinta y callada.
+    """
+
+    valor_total: Decimal
+    neto: Decimal
+    saldo: Decimal
+    anticipos: Decimal
+    # Los días sueltos que entran, y el precio nuevo de los que ya estaban.
+    entran: list
+    precios: dict
+    # Los anticipos que entran, los que salen, y el valor nuevo de los que se corrigen.
+    anticipos_entran: list
+    anticipos_salen: list
+    anticipos_valores: dict
+    # Los que se borran porque nunca existieron (un doble registro, o el productor
+    # equivocado). Es distinto de `anticipos_salen`: aquel dice "no iba aquí", este dice
+    # "no pasó".
+    anticipos_borran: list
+
+
 def _estado_tras_corregir(liquidacion: Liquidacion) -> str:
     """El estado de una quincena que se acaba de corregir DESPUÉS de pagada.
 
@@ -2811,6 +2837,75 @@ class LiquidacionService(BaseService[Liquidacion]):
         )
         return list(self.db.scalars(stmt).all())
 
+    def _anticipos_sueltos_del_periodo(self, liquidacion: Liquidacion) -> list[Anticipo]:
+        """Los adelantos de ese tercero que NO se le han descontado a nadie todavía.
+
+        Misma pregunta que usa `_aplicar_anticipos_pendientes` al generar —la de
+        `pendientes_de`: `liquidacion_id IS NULL` y `fecha <= periodo_fin`— y se reusa a
+        propósito: dos criterios distintos para "qué adelantos le caben a esta quincena"
+        terminarían mostrando en el diálogo unos y descontando otros.
+
+        OJO CON EL FILTRO, Y POR ESO SE MUESTRAN UNO POR UNO: `pendientes_de` NO tiene
+        cota por abajo. Un adelanto de hace seis meses que nunca se descontó aparece aquí
+        como candidato, y si esta pantalla los recogiera todos de un golpe, un anticipo
+        suelto de $200.000 se le metería a una quincena de $54.000 y la dejaría en
+        -$146.000 sin que el dueño lo hubiera pedido. Con casilla por casilla, él ve la
+        fecha y decide.
+        """
+        repo = AnticipoRepository(self.db, self.ctx.empresa_id)
+        if liquidacion.tipo == TIPO_PROVEEDOR:
+            sueltos = repo.pendientes_de(liquidacion.proveedor_id, liquidacion.periodo_fin)
+        else:
+            sueltos = repo.pendientes_transportador(
+                liquidacion.transportador_id, liquidacion.periodo_fin
+            )
+        # Los de nómina no entran acá ni por casualidad: se descuentan en un pago de
+        # empleado, que no tiene estados ni saldo, y mezclarlos sería descontarle al
+        # productor un adelanto que se le dio a un trabajador.
+        return sorted(
+            (a for a in sueltos if a.pago_empleado_id is None), key=lambda a: a.fecha
+        )
+
+    def _anticipos_que_esta_solto(self, liquidacion: Liquidacion) -> list[Anticipo]:
+        """Los adelantos que ESTA quincena sacó en una corrección y siguen sueltos.
+
+        Son los únicos que esta pantalla puede BORRAR, y la razón es de propiedad: los
+        imprimió ella. Su comprobante es el que dice "se le descuenta en la siguiente",
+        así que es el que tiene que poder desdecirlo — con versión nueva y motivo.
+
+        Se excluyen los que ya recogió otra quincena (`liquidacion_id` puesto): esos ya
+        son plata de OTRO documento y se corrigen allá.
+        """
+        stmt = (
+            AnticipoRepository(self.db, self.ctx.empresa_id)
+            .base_query()
+            .where(
+                Anticipo.soltado_de_liquidacion_id == liquidacion.id,
+                Anticipo.liquidacion_id.is_(None),
+            )
+            .order_by(Anticipo.fecha)
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def _aviso_del_anticipo_suelto(
+        self, liquidacion: Liquidacion, anticipo: Anticipo
+    ) -> str | None:
+        """Señala el adelanto VIEJO, el que aparece como candidato por arrastre.
+
+        `pendientes_de` no tiene cota por abajo: un anticipo que nunca se le descontó a
+        nadie sigue saliendo como pendiente meses después. Descontarlo de ESTA quincena
+        puede ser exactamente lo que el dueño quiere —es plata que entregó y no ha
+        recuperado— pero también puede ser un adelanto que él creía cerrado hace rato.
+        Se señala; no se esconde ni se decide por él.
+        """
+        if anticipo.fecha >= liquidacion.periodo_inicio:
+            return None
+        return (
+            f"Este adelanto es del {anticipo.fecha.strftime('%d/%m/%Y')}, ANTES de esta "
+            "quincena, y nunca se le ha descontado a ninguna. Si lo marca, se le "
+            "descuenta aquí"
+        )
+
     def _exigir_corregible(self, liquidacion: Liquidacion) -> None:
         """Las cinco condiciones para poder corregir. En este orden y sin saltarse una.
 
@@ -2906,14 +3001,26 @@ class LiquidacionService(BaseService[Liquidacion]):
         liquidacion: Liquidacion,
         recepciones_a_incluir: list[uuid.UUID],
         precios: list[Any],
-    ) -> tuple[Decimal, Decimal, Decimal, list[RecepcionLeche], dict[uuid.UUID, Decimal]]:
+        anticipos_a_incluir: list[uuid.UUID] | None = None,
+        anticipos_a_soltar: list[uuid.UUID] | None = None,
+        valores_de_anticipos: list[Any] | None = None,
+        anticipos_a_borrar: list[uuid.UUID] | None = None,
+    ) -> "_Simulacion":
         """Calcula cómo quedarían las cifras SIN escribir nada, y valida de paso.
 
-        Devuelve (valor_total_nuevo, neto_nuevo, saldo_nuevo, días que entran, precios
-        por recepción). La previsualización y la corrección de verdad llaman a ESTA
-        MISMA función: si cada una hiciera su cuenta, el diálogo podría mostrar una
-        cifra y el botón escribir otra — y esa es exactamente la clase de diferencia que
-        el dueño descubre con la calculadora cuando ya es tarde.
+        La previsualización y la corrección de verdad llaman a ESTA MISMA función: si
+        cada una hiciera su cuenta, el diálogo podría mostrar una cifra y el botón
+        escribir otra — y esa es exactamente la clase de diferencia que el dueño
+        descubre con la calculadora cuando ya es tarde. (Ya pasó: con un día repetido en
+        la lista, el diálogo prometía $860.000 y el botón escribía $680.000.)
+
+        LOS ANTICIPOS SE CUENTAN AQUÍ Y NO EN EL RECÁLCULO, y hay que saber por qué:
+        `_recalcular_desde_recepciones` dice, con todas sus letras, que "los anticipos no
+        se tocan: ya quedaron aplicados a esta liquidación al generarla". Esa regla sigue
+        en pie para él. La corrección los mueve APARTE, marcándolos y desmarcándolos uno
+        por uno, y después vuelve a sumar `liquidacion.anticipos` desde los que quedaron
+        marcados — nunca sumándole o restándole a la cifra guardada, que es como una
+        llamada repetida termina descontando dos veces.
         """
         sueltos = {r.id: r for r in self._dias_sueltos_del_periodo(liquidacion)}
         entran: list[RecepcionLeche] = []
@@ -2991,14 +3098,146 @@ class LiquidacionService(BaseService[Liquidacion]):
         bonificaciones = sum((Decimal(r.bonificaciones) for r in todas), CERO)
         descuentos = sum((Decimal(r.descuentos) for r in todas), CERO)
         valor_total = valor_bruto + bonificaciones - descuentos
-        # El neto se arma con la MISMA resta que la propiedad del modelo, y con las
-        # columnas que la corrección NO toca: anticipos y saldo_anterior se quedan como
-        # están, porque ya quedaron aplicados cuando se generó la quincena.
-        neto = valor_total - Decimal(liquidacion.anticipos or 0) - Decimal(
-            liquidacion.saldo_anterior or 0
-        )
+
+        # ---------------------------------------------------------- los anticipos
+        aplicados = {a.id: a for a in self._anticipos_de(liquidacion)}
+        sueltos_anticipo = {a.id: a for a in self._anticipos_sueltos_del_periodo(liquidacion)}
+
+        # SIN REPETIDOS, por lo mismo que los días: un id mandado dos veces haría que el
+        # diálogo prometiera un descuento que el botón no escribe.
+        a_incluir = list(dict.fromkeys(anticipos_a_incluir or []))
+        # `dict.fromkeys` también aquí y no `set`: el desglose de la corrección es lo que
+        # el dueño recorre con el dedo contra el papel viejo cuando el productor le
+        # reclama, y con un `set` los adelantos que salen quedaban escritos en orden de
+        # hash — ni el que él marcó ni por fecha.
+        a_soltar_orden = list(dict.fromkeys(anticipos_a_soltar or []))
+        a_soltar = set(a_soltar_orden)
+
+        # UN MISMO ANTICIPO NO PUEDE ENTRAR Y SALIR A LA VEZ. Sin este guardia el
+        # resultado dependería del orden en que se aplicaran las dos listas, y el dueño
+        # vería una cifra distinta según de dónde saliera la cuenta.
+        cruzados = set(a_incluir) & a_soltar
+        if cruzados:
+            raise BusinessError(
+                "Un mismo anticipo no se puede incluir y soltar en la misma corrección"
+            )
+
+        # LOS QUE SE BORRAN PORQUE NUNCA EXISTIERON. Pueden venir de dos sitios: los que
+        # hoy están descontados aquí, y los que ESTA MISMA quincena sacó en una
+        # corrección anterior y siguen sueltos. Los segundos son la razón de que esto
+        # exista: sin ellos, el dueño que sacó por error un adelanto mal digitado se
+        # quedaba sin ninguna pantalla donde borrarlo, y ese fantasma se le iba a
+        # descontar al productor de plata que sí era suya.
+        soltados_por_esta = {a.id: a for a in self._anticipos_que_esta_solto(liquidacion)}
+        a_borrar = list(dict.fromkeys(anticipos_a_borrar or []))
+        borran_anticipos: list[Anticipo] = []
+        for anticipo_id in a_borrar:
+            anticipo = aplicados.get(anticipo_id) or soltados_por_esta.get(anticipo_id)
+            if anticipo is None:
+                raise NotFoundError(
+                    "Ese adelanto no es de esta quincena ni salió de ella: no se puede "
+                    "borrar desde aquí"
+                )
+            borran_anticipos.append(anticipo)
+        borrados_ids = {a.id for a in borran_anticipos}
+
+        # No se puede pedir dos cosas contrarias sobre el mismo adelanto: el resultado
+        # dependería del orden en que se aplicaran y el dueño vería una cifra distinta
+        # según de dónde saliera la cuenta.
+        if borrados_ids & (set(a_incluir) | a_soltar):
+            raise BusinessError(
+                "Un mismo adelanto no se puede borrar y a la vez incluir o sacar en la "
+                "misma corrección"
+            )
+
+        entran_anticipos: list[Anticipo] = []
+        for anticipo_id in a_incluir:
+            anticipo = sueltos_anticipo.get(anticipo_id)
+            if anticipo is None:
+                # O no es de este tercero, o ya se lo descontó otra quincena entre la
+                # previsualización y el botón. En los dos casos, incluirlo aquí sería
+                # descontar dos veces la misma plata.
+                raise BusinessError(
+                    "Uno de los anticipos que escogió ya no está suelto: puede que otra "
+                    "quincena se lo haya descontado. Vuelva a abrir la corrección"
+                )
+            entran_anticipos.append(anticipo)
+
+        salen_anticipos: list[Anticipo] = []
+        for anticipo_id in a_soltar_orden:
+            anticipo = aplicados.get(anticipo_id)
+            if anticipo is None:
+                raise NotFoundError("Ese anticipo no está descontado en esta quincena")
+            salen_anticipos.append(anticipo)
+
+        # EL VALOR SOLO SE LE CORRIGE A LOS QUE VAN A QUEDAR EN ESTA QUINCENA: los que ya
+        # están, y los que están entrando en esta misma corrección. Los otros dos casos
+        # se rebotan a propósito y con mensajes distintos, porque son dos confusiones
+        # distintas del usuario:
+        #
+        #  · UNO QUE SE ESTÁ SACANDO: el cambio no significaría nada. Ese adelanto se va
+        #    a descontar en OTRA quincena, y allá vale lo que valga entonces. Dejarlo
+        #    pasar sería escribir un valor que la corrección no está explicando.
+        #  · UNO QUE SIGUE SUELTO: no es parte de esta quincena. Corregirle el valor
+        #    desde aquí sería tocar plata de un documento que no se está corrigiendo, sin
+        #    que el comprobante lo explique — que es justo lo que este botón no hace.
+        #    (Y antes reventaba con un 500 un renglón más abajo, al no encontrarlo.)
+        # SE LE PUEDE CORREGIR EL VALOR AUNQUE SE ESTÉ SACANDO, y eso estuvo mal antes.
+        #
+        # Se rebotaba con "sáquelo, y corríjalo desde la pantalla de anticipos", y el
+        # razonamiento era que el cambio no significaba nada porque el adelanto se iba a
+        # descontar en OTRA quincena. Es falso por dos lados: el valor se queda escrito en
+        # el adelanto, así que la quincena siguiente descuenta el corregido; y sobre todo,
+        # ESA PANTALLA AHORA LO REBOTA —el adelanto ya salió impreso—, o sea que el
+        # sistema mandaba al dueño a una puerta que él mismo había cerrado. Un mensaje que
+        # nombra una salida inexistente es peor que un "no se puede" a secas.
+        #
+        # El cambio no mueve las cifras de ESTE comprobante (el adelanto sale), pero queda
+        # en el rastro igual: es plata entregada y el renglón tiene que poder explicarla.
+        nuevos_valores: dict[uuid.UUID, Decimal] = {}
+        for cambio in valores_de_anticipos or []:
+            anticipo = aplicados.get(cambio.anticipo_id)
+            if anticipo is None and cambio.anticipo_id in set(a_incluir):
+                anticipo = sueltos_anticipo.get(cambio.anticipo_id)
+            if anticipo is None:
+                if cambio.anticipo_id in sueltos_anticipo:
+                    raise BusinessError(
+                        "Ese adelanto no está descontado en esta quincena: márquelo para "
+                        "que entre, y ahí sí se le puede corregir el valor"
+                    )
+                raise NotFoundError("Ese anticipo no es de esta quincena")
+            nuevos_valores[anticipo.id] = _centavos(cambio.valor)
+
+        def valor_de(anticipo: Anticipo) -> Decimal:
+            return nuevos_valores.get(anticipo.id, Decimal(anticipo.valor))
+
+        # LA CIFRA SE VUELVE A SUMAR DESDE CERO con los que quedan marcados. No se le
+        # suma ni se le resta a `liquidacion.anticipos`: así, mandar la misma corrección
+        # dos veces —un reintento del navegador— da exactamente lo mismo.
+        quedan = [
+            a
+            for a in aplicados.values()
+            if a.id not in a_soltar and a.id not in borrados_ids
+        ] + entran_anticipos
+        anticipos_nuevos = sum((valor_de(a) for a in quedan), CERO)
+
+        # El neto se arma con la MISMA resta que la propiedad del modelo. `saldo_anterior`
+        # sí se queda como está: esa es plata que arrastró OTRA quincena y no se toca
+        # desde aquí (para eso está el candado de la deuda trasladada).
+        neto = valor_total - anticipos_nuevos - Decimal(liquidacion.saldo_anterior or 0)
         saldo = neto - Decimal(liquidacion.pagado or 0)
-        return valor_total, neto, saldo, entran, nuevos_precios
+        return _Simulacion(
+            valor_total=valor_total,
+            neto=neto,
+            saldo=saldo,
+            anticipos=anticipos_nuevos,
+            entran=entran,
+            precios=nuevos_precios,
+            anticipos_entran=entran_anticipos,
+            anticipos_salen=salen_anticipos,
+            anticipos_valores=nuevos_valores,
+            anticipos_borran=borran_anticipos,
+        )
 
     def previsualizar_correccion(self, entity_id: uuid.UUID, payload: Any) -> Any:
         """El antes y el después, sin escribir un peso.
@@ -3009,6 +3248,7 @@ class LiquidacionService(BaseService[Liquidacion]):
         foto: la corrección de verdad vuelve a calcular todo con el candado puesto.
         """
         from app.modules.liquidaciones.schemas import (
+            AnticipoDeLaQuincena,
             DiaSueltoRead,
             PrevisualizacionCorreccion,
         )
@@ -3017,11 +3257,16 @@ class LiquidacionService(BaseService[Liquidacion]):
         self._exigir_corregible(liquidacion)
 
         sueltos = self._dias_sueltos_del_periodo(liquidacion)
-        valor_total, neto, saldo, _entran, _precios = self._simular_correccion(
+        sim = self._simular_correccion(
             liquidacion,
             list(payload.recepciones_a_incluir or []),
             list(payload.precios or []),
+            list(payload.anticipos_a_incluir or []),
+            list(payload.anticipos_a_soltar or []),
+            list(payload.valores_de_anticipos or []),
+            list(getattr(payload, "anticipos_a_borrar", None) or []),
         )
+        valor_total, neto, saldo = sim.valor_total, sim.neto, sim.saldo
 
         avisos: list[str] = []
         if liquidacion.version > 1:
@@ -3062,8 +3307,46 @@ class LiquidacionService(BaseService[Liquidacion]):
                 )
                 for r in sueltos
             ],
+            anticipos_aplicados=[
+                AnticipoDeLaQuincena(
+                    anticipo_id=a.id,
+                    fecha=a.fecha,
+                    valor=Decimal(a.valor),
+                    observaciones=a.observaciones,
+                    aplicado=True,
+                )
+                for a in self._anticipos_de(liquidacion)
+            ],
+            anticipos_sueltos=[
+                AnticipoDeLaQuincena(
+                    anticipo_id=a.id,
+                    fecha=a.fecha,
+                    valor=Decimal(a.valor),
+                    observaciones=a.observaciones,
+                    aplicado=False,
+                    aviso=self._aviso_del_anticipo_suelto(liquidacion, a),
+                )
+                for a in self._anticipos_sueltos_del_periodo(liquidacion)
+            ],
+            anticipos_soltados_por_esta=[
+                AnticipoDeLaQuincena(
+                    anticipo_id=a.id,
+                    fecha=a.fecha,
+                    valor=Decimal(a.valor),
+                    observaciones=a.observaciones,
+                    aplicado=False,
+                    aviso=(
+                        "Esta quincena lo sacó en una corrección y su comprobante dice "
+                        "que se le descuenta en la siguiente. Si ese adelanto NUNCA "
+                        "existió, bórrelo desde aquí: es la única pantalla que puede"
+                    ),
+                )
+                for a in self._anticipos_que_esta_solto(liquidacion)
+            ],
             valor_total_antes=Decimal(liquidacion.valor_total),
             valor_total_despues=valor_total,
+            anticipos_antes=Decimal(liquidacion.anticipos or 0),
+            anticipos_despues=sim.anticipos,
             neto_antes=liquidacion.neto_a_pagar,
             neto_despues=neto,
             pagado=Decimal(liquidacion.pagado or 0),
@@ -3127,23 +3410,35 @@ class LiquidacionService(BaseService[Liquidacion]):
 
         recepciones_a_incluir = list(payload.recepciones_a_incluir or [])
         precios = list(payload.precios or [])
-        if not recepciones_a_incluir and not precios:
+        anticipos_a_incluir = list(getattr(payload, "anticipos_a_incluir", None) or [])
+        anticipos_a_soltar = list(getattr(payload, "anticipos_a_soltar", None) or [])
+        valores_de_anticipos = list(getattr(payload, "valores_de_anticipos", None) or [])
+        anticipos_a_borrar = list(getattr(payload, "anticipos_a_borrar", None) or [])
+        if not any(
+            (recepciones_a_incluir, precios, anticipos_a_incluir,
+             anticipos_a_soltar, valores_de_anticipos, anticipos_a_borrar)
+        ):
             raise BusinessError(
-                "No se escogió ningún día ni ningún precio: no hay nada que corregir"
+                "No se escogió ningún día, ningún precio ni ningún anticipo: no hay nada "
+                "que corregir"
             )
 
-        # (7) y (8): se valida TODO —los días sueltos y los precios— y se calcula el
-        # resultado, antes de escribir el primer peso. Si algo no sirve, el comprobante
-        # no se queda a medias.
-        _valor_total, _neto, _saldo, entran, nuevos_precios = self._simular_correccion(
-            liquidacion, recepciones_a_incluir, precios
+        # (7) y (8): se valida TODO —los días, los precios y los anticipos— y se calcula
+        # el resultado, antes de escribir el primer peso. Si algo no sirve, el
+        # comprobante no se queda a medias.
+        sim = self._simular_correccion(
+            liquidacion, recepciones_a_incluir, precios,
+            anticipos_a_incluir, anticipos_a_soltar, valores_de_anticipos,
+            anticipos_a_borrar,
         )
+        entran, nuevos_precios = sim.entran, sim.precios
 
         antes = serialize_entity(liquidacion)
         valor_total_antes = Decimal(liquidacion.valor_total)
         neto_antes = liquidacion.neto_a_pagar
         saldo_antes = Decimal(liquidacion.saldo)
         estado_antes = liquidacion.estado
+        anticipos_antes = Decimal(liquidacion.anticipos or 0)
         pagado_al_momento = Decimal(liquidacion.pagado or 0)
 
         # (9) LA MARCA. Sin esto la operación no hace nada: `_recepciones_de` solo relee
@@ -3203,6 +3498,130 @@ class LiquidacionService(BaseService[Liquidacion]):
         # que debe $300.000 sobre el mismo folio.
         self._recalcular_desde_recepciones(liquidacion)
 
+        # (11.bis) LOS ANTICIPOS, DESPUÉS DEL RECÁLCULO Y A MANO.
+        #
+        # Va aquí y no adentro del recálculo porque `_recalcular_desde_recepciones` dice,
+        # con todas sus letras, que "los anticipos no se tocan: ya quedaron aplicados a
+        # esta liquidación al generarla". Esa regla sigue en pie para él —es lo que
+        # impide que un recálculo cualquiera se trague un adelanto— y la corrección la
+        # rodea por fuera, a propósito, marcando y desmarcando uno por uno.
+        #
+        # SE LE PASA POR ENCIMA AL CANDADO DE LOS ANTICIPOS, y hay que decirlo claro:
+        # `AnticipoService._exigir_no_pagado` rebota tocar el anticipo de una quincena
+        # pagada o corregida, y aquí se está haciendo justamente eso. No es un descuido:
+        # es la misma decisión que ya se tomó con el precio de un día, y viene con las
+        # mismas cinco protecciones —permiso que tiene un solo rol, motivo escrito, la
+        # cifra a la vista antes de escribir, la versión del comprobante que sube, y el
+        # renglón que deja qué anticipo se movió y a cuánto—. Lo que NO se puede es
+        # aflojar el candado de allá: por esa puerta entraría sin ninguna de las cinco.
+        #
+        # EL QUE SALE NO SE BORRA, SE SUELTA. Esa plata se le entregó en la mano: lo que
+        # se está diciendo no es "no existió" sino "no iba en esta quincena". Al quedar
+        # con `liquidacion_id` en nulo, la quincena SIGUIENTE se lo descuenta —una sola
+        # vez, porque `pendientes_de` solo mira los que no apuntan a ninguna—.
+        anticipos_cambiados: list[dict[str, Any]] = []
+        for anticipo in sim.anticipos_salen:
+            anticipos_cambiados.append({
+                "accion": "salio",
+                "fecha": anticipo.fecha.isoformat(),
+                "valor": str(Decimal(anticipo.valor)),
+                "observaciones": anticipo.observaciones,
+            })
+            anticipo.liquidacion_id = None
+            # QUEDA MARCADO DE DÓNDE SALIÓ. Sin esto queda igual a un adelanto recién
+            # registrado, y el candado de los anticipos lo deja borrar o rebajar — que es
+            # justo la plata que este comprobante promete descontar en la siguiente.
+            anticipo.soltado_de_liquidacion_id = liquidacion.id
+            anticipo.updated_by = self.ctx.user_id
+        # EL QUE ENTRA SE ANOTA UNA SOLA VEZ, aunque además se le corrija el valor: el
+        # renglón dice "entró el adelanto del 10 por $150.000" con la cifra FINAL, que es
+        # la que el comprobante resta. Anotarlo dos veces —una como "entró" y otra como
+        # "valor"— haría que el desglose de la corrección sumara de más contra la
+        # diferencia real, que es exactamente la regla de la casa rota dentro del propio
+        # soporte.
+        # LOS QUE NUNCA EXISTIERON SE BORRAN, Y SE BORRAN DE PRIMERO para que no los
+        # alcance ninguno de los bucles de abajo. Es borrado suave (el mismo de toda la
+        # aplicación): la fila queda con `deleted_at` y sale de `pendientes_de`, así que
+        # ninguna quincena futura se lo va a descontar al productor.
+        #
+        # ESTA ES LA PUERTA QUE LA MARCA DEL ADELANTO SOLTADO HABÍA CERRADO. Sin ella, un
+        # adelanto digitado dos veces quedaba de fantasma para siempre: la pantalla de
+        # anticipos lo rebota —porque ya salió impreso— y si el productor no vuelve a
+        # entregar leche, no hay quincena siguiente donde arreglarlo. El fantasma se le
+        # descontaba de plata que sí era suya. Medido: $300.000.
+        repo_anticipos = AnticipoRepository(self.db, self.ctx.empresa_id)
+        for anticipo in sim.anticipos_borran:
+            anticipos_cambiados.append({
+                "accion": "borrado",
+                "fecha": anticipo.fecha.isoformat(),
+                "valor": str(Decimal(anticipo.valor)),
+                "observaciones": anticipo.observaciones,
+            })
+            repo_anticipos.soft_delete(anticipo, deleted_by=self.ctx.user_id)
+
+        entran_ids = {a.id for a in sim.anticipos_entran}
+        for anticipo in sim.anticipos_entran:
+            valor_final = sim.anticipos_valores.get(anticipo.id, Decimal(anticipo.valor))
+            anticipos_cambiados.append({
+                "accion": "entro",
+                "fecha": anticipo.fecha.isoformat(),
+                "valor": str(valor_final),
+                "observaciones": anticipo.observaciones,
+            })
+            anticipo.liquidacion_id = liquidacion.id
+            # Vuelve a estar dentro de un comprobante: la marca de "salió suelto de una
+            # corrección" ya no aplica, y dejarla puesta trabaría un adelanto que el
+            # candado normal ya protege por su liquidación.
+            anticipo.soltado_de_liquidacion_id = None
+            anticipo.valor = valor_final
+            anticipo.updated_by = self.ctx.user_id
+
+        # Y los que YA estaban y solo cambian de cifra —incluidos los que se acaban de
+        # SACAR: su valor corregido es el que va a descontar la quincena siguiente—.
+        #
+        # El mapa se arma con los objetos que ya trae la simulación y NO releyendo la
+        # base: los cambios de los bucles de arriba todavía no están en flush, así que una
+        # consulta devolvería el estado viejo y el que acaba de salir no aparecería.
+        ya_estaban = {a.id: a for a in sim.anticipos_salen}
+        ya_estaban.update({a.id: a for a in self._anticipos_de(liquidacion)})
+        for anticipo_id, valor in sim.anticipos_valores.items():
+            if anticipo_id in entran_ids:
+                continue
+            anticipo = ya_estaban[anticipo_id]
+            if Decimal(anticipo.valor) == valor:
+                # Tecleó el mismo valor que ya tenía: no es un cambio y no tiene por qué
+                # ensuciar el papel del productor con un renglón que no dice nada.
+                continue
+            anticipos_cambiados.append({
+                "accion": "valor",
+                "fecha": anticipo.fecha.isoformat(),
+                "valor_antes": str(Decimal(anticipo.valor)),
+                "valor": str(valor),
+                "observaciones": anticipo.observaciones,
+            })
+            anticipo.valor = valor
+            anticipo.updated_by = self.ctx.user_id
+        self.db.flush()
+
+        # LA CIFRA SE VUELVE A SUMAR DESDE LOS QUE QUEDARON MARCADOS, igual que en la
+        # simulación y por la misma razón: sumarle o restarle a la columna guardada hace
+        # que una petición repetida descuente dos veces.
+        liquidacion.anticipos = sum(
+            (Decimal(a.valor) for a in self._anticipos_de(liquidacion)), CERO
+        )
+        _refrescar_saldo(liquidacion)
+
+        # Y AQUÍ SE COMPRUEBA QUE EL DIÁLOGO NO MINTIÓ. La simulación y la escritura son
+        # la misma función, pero van por caminos distintos —una suma en memoria, la otra
+        # relee de la base—, y si alguna vez se separan, esto lo canta ANTES de guardar
+        # en vez de dejar al dueño descubrirlo con la calculadora. Es plata que ya salió
+        # de la caja: no se confía en que dos cuentas den lo mismo, se verifica.
+        if Decimal(liquidacion.anticipos) != sim.anticipos:
+            raise BusinessError(
+                "La cifra de anticipos que se calculó no coincide con la que quedó: "
+                "no se guardó nada. Vuelva a abrir la corrección"
+            )
+
         # (12) EL ESTADO SE VUELVE A DEDUCIR, cosa que hoy no hace ningún camino de
         # recálculo. Es UNA línea y es la que hace que las tres pantallas y las dos
         # guardas de pago se arreglen solas: con 'parcial', `_exigir_pagable` deja abonar,
@@ -3211,6 +3630,32 @@ class LiquidacionService(BaseService[Liquidacion]):
         # $180.000 quedan invisibles en las tres pantallas y además IMPAGABLES ("no se
         # puede pasar de 'pagada' a 'pagada'").
         liquidacion.estado = _estado_tras_corregir(liquidacion)
+
+        # (12.bis) SI NO SE MOVIÓ UNA SOLA CIFRA, NO SE EMITE PAPEL NUEVO.
+        #
+        # Pasa de verdad: el dueño abre a corregir un precio, teclea el MISMO que ya
+        # tenía —o vuelve a escribir el valor que el adelanto ya valía— y confirma. Antes
+        # eso subía la versión igual: salía un comprobante con folio '-v2', la banda
+        # COMPROBANTE CORREGIDO impresa, la nota de que reemplaza al anterior, y el
+        # sistema le avisaba "el productor puede tener 2 hojas de la misma quincena,
+        # recójale las anteriores". Un viaje a la finca a cambiar un papel por otro
+        # idéntico, y un productor que ve "CORREGIDO" sobre una cifra que no cambió.
+        #
+        # Se pregunta por el RESULTADO y no por lo que se mandó: mandar cosas no es
+        # cambiar cifras. Y se pregunta DESPUÉS del recálculo y de los anticipos, con las
+        # cifras ya puestas, porque es la única forma de saberlo con certeza.
+        nada_cambio = (
+            not dias_agregados
+            and not precios_corregidos
+            and not anticipos_cambiados
+            and Decimal(liquidacion.valor_total) == valor_total_antes
+            and Decimal(liquidacion.anticipos or 0) == anticipos_antes
+        )
+        if nada_cambio:
+            raise BusinessError(
+                "Esta corrección no cambia ninguna cifra: el comprobante quedaría igual "
+                "al que ya tiene el productor. No se emitió ninguna versión nueva"
+            )
 
         # (13) la versión, que es lo que hace que el papel nuevo se llame distinto.
         liquidacion.version = int(liquidacion.version or 1) + 1
@@ -3234,8 +3679,11 @@ class LiquidacionService(BaseService[Liquidacion]):
             saldo_despues=Decimal(liquidacion.saldo),
             estado_antes=estado_antes,
             estado_despues=liquidacion.estado,
+            anticipos_antes=anticipos_antes,
+            anticipos_despues=Decimal(liquidacion.anticipos or 0),
             dias_agregados=dias_agregados,
             precios_corregidos=precios_corregidos,
+            anticipos_cambiados=anticipos_cambiados,
             created_by=self.ctx.user_id,
             updated_by=self.ctx.user_id,
         )
@@ -3960,13 +4408,29 @@ class LiquidacionService(BaseService[Liquidacion]):
         # a ese comprobante cobrando una deuda de un documento anulado. El mensaje
         # nombra cuál anular primero.
         _exigir_deuda_no_trasladada(liquidacion, "anular")
-        # EL ORDEN DE ESTOS DOS GUARDIAS ESTABA AL REVÉS, y dejaba al dueño contra un
-        # muro mudo. Una quincena pagada casi siempre tiene pagos, así que el primero en
-        # dispararse era el de 'pagada' —que dice "no se puede" y nada más— y el mensaje
-        # que SÍ nombra la salida ("elimine primero los pagos") no se alcanzaba nunca. Lo
-        # que el dueño necesita al chocar con esto no es enterarse de que no se puede,
-        # sino saber por dónde salir.
+        # EL ORDEN DE ESTOS TRES GUARDIAS ES LO QUE DECIDE SI EL DUEÑO PIERDE PLATA
+        # SIGUIENDO EL MENSAJE. Se nombra PRIMERO la condición que NO tiene salida.
         #
+        # Estuvo mal dos veces. Primero, 'pagada' iba antes que 'tiene_pagos', así que el
+        # mensaje que sí nombra una salida no se alcanzaba nunca y el dueño chocaba con
+        # un muro mudo. Se invirtió — y eso destapó algo peor en cuanto apareció la
+        # corrección: sobre una quincena CORREGIDA, el guardia de 'tiene_pagos' se
+        # disparaba primero y decía "elimine primero los pagos". El dueño lo hacía,
+        # borraba un pago de $200.000 —Y CON ÉL LAS FOTOS DE LA TRANSFERENCIA, que se van
+        # del bucket y no vuelven— y recién entonces chocaba con el muro de verdad: "de
+        # esta quincena ya salieron 2 comprobantes, no se puede anular". Un pago y su
+        # prueba destruidos para nada. Medido.
+        #
+        # Por eso la versión va de PRIMERA: es la única de las tres que no se puede
+        # deshacer con ningún paso. Y su mensaje no manda a borrar pagos, porque eso no
+        # abre nada: nombra la única puerta que existe, que es corregir.
+        if int(liquidacion.version or 1) > 1:
+            raise BusinessError(
+                f"De esta quincena ya salieron {liquidacion.version} comprobantes (el "
+                "original y sus correcciones): no se puede anular, y borrarle los pagos "
+                "tampoco la destraba. Para arreglarle una cifra use 'Corregir esta "
+                "quincena'"
+            )
         # Anular suelta las recepciones y los anticipos para volver a liquidar el
         # período. Con un abono hecho eso dejaría un pago colgando de un documento que ya
         # no representa nada: primero se borra el pago.
@@ -3981,17 +4445,6 @@ class LiquidacionService(BaseService[Liquidacion]):
             raise BusinessError(
                 "No se puede anular una liquidación ya pagada. Si lo que necesita es "
                 "arreglarle una cifra, use 'Corregir esta quincena'"
-            )
-        # Y TAMPOCO LA QUE YA EMITIO UN COMPROBANTE CORREGIDO, aunque ahora este en
-        # 'parcial' y sin pagos. Anular suelta sus dias y sus anticipos, asi que la
-        # proxima corrida de Generar volveria a cobrar el periodo completo — y el
-        # productor se queda con DOS hojas que ya no se pueden cuadrar contra nada.
-        if int(liquidacion.version or 1) > 1:
-            raise BusinessError(
-                f"De esta quincena ya salieron {liquidacion.version} comprobantes (el "
-                "original y sus correcciones): no se puede anular. Si hay que rehacerla "
-                "por completo, primero elimine los pagos y hable con quien tenga los "
-                "papeles entregados"
             )
         self._soltar_lo_apartado(
             liquidacion, "se anuló la liquidación que se estaba cobrando esta deuda"
@@ -4536,13 +4989,67 @@ class LiquidacionService(BaseService[Liquidacion]):
                     f"{pesos(Decimal(precio.get('precio_antes', '0')))} a "
                     f"{pesos(Decimal(precio.get('precio_despues', '0')))} el litro"
                 )
+            # LOS ANTICIPOS TAMBIÉN SE NOMBRAN, UNO POR UNO. Es plata que se le entregó
+            # en la mano al productor y que el comprobante le RESTA: si el papel nuevo
+            # descuenta $300.000 que el viejo no descontaba, tiene que decir cuál
+            # adelanto fue y de qué fecha, o la discusión no se puede cerrar con las dos
+            # hojas sobre la mesa.
+            for anticipo in correccion.anticipos_cambiados or []:
+                fecha = _fecha_iso_a_texto(anticipo.get("fecha"))
+                accion = anticipo.get("accion")
+                if accion == "entro":
+                    cambios.append(
+                        f"se le descontó el adelanto del {fecha} "
+                        f"({pesos(Decimal(anticipo.get('valor', '0')))})"
+                    )
+                elif accion == "borrado":
+                    cambios.append(
+                        f"el adelanto del {fecha} "
+                        f"({pesos(Decimal(anticipo.get('valor', '0')))}) se ANULÓ: no "
+                        "existió, y no se le descuenta en ninguna quincena"
+                    )
+                elif accion == "salio":
+                    cambios.append(
+                        f"el adelanto del {fecha} "
+                        f"({pesos(Decimal(anticipo.get('valor', '0')))}) ya NO se "
+                        "descuenta en esta quincena: se le descuenta en la siguiente"
+                    )
+                else:
+                    cambios.append(
+                        f"el adelanto del {fecha} pasó de "
+                        f"{pesos(Decimal(anticipo.get('valor_antes', '0')))} a "
+                        f"{pesos(Decimal(anticipo.get('valor', '0')))}"
+                    )
             detalle = "; ".join(cambios) if cambios else "se corrigieron las cifras"
             quien = f" por {correccion.corregido_por_nombre}" if correccion.corregido_por_nombre else ""
+            # LA FRASE DE CIERRE NOMBRA LA CIFRA QUE DE VERDAD SE MOVIÓ.
+            #
+            # Decía siempre "el VALOR TOTAL pasó de X a Y", y en una corrección de puro
+            # adelanto eso es una tautología: el valor total NO se mueve —lo que cambia es
+            # el descuento— así que el papel cerraba diciendo "pasó de $500.000 a
+            # $500.000" y se callaba los $150.000 que sí cambiaron. Justo la cifra por la
+            # que el productor va a reclamar.
+            #
+            # Se nombra el VALOR TOTAL cuando cambió, y LO QUE HAY QUE ENTREGARLE cuando
+            # lo que se movió fue el descuento. Si cambiaron los dos, se dicen los dos:
+            # el dueño suma la columna de arriba abajo y necesita las dos puntas.
+            cerró: list[str] = []
+            if Decimal(correccion.valor_total_antes) != Decimal(correccion.valor_total_despues):
+                cerró.append(
+                    f"el VALOR TOTAL pasó de {pesos(correccion.valor_total_antes)} a "
+                    f"{pesos(correccion.valor_total_despues)}"
+                )
+            if Decimal(correccion.neto_antes) != Decimal(correccion.neto_despues):
+                cerró.append(
+                    f"lo que hay que entregarle pasó de {pesos(correccion.neto_antes)} a "
+                    f"{pesos(correccion.neto_despues)}"
+                )
+            resumen = ("; ".join(cerró) + ". ") if cerró else ""
             notas.append(
                 f"Corregido el {_en_hora_de_colombia(correccion.created_at)}{quien} "
-                f"(v{correccion.version_nueva}): {detalle}. El VALOR TOTAL pasó de "
-                f"{pesos(correccion.valor_total_antes)} a {pesos(correccion.valor_total_despues)}. "
-                f"Motivo: {correccion.motivo}"
+                f"(v{correccion.version_nueva}): {detalle}. "
+                + (resumen[0].upper() + resumen[1:] if resumen else "")
+                + f"Motivo: {correccion.motivo}"
             )
         return notas
 
@@ -4832,6 +5339,35 @@ class AnticipoService(BaseService[Anticipo]):
                 "en un pago de nómina"
             )
 
+        # EL ADELANTO QUE SALIÓ DE UNA CORRECCIÓN YA ESTÁ IMPRESO, aunque ahora esté
+        # suelto. Va ANTES del corto circuito de abajo, que es donde estaba el hueco.
+        #
+        # Ese corto circuito daba por hecho que "sin liquidación" significa "recién
+        # registrado, no se le ha descontado a nadie". Desde que una quincena pagada se
+        # puede corregir hay un SEGUNDO caso que se veía idéntico: el adelanto que una
+        # corrección sacó de un comprobante ya entregado. Y el comprobante v2 que el
+        # productor tiene en la mano dice, con todas sus letras, "se le descuenta en la
+        # siguiente" — una promesa que el sistema no podía cumplir.
+        #
+        # MEDIDO: quincena de $500.000 con $300.000 de adelanto, pagada. Se suelta el
+        # adelanto por la corrección, se paga el saldo, y desde la pantalla de Anticipos
+        # se le da BORRAR: 204. La quincena siguiente ya no descuenta nada y el productor
+        # se queda con $1.300.000 por $1.000.000 de leche. Rebajarlo a $1, o correrle la
+        # fecha a diciembre —que lo saca del filtro `fecha <= periodo_fin`—, hacían lo
+        # mismo sin dejar ni el hueco visible.
+        #
+        # EL CAMINO CORRECTO EXISTE Y SE NOMBRA EN EL MENSAJE: volver a incluirlo con
+        # "Corregir esta quincena", que exige motivo, sube la versión del comprobante y
+        # deja escrito qué se movió.
+        if anticipo.soltado_de_liquidacion_id is not None and anticipo.liquidacion_id is None:
+            raise BusinessError(
+                f"No se puede {verbo} este adelanto: una corrección lo sacó de una "
+                "quincena que YA SE IMPRIMIÓ, y ese comprobante dice que se le descuenta "
+                "en la siguiente. Hay dos salidas: vuelva a incluirlo con 'Corregir esta "
+                "quincena' —que deja escrito el motivo—, o espere a que la quincena "
+                "siguiente lo recoja y corríjalo ahí antes de pagarla"
+            )
+
         if anticipo.liquidacion_id is None:
             return None
 
@@ -4935,7 +5471,20 @@ class AnticipoService(BaseService[Anticipo]):
                 anticipo.liquidacion_id, (None, anticipo.liquidacion_id is not None)
             )
             anticipo.liquidacion_estado = estado
-            anticipo.bloqueado = con_pago or anticipo.pago_empleado_id is not None
+            # Y EL QUE UNA CORRECCIÓN SOLTÓ VA TRABADO AUNQUE NO APUNTE A NINGUNA
+            # QUINCENA. Sin este tercer motivo la pantalla le mostraba al dueño los
+            # botones de editar y borrar habilitados sobre un adelanto que el servidor
+            # rebota — y un botón que siempre falla es peor que no tener botón. El porqué
+            # está en `Anticipo.soltado_de_liquidacion_id`: ese adelanto YA SALIÓ IMPRESO
+            # en un comprobante entregado que promete descontarlo en la quincena
+            # siguiente. Los tres motivos son los mismos que mira `_exigir_no_pagado`.
+            soltado = (
+                anticipo.liquidacion_id is None
+                and anticipo.soltado_de_liquidacion_id is not None
+            )
+            anticipo.bloqueado = (
+                con_pago or soltado or anticipo.pago_empleado_id is not None
+            )
 
     def obtener(self, entity_id: uuid.UUID) -> Anticipo:
         anticipo = super().obtener(entity_id)

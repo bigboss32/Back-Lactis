@@ -104,6 +104,7 @@ class EmpresaService(BaseService[Empresa]):
         from app.modules.inventario.models import MovimientoInventario
         from app.modules.liquidaciones.models import (
             AdjuntoPagoLiquidacion,
+            CorreccionLiquidacion,
             Anticipo,
             Liquidacion,
             LiquidacionDetalle,
@@ -247,6 +248,12 @@ class EmpresaService(BaseService[Empresa]):
             AdjuntoReventa, ConversionBorona, PagoEmpleado, Anticipo, Notificacion,
             RecepcionLeche, Venta, Liquidacion, Produccion, CompraQueso, VentaQueso,
             DocumentoReventa, AdjuntoGasto, Gasto, CajaDiaria, SaldoAnterior, Temporada,
+            # Los renglones de corrección van aquí por lo mismo que AdjuntoGasto: tienen
+            # empresa_id propio y `reversed(sorted_tables)` los borra ANTES que
+            # `liquidaciones`, de quien dependen. Faltaban, y sobrevivían al reinicio con
+            # la plata del productor adentro —motivo, cifras antes y después, qué
+            # adelanto se movió— apuntando a una quincena que ya no existe.
+            CorreccionLiquidacion,
         }
         tablas = {m.__table__ for m in transaccionales}
         for table in reversed(Base.metadata.sorted_tables):

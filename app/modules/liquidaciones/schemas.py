@@ -426,6 +426,19 @@ class PrecioDeUnDia(BaseSchema):
     precio_litro: Decimal = Field(gt=0, le=1_000_000)
 
 
+class ValorDeUnAnticipo(BaseSchema):
+    """El valor nuevo de UN anticipo que ya está descontado en la quincena.
+
+    El tope va con la misma forma que la plata del resto del módulo. Y ojo con lo que
+    esta cifra ES: plata que YA SE LE ENTREGÓ EN LA MANO al productor. Corregirla no es
+    corregir un cálculo, es corregir el registro de una entrega — por eso entra por la
+    puerta de la corrección, con motivo y versión, y no por la pantalla de anticipos.
+    """
+
+    anticipo_id: uuid.UUID
+    valor: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+
+
 class CorregirLiquidacionPayload(BaseSchema):
     """Lo que se manda para corregir una quincena pagada.
 
@@ -445,6 +458,31 @@ class CorregirLiquidacionPayload(BaseSchema):
     motivo: str = Field(min_length=3, max_length=500)
     recepciones_a_incluir: list[uuid.UUID] = []
     precios: list[PrecioDeUnDia] = []
+    # LOS ANTICIPOS, con las TRES cosas que se les pueden hacer, en listas separadas y
+    # no en una sola con un campo "acción": cada una tiene consecuencias distintas y el
+    # que lee este esquema tiene que verlas distintas.
+    #
+    # · INCLUIR uno que quedó suelto: se le descuenta a ESTA quincena. Baja el neto.
+    # · SOLTAR uno que no iba aquí: sube el neto de esta, y el anticipo queda libre para
+    #   que se lo descuente la quincena SIGUIENTE. No se borra: esa plata se entregó.
+    # · CORREGIR el valor de uno que ya está: quedó mal digitado.
+    anticipos_a_incluir: list[uuid.UUID] = []
+    anticipos_a_soltar: list[uuid.UUID] = []
+    valores_de_anticipos: list[ValorDeUnAnticipo] = []
+    # Y LA CUARTA: BORRAR un adelanto que NUNCA EXISTIÓ. Es distinta de soltarlo y la
+    # diferencia es la plata de quién:
+    #
+    #  · SOLTARLO dice "no iba en esta quincena". La plata SÍ se entregó, así que el
+    #    adelanto sigue vivo y la quincena siguiente se lo descuenta.
+    #  · BORRARLO dice "esto nunca pasó" —se digitó dos veces, o se anotó al productor
+    #    equivocado—. Si no se pudiera, ese adelanto fantasma se le descontaría al
+    #    productor de plata que SÍ es suya.
+    #
+    # Entra por aquí y no por la pantalla de Anticipos porque ese adelanto YA SALIÓ
+    # IMPRESO: borrarlo cambia lo que un papel entregado prometía, y eso exige la misma
+    # ceremonia que el resto de la corrección — motivo escrito, versión nueva del
+    # comprobante y renglón que lo diga.
+    anticipos_a_borrar: list[uuid.UUID] = []
 
 
 class DiaSueltoRead(BaseSchema):
@@ -466,6 +504,25 @@ class DiaSueltoRead(BaseSchema):
     nota_flete: str | None = None
 
 
+class AnticipoDeLaQuincena(BaseSchema):
+    """Un anticipo del tercero: o descontado en esta quincena, o suelto esperando.
+
+    Lleva la fecha y las observaciones porque es con eso —y no con el id— que el dueño
+    reconoce cuál adelanto fue: "el del 12 que le di para la droga".
+    """
+
+    anticipo_id: uuid.UUID
+    fecha: date
+    valor: Decimal
+    observaciones: str | None = None
+    # True si HOY está descontado en esta quincena; False si está suelto.
+    aplicado: bool
+    # Solo en los sueltos, y solo cuando hace falta: un adelanto viejo, de mucho antes
+    # del período, que aparece como candidato porque nunca se le descontó a nadie. El
+    # dueño tiene que verlo señalado antes de marcarlo.
+    aviso: str | None = None
+
+
 class PrevisualizacionCorreccion(BaseSchema):
     """El antes y el después de la corrección, SIN escribir nada.
 
@@ -475,8 +532,24 @@ class PrevisualizacionCorreccion(BaseSchema):
     """
 
     dias_sueltos: list[DiaSueltoRead] = []
+    # Los que HOY se le descuentan en esta quincena, y los que están sueltos esperando.
+    # Los dos viajan siempre para que la pantalla pueda pintar las dos listas sin pedir
+    # nada más, y para que el dueño vea de una qué se le descontó y qué se quedó por
+    # fuera — que es justo la pregunta que lo trajo a esta pantalla.
+    anticipos_aplicados: list[AnticipoDeLaQuincena] = []
+    anticipos_sueltos: list[AnticipoDeLaQuincena] = []
+    # LOS QUE ESTA MISMA QUINCENA SACÓ EN UNA CORRECCIÓN ANTERIOR y siguen sueltos.
+    # Salen aparte porque son los únicos que esta pantalla puede BORRAR: son los que
+    # ella imprimió, y su comprobante es el que promete descontarlos en la siguiente.
+    # Sin esta lista el dueño que sacó un adelanto por error quedaba sin ninguna
+    # pantalla donde arreglarlo.
+    anticipos_soltados_por_esta: list[AnticipoDeLaQuincena] = []
     valor_total_antes: Decimal
     valor_total_despues: Decimal
+    # Lo que se le adelantó, antes y después. Van aparte de `valor_total` porque en el
+    # comprobante son renglones distintos y el dueño los suma por separado.
+    anticipos_antes: Decimal
+    anticipos_despues: Decimal
     neto_antes: Decimal
     neto_despues: Decimal
     pagado: Decimal
@@ -513,8 +586,13 @@ class CorreccionRead(BaseSchema):
     saldo_despues: Decimal
     estado_antes: str
     estado_despues: str
+    # Anulables: las correcciones hechas antes de que los anticipos se pudieran tocar no
+    # registraron esta cifra, y un cero ahí sería afirmar que no había adelantos.
+    anticipos_antes: Decimal | None = None
+    anticipos_despues: Decimal | None = None
     dias_agregados: list[Any] = []
     precios_corregidos: list[Any] = []
+    anticipos_cambiados: list[Any] = []
 
 
 class LiquidacionDetallePrecioUpdate(BaseSchema):

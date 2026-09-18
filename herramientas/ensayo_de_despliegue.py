@@ -188,6 +188,31 @@ cat = next(x for x in cats if x["nombre"] == "Combustible")
 c.post(f"{API}/gastos", json={
     "fecha": "2026-07-03", "categoria_id": cat["id"], "concepto": "ACPM",
     "valor": "242760.75"}, headers=h)
+
+# UN ADELANTO YA DESCONTADO Y OTRO SUELTO. Se siembran los dos porque una migracion
+# que toque la tabla de anticipos —plata entregada en la mano— tiene que ensayarse
+# con filas adentro, y en los DOS estados que existen: el que una quincena ya se
+# descontó y el que sigue esperando. Sobre una tabla vacia el ensayo no probaria nada.
+prov2 = c.post(f"{API}/proveedores", json={
+    "nombre": "Ensayo Adelantos", "vereda": "La Cuchilla", "precio_litro": "1800"},
+    headers=h).json()
+c.post(f"{API}/anticipos", json={
+    "tipo": "proveedor", "proveedor_id": prov2["id"], "fecha": "2026-06-03",
+    "valor": "137450.45", "observaciones": "para la droga"}, headers=h)
+c.post(f"{API}/recepciones", json={
+    "fecha": "2026-06-05", "proveedor_id": prov2["id"], "cantidad_litros": "300"},
+    headers=h)
+gen2 = c.post(f"{API}/liquidaciones/generar", json={
+    "periodo_inicio": "2026-06-01", "periodo_fin": "2026-06-15", "tipo": "proveedor"},
+    headers=h).json()["generadas"]
+liq2 = next(x for x in gen2 if x["proveedor_id"] == prov2["id"])
+c.post(f"{API}/liquidaciones/{liq2['id']}/aprobar", headers=h)
+c.post(f"{API}/liquidaciones/{liq2['id']}/pagar", headers=h)
+# Y uno que se queda suelto, sin ninguna quincena que se lo descuente todavia.
+c.post(f"{API}/anticipos", json={
+    "tipo": "proveedor", "proveedor_id": prov2["id"], "fecha": "2026-07-20",
+    "valor": "242760.99", "observaciones": "el del mercado"}, headers=h)
+
 print("SEMBRADO", json.dumps({"liquidacion": liq["id"], "empresa": emp}))
 '''
 
@@ -226,12 +251,24 @@ def main() -> int:
         "plata": sql("select coalesce(sum(valor_total),0)||' / '||coalesce(sum(pagado),0) "
                      "from liquidaciones where deleted_at is null;"),
         "gastos": sql("select coalesce(sum(valor),0) from gastos where deleted_at is null;"),
+        # Los adelantos: cuántos, cuánto suman, y cuántos están descontados en alguna
+        # quincena. Los tres tienen que quedar idénticos: es plata entregada en la mano.
+        "anticipos": sql(
+            "select count(*)||' / '||coalesce(sum(valor),0)||' / '||"
+            "count(liquidacion_id) from anticipos where deleted_at is null;"
+        ),
     }
     print(f"    liquidaciones: {antes['liquidaciones']} · total/pagado: {antes['plata']}"
           f" · gastos: {antes['gastos']}")
+    print(f"    anticipos (cuántos / suman / descontados): {antes['anticipos']}")
     # SIN DATOS EL ENSAYO NO PRUEBA NADA: comparar 0 contra 0 siempre da "no se movió".
     if antes["liquidaciones"].strip() in ("", "0"):
         print("!! el paso 1 no dejó ninguna liquidación: el ensayo no probaría nada")
+        limpiar()
+        return 1
+    if antes["anticipos"].strip().startswith("0 "):
+        print("!! el paso 1 no dejó ningún anticipo: una migración que toque esa tabla")
+        print("   no quedaría probada, y el ensayo diría que todo está bien")
         limpiar()
         return 1
 
@@ -249,9 +286,14 @@ def main() -> int:
         "plata": sql("select coalesce(sum(valor_total),0)||' / '||coalesce(sum(pagado),0) "
                      "from liquidaciones where deleted_at is null;"),
         "gastos": sql("select coalesce(sum(valor),0) from gastos where deleted_at is null;"),
+        "anticipos": sql(
+            "select count(*)||' / '||coalesce(sum(valor),0)||' / '||"
+            "count(liquidacion_id) from anticipos where deleted_at is null;"
+        ),
     }
     print(f"    liquidaciones: {despues['liquidaciones']} · total/pagado: {despues['plata']}"
           f" · gastos: {despues['gastos']}")
+    print(f"    anticipos (cuántos / suman / descontados): {despues['anticipos']}")
 
     fallos = []
     if antes != despues:

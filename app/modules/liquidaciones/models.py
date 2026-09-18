@@ -698,6 +698,19 @@ class CorreccionLiquidacion(HoraDeRegistroMixin, TenantMixin, AuditMixin, Base):
     saldo_despues: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     estado_antes: Mapped[str] = mapped_column(String(20), nullable=False)
     estado_despues: Mapped[str] = mapped_column(String(20), nullable=False)
+    # LO QUE SE LE HABÍA ADELANTADO, antes y después. Se GUARDAN aunque se puedan
+    # deducir de las otras cuatro cifras (neto = valor_total − anticipos −
+    # saldo_anterior), porque esa deducción necesita el `saldo_anterior` del momento,
+    # que no está en este renglón. Es la misma lección que ya costó plata varias veces
+    # en este proyecto: un hecho no se deduce de lo que sobrevive, se guarda cuando se
+    # sabe. Y esta cifra en particular es plata que YA SE LE ENTREGÓ EN LA MANO al
+    # productor: si el renglón no puede explicarla solo, no explica nada.
+    #
+    # Nacen anulables y no con default: las correcciones que ya existen —hechas antes
+    # de que se pudieran tocar los anticipos— no tienen esta cifra, y ponerles un cero
+    # sería afirmar que los anticipos eran cero. El nulo dice la verdad: no se sabe.
+    anticipos_antes: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    anticipos_despues: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
 
     # Los desgloses. `dias_agregados`: [{fecha, litros, precio_litro, valor}].
     # `precios_corregidos`: [{fecha, litros, precio_antes, precio_despues, valor_antes,
@@ -705,6 +718,10 @@ class CorreccionLiquidacion(HoraDeRegistroMixin, TenantMixin, AuditMixin, Base):
     # en SQL; las cifras que SÍ se suman están arriba, en columnas.
     dias_agregados: Mapped[list | None] = mapped_column(JSON, default=list)
     precios_corregidos: Mapped[list | None] = mapped_column(JSON, default=list)
+    # Qué se le hizo a los anticipos: [{accion, fecha, valor, valor_antes, observaciones}]
+    # con `accion` en 'entro' | 'salio' | 'valor'. Cada uno es plata que se le entregó
+    # en la mano, así que el renglón tiene que poder decir cuál se movió y a cuánto.
+    anticipos_cambiados: Mapped[list | None] = mapped_column(JSON, default=list)
 
     liquidacion: Mapped[Liquidacion] = relationship(back_populates="correcciones")
 
@@ -873,6 +890,29 @@ class Anticipo(TenantMixin, AuditMixin, Base):
 
     # Marcas de aplicado: liquidación (proveedor/transportador) o nómina (empleado)
     liquidacion_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("liquidaciones.id"), index=True
+    )
+    # DE QUÉ QUINCENA LO SACÓ UNA CORRECCIÓN. Nulo en la inmensa mayoría.
+    #
+    # EXISTE PORQUE UN ADELANTO SUELTO YA NO SIGNIFICA UNA SOLA COSA. Antes, "sin
+    # liquidación" quería decir "recién registrado, todavía no se le ha descontado a
+    # nadie", y por eso el candado de los anticipos se abría sin más preguntas. Desde
+    # que se puede corregir una quincena pagada hay un segundo caso: el adelanto que
+    # SALIÓ de un comprobante ya entregado. Ese ya está IMPRESO —el papel del productor
+    # dice, con todas sus letras, "se le descuenta en la siguiente"— y no se puede
+    # borrar ni rebajar por la puerta de al lado.
+    #
+    # El defecto que esto tapa, medido: quincena de $500.000 con $300.000 de adelanto,
+    # pagada; se suelta el adelanto por la corrección, se paga el saldo, y desde la
+    # pantalla de Anticipos se le da BORRAR — 204. La quincena siguiente ya no descuenta
+    # nada y el productor termina con $1.300.000 por $1.000.000 de leche. Rebajarlo a $1
+    # o correrle la fecha a diciembre hacía lo mismo sin dejar ni el hueco visible.
+    #
+    # ES UN HECHO Y POR ESO SE GUARDA, no se deduce. Se podría rastrear leyendo los
+    # `anticipos_cambiados` de las correcciones a ver si alguno lo menciona, pero esa es
+    # justo la clase de deducción que este proyecto ya pagó caro varias veces: el dato
+    # se escribe en el momento en que se sabe.
+    soltado_de_liquidacion_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("liquidaciones.id"), index=True
     )
     pago_empleado_id: Mapped[uuid.UUID | None] = mapped_column(
