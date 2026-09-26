@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Any, Iterable, NamedTuple, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, lazyload
 
 from app.common.service import BaseService, serialize_entity
@@ -33,6 +33,7 @@ from app.modules.liquidaciones.models import (
     ESTADO_BORRADOR,
     ESTADO_PAGADA,
     ESTADO_PARCIAL,
+    ESTADO_VISIBLE_PAGADA_DEBIENDO,
     TIPO_PROVEEDOR,
     TIPO_TRANSPORTADOR,
     AdjuntoPagoLiquidacion,
@@ -3354,6 +3355,13 @@ class LiquidacionService(BaseService[Liquidacion]):
             saldo_despues=saldo,
             estado_antes=liquidacion.estado,
             estado_despues=(ESTADO_PARCIAL if saldo > CERO else ESTADO_PAGADA),
+            # La MISMA regla de `Liquidacion.estado_visible`: en firme (siempre, aquí: la
+            # corrección solo corre sobre pagadas o parciales) y con saldo negativo.
+            estado_visible_despues=(
+                ESTADO_VISIBLE_PAGADA_DEBIENDO
+                if saldo < CERO
+                else (ESTADO_PARCIAL if saldo > CERO else ESTADO_PAGADA)
+            ),
             queda_por_entregar=saldo if saldo > CERO else CERO,
             se_le_pago_de_mas=-saldo if saldo < CERO else CERO,
             version_actual=liquidacion.version,
@@ -4654,9 +4662,39 @@ class LiquidacionService(BaseService[Liquidacion]):
             extra.append(Liquidacion.periodo_fin >= desde)
         if hasta:
             extra.append(Liquidacion.periodo_inicio <= hasta)
+
+        # EL FILTRO POR ESTADO MIRA LO QUE SE VE, NO SOLO LO QUE SE GUARDA.
+        #
+        # La quincena en firme en la que el tercero quedó debiendo se pinta como
+        # "pagada · quedó debiendo" (ver `Liquidacion.estado_visible`). Si el filtro
+        # siguiera mirando solo la columna, al tocar la tarjeta "Aprobadas" le saldrían al
+        # dueño filas que dicen "pagada" en el chip, y al filtrar "Pagadas" no le saldrían.
+        # La pantalla y el filtro tienen que estar de acuerdo, o el dueño deja de confiar
+        # en las dos.
+        #
+        # Por eso "pagada" las INCLUYE —ya no hay nada que entregarles, que es lo que
+        # significa pagada para él— y "aprobada"/"parcial" las EXCLUYEN. La regla es la
+        # misma de `estado_visible` escrita en SQL: en firme y con saldo negativo.
+        #
+        # Solo aquí. `list_paginated` lo usan otros módulos con su propio sentido de
+        # 'estado', y no se toca.
+        en_firme = (ESTADO_APROBADA, ESTADO_PARCIAL, ESTADO_PAGADA)
+        quedo_debiendo = Liquidacion.saldo < CERO
+        filtro_estado: str | None = estado
+        if estado == ESTADO_PAGADA:
+            extra.append(
+                or_(
+                    Liquidacion.estado == ESTADO_PAGADA,
+                    and_(Liquidacion.estado.in_(en_firme), quedo_debiendo),
+                )
+            )
+            filtro_estado = None
+        elif estado in (ESTADO_APROBADA, ESTADO_PARCIAL):
+            extra.append(Liquidacion.saldo >= CERO)
+
         return self.repo.list_paginated(
             params,
-            estado=estado,
+            estado=filtro_estado,
             filters={"tipo": tipo, "proveedor_id": proveedor_id},
             extra_criteria=extra,
         )
@@ -4831,7 +4869,12 @@ class LiquidacionService(BaseService[Liquidacion]):
             empresa_nit=nit,
             empresa_ubicacion=ubicacion,
             folio=self._folio(liquidacion),
-            estado=liquidacion.estado,
+            # El estado COMO SE LEE y no el guardado: "PAGADA · QUEDÓ DEBIENDO" cuando no
+            # hay nada que entregarle porque él quedó debiendo. Este es el papel que se le
+            # entrega al tercero, y decía "APROBADA" — que para quien lo recibe significa
+            # "falta que me paguen". Sale de la misma propiedad que la pantalla, así que
+            # los dos no pueden decir cosas distintas.
+            estado=liquidacion.estado_visible,
             emitido=datetime.now().strftime("%d/%m/%Y %H:%M"),
             tercero_label="Proveedor" if es_proveedor else "Transportador",
             tercero_nombre=tercero,

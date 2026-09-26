@@ -37,6 +37,12 @@ ESTADO_PARCIAL = "parcial"
 ESTADO_PAGADA = "pagada"
 ESTADO_ANULADA = "anulada"
 
+# EL RÓTULO DE LA QUINCENA QUE NO TIENE NADA QUE PAGARSE PORQUE EL TERCERO QUEDÓ
+# DEBIENDO. No es un estado que se guarde: ver `Liquidacion.estado_visible`, que es el
+# único sitio que decide cuándo se usa. Va en minúscula porque el chip de la pantalla lo
+# capitaliza, y con el punto medio porque son dos hechos y no uno.
+ESTADO_VISIBLE_PAGADA_DEBIENDO = "pagada · quedó debiendo"
+
 
 class Liquidacion(TenantMixin, AuditMixin, Base):
     __tablename__ = "liquidaciones"
@@ -274,6 +280,46 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
         """
         saldo = Decimal(self.saldo or 0)
         return -saldo if saldo < Decimal("0") else Decimal("0")
+
+    @property
+    def estado_visible(self) -> str:
+        """El estado COMO SE LEE, que no siempre es el estado que se guarda.
+
+        Lo pidió el dueño, mirando la lista: "cuando quede debiendo, me gustaría que el
+        estado quedara pagada o paga debiendo, pero no solo aprobada o solamente pagada".
+        El caso: la quincena vale $500.000 y el proveedor ya había pedido $700.000 de
+        adelanto. No hay nada que entregarle —él quedó debiendo $200.000—, pero el
+        comprobante se quedaba en 'aprobada', y en la lista eso se lee como "falta
+        pagarla". El dueño recorre la lista buscando qué le falta y esa fila le aparecía
+        pendiente sin estarlo.
+
+        ES UN RÓTULO Y NO UN ESTADO NUEVO EN LA BASE, a propósito, y la diferencia vale
+        plata. El estado guardado lo leen unas veinte partes del sistema —contabilidad,
+        reportes, el candado de Recepción diaria— y cada una le da un significado preciso.
+        Pasar esta quincena a 'pagada' de verdad TRABARÍA SUS DÍAS mientras la deuda no se
+        ha cobrado, y el sistema los deja corregibles a propósito hasta ese momento (ver la
+        nota al lado de `_no_sale_un_peso_por_la_deuda`). El rótulo le dice al dueño la
+        verdad sin mover ninguna de esas piezas.
+
+        Y DICE LAS DOS COSAS, que es lo que él pidió: "pagada" porque ya no hay nada que
+        entregarle, "quedó debiendo" porque él le debe a la quesera. Solo "pagada" callaría
+        la deuda; solo "aprobada" diría que falta pagar. Si la deuda ya se cobró en otra
+        quincena o todavía no, eso lo sigue diciendo la marca de la columna Saldo
+        ("quedó debiendo · cobrada").
+
+        SOLO EN FIRME. Un borrador con más adelantos que leche también queda debiendo, y
+        decirle "pagada" sería mentir sobre un documento que ni siquiera se aprobó. Y una
+        anulada sigue diciendo anulada: no vale nada, no se paga ni se debe.
+
+        Lo leen la lista, el detalle y el PDF — el papel que se le entrega al productor —
+        desde esta misma propiedad, para que no puedan decir cosas distintas.
+        """
+        if (
+            self.estado in (ESTADO_APROBADA, ESTADO_PARCIAL, ESTADO_PAGADA)
+            and self.le_queda_debiendo > Decimal("0")
+        ):
+            return ESTADO_VISIBLE_PAGADA_DEBIENDO
+        return self.estado
 
     @property
     def tiene_pagos(self) -> bool:

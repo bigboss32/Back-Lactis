@@ -368,6 +368,12 @@ class LiquidacionRead(TenantRead):
     # pedirlo: 1 significa que no hay nada que mostrar.
     version: int = 1
     fecha_primera_impresion: datetime | None = None
+    # EL ESTADO COMO SE LEE: igual a `estado` casi siempre, y "pagada · quedó debiendo"
+    # cuando la quincena está en firme y el tercero le quedó debiendo a la quesera. La
+    # regla vive en `Liquidacion.estado_visible` y la pantalla solo la pinta: si la
+    # dedujera por su cuenta, el chip y el papel podrían decir cosas distintas.
+    # `estado` sigue viajando aparte y sin tocar, porque es el que usan los botones.
+    estado_visible: str = ""
     # LAS DOS PUNTAS DE LA DEUDA, y las dos se ven en la pantalla:
     #
     # · en la liquidación que DEJÓ la deuda, en cuál se le cobró. Mientras esto no
@@ -557,6 +563,11 @@ class PrevisualizacionCorreccion(BaseSchema):
     saldo_despues: Decimal
     estado_antes: str
     estado_despues: str
+    # Y COMO SE VA A LEER después de corregir: "pagada · quedó debiendo" si la corrección
+    # deja al tercero debiendo. Sin esto el diálogo decía "la quincena queda en pagada" y
+    # un segundo después la lista la pintaba "pagada · quedó debiendo": el mismo hecho con
+    # dos palabras. Sale de la misma regla que `Liquidacion.estado_visible`.
+    estado_visible_despues: str = ""
     # Cuánto hay que entregarle todavía, o cuánto se le pagó de más. Los DOS en
     # positivo y en campos separados, porque son dos frases distintas y la pantalla no
     # tiene que deducir cuál decir a partir del signo de un saldo.
