@@ -8,10 +8,13 @@
 | | Back-Lactis | Front-Lactis |
 |---|---|---|
 | Rama con el trabajo | `wip/quincenas-existentes` | `wip/quincenas-existentes` |
-| `origin/main` (lo que está en producción) | `4db3126` | `87b8a69` |
+| `origin/main` (lo que está en producción) | `0274078` | `f853705` |
 
-- **No está en `main` ni desplegado.** Render despliega el backend desde `main` y Cloudflare el frontend. Nada de esta rama llegó al cliente.
-- En la rama van primero los commits del rótulo (`0274078` en el back y `f853705` en el front) y encima el trabajo de este documento.
+- **El rótulo ya está en `main`, y por lo tanto en producción.** `0274078` y `f853705` los subió otra sesión el 27/09/2026, junto con el respaldo antes de formatear el equipo. Render despliega el backend desde `main` y Cloudflare el frontend.
+- **Lo demás no está desplegado.** El trabajo de este documento son los commits `wip(...)` de la rama.
+- **Mientras la rama no se despliegue, producción tiene dos problemas que la rama arregla:**
+  1. La tarjeta "Le quedaron debiendo a la quesera" pierde deudas cuando hay más de 200 quincenas pagadas.
+  2. "Corregir esta quincena" sobre una pagada de julio con la deuda borrada puede mandar a pagarle a alguien que debe.
 - **No hay migraciones nuevas**: `alembic/versions` no se tocó, así que desplegar no cambia el esquema.
 
 ## Contexto que hay que saber antes de tocar nada
@@ -107,7 +110,7 @@ Resultado al escribir esto:
   - Se corrió sin los archivos de auditoría: `--ignore-glob="tests/test_zz_*"`.
   - Los 14 archivos nuevos y el del rótulo pasan solos: 68 casos.
   - La suite completa del backend (más de 2.900 pruebas) no se corrió después de la última vuelta.
-- **Frontend:** compila limpio. Pasan todos los specs que no son de auditoría. Los 13 que fallan son de los archivos `zz-*`, que no están en la rama (ver la última sección).
+- **Frontend:** compila limpio. Pasan todos los specs que no son de auditoría. Los 13 que fallan son de los archivos `zz-*` (ver la última sección).
 
 ## Lo que falta, en orden
 
@@ -151,10 +154,14 @@ Resultado al escribir esto:
      - desempatar por `id` el orden del listado de liquidaciones, porque Postgres puede repetir o saltar filas entre páginas;
      - que el tablero y la tarjeta "Aprobadas por pagar" usen la misma regla (hoy el tablero suma los borradores).
 
-## Archivos de auditoría (no están en la rama)
+## Archivos de auditoría: están en la rama y hay que borrarlos antes del merge
 
-En la copia local quedaron sin commit:
+Estos archivos entraron a la rama en los commits `chore(backup)`, para no perderlos al formatear el equipo:
 - `tests/test_zz_*.py`
 - `src/app/**/zz-*.spec.ts`
 
-Son reproducciones que dejaron las auditorías. Muchas **afirman el defecto viejo**, así que fallan ahora que está arreglado. No se subieron, y conviene borrarlas de la copia local antes de correr las suites. La lógica que probaban quedó en las pruebas nuevas.
+Son reproducciones que dejaron las auditorías, y muchas **afirman el defecto viejo**, así que fallan ahora que está arreglado. Por eso:
+- Las suites solo quedan limpias sin ellos. En el backend se corren con `--ignore-glob="tests/test_zz_*"`; en el frontend fallan 13 specs `zz-*` y ninguno más.
+- **Hay que borrarlos antes de llevar la rama a `main`.**
+
+La lógica que probaban quedó en las pruebas nuevas.
