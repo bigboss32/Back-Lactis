@@ -103,7 +103,10 @@ npx ng test --watch=false --browsers=ChromeHeadless
 ```
 
 Resultado al escribir esto:
-- **Backend:** las 15 pruebas nuevas y la del rótulo (68 casos) pasan. La corrida larga del backend se anota abajo.
+- **Backend:** la corrida de arriba da **657 pasan, 0 fallan**, 1 skipped y 5 xfailed, en 25 minutos. La advertencia de `DecompressionBombWarning` es de una prueba de soportes y es intencional.
+  - Se corrió sin los archivos de auditoría: `--ignore-glob="tests/test_zz_*"`.
+  - Los 14 archivos nuevos y el del rótulo pasan solos: 68 casos.
+  - La suite completa del backend (más de 2.900 pruebas) no se corrió después de la última vuelta.
 - **Frontend:** compila limpio. Pasan todos los specs que no son de auditoría. Los 13 que fallan son de los archivos `zz-*`, que no están en la rama (ver la última sección).
 
 ## Lo que falta, en orden
