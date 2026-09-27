@@ -14,10 +14,15 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     Uuid,
+    case,
     false,
     func,
+    select,
+    type_coerce,
 )
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.common.models import AuditMixin, HoraDeRegistroMixin, TenantMixin
 from app.core.database import Base
@@ -280,6 +285,62 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
         """
         saldo = Decimal(self.saldo or 0)
         return -saldo if saldo < Decimal("0") else Decimal("0")
+
+    @hybrid_property
+    def deuda_borrada_por_la_migracion(self) -> Decimal:
+        """Lo que el tercero quedaba debiendo y la migración de los abonos BORRÓ. Cero
+        en todas menos en unas pocas quincenas de julio de 2026.
+
+        La migración a5e7c1b4d9f2 (01/08/2026) les escribió a las 'pagada' de antes
+        pagado = valor_total − anticipos y saldo = 0, SIN renglón de pago. Con $180.000
+        de leche contra $300.000 de adelanto eso dejó pagado = −$120.000 y saldo en cero:
+        los $120.000 que el tercero debe desaparecieron del saldo, del rótulo, del
+        tablero y de la quincena siguiente.
+
+        SE MIDE CONTRA LOS PAGOS DE VERDAD, no por el signo de `pagado`. Desde la
+        migración `pagado` solo sube con un pago que deja renglón (`registrar_pago`) y
+        solo baja quitando uno (`eliminar_pago`, que en estas filas no lo recorta a
+        cero): Σ(pagos) − pagado es lo que la migración metió sin renglón, y se queda
+        igual toda la vida de la fila. El signo mentía en cuanto la fila recibía un pago
+        (la de arriba, corregida y pagada antes del guardia):
+          · día olvidado de $50.000 y Pagar: pagado −$70.000 y $50.000 en pagos. El
+            signo decía $70.000; la verdad es 50.000 − (−70.000) = $120.000.
+          · día olvidado de $200.000 y Pagar: pagado $80.000 y $200.000 en pagos. El
+            signo decía $0 y dejaba mandar a pagar otra vez; la verdad es $120.000.
+        Si la resta da negativa es la 'pagada' de antes que sí tenía neto (pagado = neto,
+        sin renglones): se pagó por fuera del sistema y no se borró nada, cero. Lo que de
+        verdad falta entregar es siempre saldo − esto (negativo: lo que el tercero debe).
+
+        Pago vivo = renglón de `pagos`: `eliminar_pago` los borra de verdad y ni la
+        relación ni la lista que ve el dueño miran `deleted_at` (la consulta de abajo
+        tampoco). `pagos` es selectin: en el listado, una consulta por página.
+
+        Con esta cifra en positivo el servicio rebota lo que movería plata sobre esa
+        fila (`_exigir_sin_deuda_borrada`) y la pantalla puede hacer la MISMA pregunta
+        para no ofrecer un botón que siempre falla.
+        """
+        entregado = sum((Decimal(p.valor or 0) for p in self.pagos), Decimal("0"))
+        borrada = entregado - Decimal(self.pagado or 0)
+        return borrada if borrada > Decimal("0") else Decimal("0")
+
+    @deuda_borrada_por_la_migracion.inplace.expression
+    @classmethod
+    def _deuda_borrada_por_la_migracion_sql(cls) -> ColumnElement[Decimal]:
+        """LA MISMA CIFRA DE ARRIBA ESCRITA EN SQL, para sumarla en la base.
+
+        La usan las tarjetas del listado (`resumen_por_estado`): la plata "por pagar"
+        no puede contar una fila que el servidor no deja pagar. Está pegada a la de
+        Python a propósito —una regla, dos idiomas— y una prueba las compara fila por
+        fila (tests/test_liquidacion_deuda_borrada_con_pagos.py).
+        """
+        entregado = (
+            select(func.coalesce(func.sum(PagoLiquidacion.valor), 0))
+            .where(PagoLiquidacion.liquidacion_id == cls.id)
+            .correlate_except(PagoLiquidacion)
+            .scalar_subquery()
+        )
+        borrada = entregado - func.coalesce(cls.pagado, 0)
+        return type_coerce(case((borrada > 0, borrada), else_=0), Numeric(14, 2))
 
     @property
     def estado_visible(self) -> str:

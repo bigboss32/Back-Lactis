@@ -155,10 +155,45 @@ class LiquidacionRepository(BaseRepository[Liquidacion]):
         return [
             Liquidacion.tipo == tipo,
             campo == tercero_id,
+            *LiquidacionRepository.deuda_sin_cobrar(),
+            Liquidacion.periodo_fin < antes_de,
+        ]
+
+    @staticmethod
+    def deuda_sin_cobrar() -> list[Any]:
+        """"Quedó debiendo y nadie se lo ha cobrado", de CUALQUIER tercero y fecha.
+
+        Es el corazón de `_solo_las_que_deben` sin el tercero ni el período. Está aparte
+        porque la tarjeta "Le quedaron debiendo a la quesera" del listado suma este
+        mismo universo (`LiquidacionService.resumen_por_estado`): la cifra que ve el
+        dueño tiene que ser la que de verdad se va a cobrar, no una parecida. El porqué
+        de cada filtro está en `deudas_sin_cobrar`.
+        """
+        return [
             Liquidacion.saldo < Decimal("0"),
             Liquidacion.deuda_trasladada_a_id.is_(None),
             Liquidacion.estado != ESTADO_ANULADA,
-            Liquidacion.periodo_fin < antes_de,
+        ]
+
+    @staticmethod
+    def saldo_por_pagar() -> list[Any]:
+        """"El saldo de esta fila es plata que la quesera tiene que sacar", en SQL.
+
+        Solo saldos POSITIVOS, y NUNCA la fila con deuda borrada por la migración: sobre
+        esa el servidor rebota Pagar y abonar (`_exigir_sin_deuda_borrada`), así que
+        sumarla es prometer una plata que ningún botón entrega. Medido: la corregida
+        antes del guardia (parcial v2, $230.000 − $300.000, pagado −$120.000) tiene
+        saldo +$50.000 y el tercero debe $70.000.
+
+        UNA REGLA PARA LAS TRES PANTALLAS que dicen "por pagar": las tarjetas del listado
+        (`LiquidacionService.resumen_por_estado`), el tablero (`ReportesService`) y el
+        balance (`ContabilidadService`). Con una copia en cada una, las tarjetas decían
+        $0 y el tablero y el balance $50.000 sobre la misma fila. Cada pantalla le pone
+        encima sus estados.
+        """
+        return [
+            Liquidacion.saldo > Decimal("0"),
+            Liquidacion.deuda_borrada_por_la_migracion <= Decimal("0"),
         ]
 
     def deuda_pendiente_de(self, tipo: str, tercero_id: uuid.UUID, antes_de: date) -> Decimal:

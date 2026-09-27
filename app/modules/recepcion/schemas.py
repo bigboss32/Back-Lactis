@@ -169,6 +169,27 @@ class RecepcionRead(TenantRead):
     candado_aviso: str | None = None
 
 
+class LiquidacionDevueltaABorrador(BaseSchema):
+    id: uuid.UUID
+    # 'proveedor' (la de la leche) o 'transportador' (la del flete).
+    tipo: str
+
+
+class RecepcionGuardada(RecepcionRead):
+    """Lo que contestan el POST y el PUT de un día: el día, y lo que el guardado le hizo
+    a las liquidaciones.
+
+    `liquidaciones_devueltas_a_borrador` son las APROBADAS que este guardado recuadró y
+    por eso volvieron a borrador (hay que aprobarlas otra vez), incluida la del viaje fijo
+    al que el día acaba de volver. Es un hecho de ESTE guardado, no una columna: vacía
+    cuando no pasó —un día nuevo, un borrador, o una observación sobre un día trabado,
+    que no recuadra nada—. La pantalla avisa solo con lo que esté aquí. El DELETE
+    contesta 204 y no lo trae.
+    """
+
+    liquidaciones_devueltas_a_borrador: list[LiquidacionDevueltaABorrador] = []
+
+
 class ResumenDia(BaseSchema):
     fecha: date
     total_litros: Decimal
@@ -199,10 +220,14 @@ class CeldaGrilla(BaseSchema):
     # flete), sin importar el estado. Es una SEÑA para avisar que al tocarlo se
     # va a mover una liquidación ya emitida, no un candado.
     liquidada: bool
-    # Alguna de esas liquidaciones ya tiene pagos, sea 'pagada' o 'parcial'. Basta
-    # un abono: esa plata ya salió contra este día. Ya NO significa "no editable":
-    # significa "este día tiene campos trabados" y por eso lleva el candado.
+    # Este día tiene campos trabados y por eso lleva el candado. Ya NO significa "no
+    # editable", y tampoco "está en 'pagada' o 'parcial'": es `leche_pagada or
+    # flete_pagado`, el mismo candado que rebota el PUT. Incluye la quincena cuya deuda
+    # ya se cobró en otra, que sigue guardada 'aprobada' sin que haya salido un peso.
     pagada: bool = False
+    # El porqué, escrito por el backend: el mismo texto que muestra el diálogo del día
+    # (`RecepcionRead.candado_aviso`). Null cuando no hay nada trabado.
+    candado_aviso: str | None = None
     # Cuál de las dos platas fue, que es lo que hace honesto el tooltip. Con la
     # leche pagada y el flete sin liquidar el día se sigue pudiendo corregir —el
     # transportador, la ruta, las observaciones—, así que la celda ya no puede

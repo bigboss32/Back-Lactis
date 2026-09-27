@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import select
 
@@ -38,6 +38,7 @@ from app.modules.transportadores.tarifas import (
     tarifa_de_transporte,
     valor_del_grupo,
 )
+from app.utils.export import pesos
 
 CERO = Decimal("0")
 CENTAVOS = Decimal("0.01")
@@ -78,9 +79,6 @@ def _centavos(valor: Decimal) -> Decimal:
 # día igual que una pagada del todo. Si ya salió plata de la caja contra esas
 # cifras, cambiar los litros deja el abono descuadrado.
 _ORDEN_DE_CANDADO = (ESTADO_PAGADA, ESTADO_PARCIAL, ESTADO_APROBADA, ESTADO_BORRADOR)
-
-# Los dos estados con los que un día queda trabado en la grilla y en el guardia.
-_ESTADOS_CON_PAGO = (ESTADO_PAGADA, ESTADO_PARCIAL)
 
 
 def _estado_que_manda(estados: list[str]) -> str | None:
@@ -357,8 +355,15 @@ def _traba_el_dia(liquidacion: Liquidacion) -> bool:
     siguiente. Ese es el instante en que la quincena queda cerrada de verdad, y ahí sí
     se traba. El porqué completo está en la nota "MARCAR PAGADA UNA LIQUIDACIÓN QUE
     NADIE PAGÓ", en app/modules/liquidaciones/service.py.
+
+    NO REPITE LA REGLA: la importa, igual que `_ya_salio_plata`. Las dos razones juntas
+    son `cifras_congeladas`, la misma pregunta con la que se traban los anticipos. Con
+    una copia aquí, el día que allá se sume una tercera razón el anticipo quedaría
+    trabado y su día no, o al revés.
     """
-    return _ya_salio_plata(liquidacion) or liquidacion.deuda_ya_cobrada
+    from app.modules.liquidaciones.service import cifras_congeladas
+
+    return cifras_congeladas(liquidacion)
 
 
 def _nombre_del_tercero(liquidacion: Liquidacion) -> str | None:
@@ -383,29 +388,130 @@ def _de_quien(liquidacion: Liquidacion) -> str:
     return "la leche" if liquidacion.tipo == TIPO_PROVEEDOR else "el flete"
 
 
-def _por_que_esta_trabada(liquidacion: Liquidacion) -> str:
-    """'la leche de este día ya se le pagó a Patricia Laguna'."""
+def _cual_quincena(liquidacion: Liquidacion) -> str:
+    return "de la leche" if liquidacion.tipo == TIPO_PROVEEDOR else "del flete"
+
+
+def _deuda_borrada_del_dia(liquidacion: Liquidacion) -> str | None:
+    """La quincena a la que la migración de los abonos le borró la deuda; None si no.
+
+    La de $180.000 contra $300.000 quedó 'pagada' con saldo 0 y pagado −$120.000: no se
+    le pagó nada, él debe $120.000. VA PRIMERA, como en el anticipo: es la única razón
+    sin salida por dentro (ver `_exigir_sin_deuda_borrada`)."""
+    borrada = liquidacion.deuda_borrada_por_la_migracion
+    if borrada <= CERO:
+        return None
+    quien = _nombre_del_tercero(liquidacion) or "el tercero"
+    return (
+        f"la quincena {_cual_quincena(liquidacion)} de este día viene de antes de que "
+        f"existieran los abonos, y el sistema de esa época le borró lo que {quien} quedaba "
+        f"debiendo ({pesos(borrada)}); hay que repararla antes de tocarla"
+    )
+
+
+class _RazonDelDia(NamedTuple):
+    """Por qué está trabado un día, dicho para cada sitio que lo cuenta.
+
+    `aviso`: la frase del diálogo y de la celda. `rebote`: la de los dos 422 (corregir
+    un campo, borrar el día), después de "No se puede … de este día: ". `consejo`: la
+    salida que ofrecen esos 422, o "" si por dentro no hay ninguna.
+    """
+
+    aviso: str
+    rebote: str
+    consejo: str
+
+
+def _por_que_esta_trabada(liquidacion: Liquidacion) -> _RazonDelDia:
+    """POR QUÉ ESTÁ TRABADO EL DÍA, escogido en UN SOLO SITIO para el aviso y los dos 422.
+
+    Eran tres copias del mismo árbol (el aviso, `_exigir_campos_libres` y
+    `_exigir_no_pagada`), y a las tres les faltaba la misma rama: la quincena corregida
+    que quedó 'parcial' v2 SIN NINGÚN PAGO (el adelanto la cubría exacto, se cerró con
+    Pagar y se le metió un día olvidado) decía "ya se le abonó" y rebotaba con "Elimine
+    primero ese pago", y ese pago no existe. Su anticipo ya decía "ya emitió un
+    comprobante corregido".
+
+    EL ORDEN ES EL DEL CANDADO DEL ANTICIPO (`_por_que_no_se_mueve`), para que el día y
+    el adelanto de la misma quincena digan lo mismo: deuda borrada, deuda ya cobrada,
+    'pagada' sin un peso, pagada, corregida y, de último, el abono. La corregida va
+    ANTES del abono aunque tenga pagos: borrar el pago no la destraba (sigue en v2), así
+    que "Elimine primero ese pago" sería un consejo que siempre falla. Y la palabra
+    "pago" sale solo si hay pagos (`tiene_pagos`).
+    """
+    from app.modules.liquidaciones.service import (
+        pagada_sin_que_saliera_un_peso,
+        por_que_no_salio_un_peso,
+    )
+
     que = _de_quien(liquidacion)
     nombre = _nombre_del_tercero(liquidacion)
     a_quien = f" a {nombre}" if nombre else ""
-    # LA DEUDA YA COBRADA VA PRIMERO porque es la razón que el usuario no puede
-    # adivinar: por este día no salió plata, así que "ya se le pagó" sería mentira y lo
-    # mandaría a buscar un pago que no existe. Lo que necesita saber es en qué OTRA
-    # liquidación se le cobró, que es la que tendría que anular para poder corregir.
+    la_quincena = f"la quincena {_cual_quincena(liquidacion)} de este día"
+    ajuste = "Si la cifra está mala, registre el ajuste en la quincena siguiente"
+    borrada = _deuda_borrada_del_dia(liquidacion)
+    if borrada is not None:
+        return _RazonDelDia(borrada, borrada, "")
+    # LA DEUDA YA COBRADA VA ANTES QUE LOS PAGOS porque es la razón que el usuario no
+    # puede adivinar: por este día no salió plata, así que "ya se le pagó" sería mentira
+    # y lo mandaría a buscar un pago que no existe. Lo que necesita saber es en qué OTRA
+    # liquidación se le cobró, que es la que tendría que anular para poder corregir. El
+    # consejo lleva el orden para volver a generarlas (`orden_para_volver_a_generar`):
+    # regenerarlas empezando por la nueva saca plata de más.
     if liquidacion.deuda_ya_cobrada:
         otra = liquidacion.deuda_trasladada_a
-        donde = f" en la del {otra.periodo_texto}" if otra is not None else " en otra"
-        de_quien = f"{nombre} " if nombre else ""
-        return (
-            f"lo que {de_quien}quedó debiendo en la quincena de {que} de este día ya "
-            f"se le cobró{donde}"
+        en_la = f" en la del {otra.periodo_texto}" if otra is not None else " en otra"
+        donde = (
+            f"la liquidación del {otra.periodo_texto}" if otra is not None else "otra liquidación"
         )
+        de_quien = f"{nombre} " if nombre else ""
+        return _RazonDelDia(
+            f"lo que {de_quien}quedó debiendo en la quincena de {que} de este día ya "
+            f"se le cobró{en_la}",
+            f"lo que el tercero quedó debiendo en esta quincena de {que} ya se le cobró en "
+            f"{donde}, así que cambiar la cifra descuadraría los dos comprobantes",
+            "Si de verdad hay que corregirlo, anule primero esa liquidación. "
+            f"{liquidacion.orden_para_volver_a_generar}".rstrip(),
+        )
+    if pagada_sin_que_saliera_un_peso(liquidacion):
+        sin_un_peso = (
+            f"{la_quincena} quedó cerrada como pagada "
+            f"{por_que_no_salio_un_peso(liquidacion, nombre or 'el tercero')}"
+        )
+        return _RazonDelDia(sin_un_peso, sin_un_peso, ajuste)
     # Se distingue el pago total del abono porque para el usuario son dos
     # situaciones distintas: del pagado no hay nada que hacer por dentro; del
     # abono sí, se puede borrar el pago, corregir el día y volver a abonar.
     if liquidacion.estado == ESTADO_PAGADA:
-        return f"{que} de este día ya se le pagó{a_quien}"
-    return f"{que} de este día ya se le abonó{a_quien}"
+        return _RazonDelDia(
+            f"{que} de este día ya se le pagó{a_quien}",
+            f"{que} ya se pagó en una liquidación",
+            "Si la cifra está mala, corríjala por fuera del sistema o registre el ajuste "
+            "en la quincena siguiente",
+        )
+    # Corregir solo cambia el PRECIO de un día (y entra días y anticipos), no los
+    # litros: mandar ahí "cualquier cifra" sería un botón que falla. Y aquí siempre
+    # acepta: la versión solo sube corrigiendo una de leche, y las dos razones por las
+    # que Corregir rebota (deuda borrada, deuda ya cobrada) ya salieron arriba.
+    if int(liquidacion.version or 1) > 1:
+        corregida = f"{la_quincena} ya emitió un comprobante corregido"
+        return _RazonDelDia(
+            corregida,
+            corregida,
+            "Si lo que está mal es el precio del día, use 'Corregir esta quincena'; si es "
+            "otra cifra, registre el ajuste en la quincena siguiente",
+        )
+    if liquidacion.tiene_pagos:
+        return _RazonDelDia(
+            f"{que} de este día ya se le abonó{a_quien}",
+            f"{que} ya tiene un pago registrado en una liquidación",
+            "Elimine primero ese pago si de verdad hay que corregir la cifra, o registre "
+            "el ajuste en la quincena siguiente",
+        )
+    # Con las razones de hoy no se llega aquí (igual que en el anticipo). Si
+    # `cifras_congeladas` suma una, el día se explica sin inventar un pago.
+    en_firme = f"{la_quincena} ya tiene sus cifras en firme"
+    return _RazonDelDia(en_firme, en_firme, ajuste)
 
 
 class CandadoRecepcion:
@@ -486,7 +592,7 @@ class CandadoRecepcion:
         if not self.bloqueados:
             return None
         razones = [
-            _por_que_esta_trabada(liq)
+            _por_que_esta_trabada(liq).aviso
             for liq in (self.leche, self.flete)
             if liq is not None and _traba_el_dia(liq)
         ]
@@ -615,42 +721,12 @@ class RecepcionService(BaseService[RecepcionLeche]):
         que_toco = _en_palabras(choques)
         editables = candado.campos_editables
         salida = f" Sí se puede corregir {_en_palabras(editables)}." if editables else ""
-        de_quien = _de_quien(liquidacion)
-        # LA DEUDA YA COBRADA TIENE SU PROPIO MENSAJE, y va antes que los dos de pago:
-        # por este día no salió plata, así que "ya se pagó" mandaría al usuario a buscar
-        # un pago que no existe. Lo que le sirve es cuál liquidación se cobró esa deuda
-        # —esa es la que tendría que anular para poder corregir el día— y por eso el
-        # mensaje la nombra con su período.
-        if liquidacion.deuda_ya_cobrada:
-            otra = liquidacion.deuda_trasladada_a
-            donde = (
-                f"la liquidación del {otra.periodo_texto}"
-                if otra is not None
-                else "otra liquidación"
-            )
-            # Y EL ORDEN EN QUE HAY QUE VOLVER A GENERARLAS, con las fechas concretas:
-            # este es EL mensaje que le manda al dueño a anular las dos quincenas, y
-            # regenerarlas empezando por la nueva le saca plata de más ($480.000 por
-            # $430.000 de leche, medido). La redacción vive en el modelo
-            # (`orden_para_volver_a_generar`) para que este mensaje, el de anular una
-            # liquidación y el de borrar un día digan exactamente lo mismo.
-            orden = liquidacion.orden_para_volver_a_generar
-            raise BusinessError(
-                f"No se puede {verbo} {que_toco} de este día: lo que el tercero quedó "
-                f"debiendo en esta quincena de {de_quien} ya se le cobró en {donde}, así "
-                f"que cambiar la cifra descuadraría los dos comprobantes.{salida} Si de "
-                f"verdad hay que corregirlo, anule primero esa liquidación. {orden}".rstrip()
-            )
-        if liquidacion.estado == ESTADO_PAGADA:
-            raise BusinessError(
-                f"No se puede {verbo} {que_toco} de este día: {de_quien} ya se pagó en una "
-                f"liquidación.{salida} Si la cifra está mala, corríjala por fuera del sistema "
-                "o registre el ajuste en la quincena siguiente"
-            )
+        # LA RAZÓN SALE DEL MISMO SITIO QUE EL AVISO (`_por_que_esta_trabada`), en el
+        # mismo orden que el candado del anticipo; aquí solo se arma la frase.
+        razon = _por_que_esta_trabada(liquidacion)
+        consejo = f" {razon.consejo}" if razon.consejo else ""
         raise BusinessError(
-            f"No se puede {verbo} {que_toco} de este día: {de_quien} ya tiene un pago "
-            f"registrado en una liquidación.{salida} Elimine primero ese pago si de verdad "
-            "hay que corregir la cifra, o registre el ajuste en la quincena siguiente"
+            f"No se puede {verbo} {que_toco} de este día: {razon.rebote}.{salida}{consejo}"
         )
 
     def _hay_que_rederivar_el_flete(
@@ -715,37 +791,10 @@ class RecepcionService(BaseService[RecepcionLeche]):
         candado = self._candado(recepcion)
         con_pago = [liq for liq in candado.liquidaciones if _traba_el_dia(liq)]
         if con_pago:
-            liq = con_pago[0]
-            de_quien = "la leche" if liq.tipo == TIPO_PROVEEDOR else "el flete"
-            if liq.deuda_ya_cobrada:
-                otra = liq.deuda_trasladada_a
-                donde = (
-                    f"la liquidación del {otra.periodo_texto}"
-                    if otra is not None
-                    else "otra liquidación"
-                )
-                # Con el orden para regenerarlas, igual que el mensaje de corregir un
-                # campo: la misma redacción del modelo para la misma regla.
-                raise BusinessError(
-                    f"No se puede {verbo} este día: lo que el tercero quedó debiendo en "
-                    f"esta quincena de {de_quien} ya se le cobró en {donde}. Si de verdad "
-                    "hay que corregirlo, anule primero esa liquidación. "
-                    f"{liq.orden_para_volver_a_generar}".rstrip()
-                )
-            # Dos mensajes porque son dos situaciones distintas para el usuario:
-            # de la pagada no hay nada que hacer por dentro; del abono sí, se
-            # puede borrar el pago, corregir el día y volver a abonar.
-            if liq.estado == ESTADO_PAGADA:
-                raise BusinessError(
-                    f"No se puede {verbo} este día: {de_quien} ya se pagó en una "
-                    "liquidación. Si la cifra está mala, corríjala por fuera del sistema "
-                    "o registre el ajuste en la quincena siguiente"
-                )
-            raise BusinessError(
-                f"No se puede {verbo} este día: {de_quien} ya tiene un pago "
-                "registrado en una liquidación. Elimine primero ese pago si de verdad "
-                "hay que corregir la cifra, o registre el ajuste en la quincena siguiente"
-            )
+            # La misma razón, del mismo sitio y en el mismo orden que el aviso del día.
+            razon = _por_que_esta_trabada(con_pago[0])
+            consejo = f". {razon.consejo}" if razon.consejo else ""
+            raise BusinessError(f"No se puede {verbo} este día: {razon.rebote}{consejo}")
         return candado.liquidaciones
 
     def _marcas_a_soltar(
@@ -788,8 +837,14 @@ class RecepcionService(BaseService[RecepcionLeche]):
             soltar["liquidacion_transporte_id"] = None
         return soltar
 
-    def _recuadrar(self, liquidaciones: list[Liquidacion]) -> None:
+    def _recuadrar(self, liquidaciones: list[Liquidacion]) -> list[dict[str, Any]]:
         """Vuelve a cuadrar las liquidaciones cuyo día se acaba de tocar.
+
+        DEVUELVE LAS QUE MANDÓ DE VUELTA A BORRADOR ({id, tipo}), que es lo que
+        `LiquidacionService.recuadrar` ya contestaba y aquí se botaba. Es un HECHO de
+        este guardado y no una suposición: la pantalla lo lee para avisar "esta quincena
+        volvió a borrador, apruébela otra vez" solo cuando de verdad pasó —con una
+        observación sobre un día trabado no pasa nada y no se avisa nada—.
 
         Se salta las que YA MOVIERON PLATA, y esto es nuevo: desde que el candado
         es por campo, un día puede tener la leche pagada y el flete en borrador, y
@@ -813,10 +868,11 @@ class RecepcionService(BaseService[RecepcionLeche]):
         arriba las dos hojas quedarían amarradas en tiempo de carga.
         """
         if not liquidaciones:
-            return
+            return []
         from app.modules.liquidaciones.service import LiquidacionService
 
         servicio = LiquidacionService(self.db, self.ctx)
+        devueltas: list[dict[str, Any]] = []
         # EL FLETE PRIMERO, por lo mismo que `LiquidacionService.generar` genera el
         # flete antes que la leche: el recuadre del flete REPARTE centavos entre las
         # fotos, y la liquidación del proveedor guarda la suma de esas fotos en su
@@ -831,8 +887,9 @@ class RecepcionService(BaseService[RecepcionLeche]):
             # que es lo mismo que se hace con las pagadas.
             if _traba_el_dia(liquidacion):
                 servicio.refrescar_transporte_informativo(liquidacion.id)
-            else:
-                servicio.recuadrar(liquidacion.id)
+            elif servicio.recuadrar(liquidacion.id):
+                devueltas.append({"id": liquidacion.id, "tipo": liquidacion.tipo})
+        return devueltas
 
     def _marcar_estado_liquidacion(self, recepciones: list[RecepcionLeche]) -> None:
         """Le cuelga a cada recepción su candado, ya resuelto campo por campo.
@@ -1464,6 +1521,9 @@ class RecepcionService(BaseService[RecepcionLeche]):
             recepcion_del_grupo=recepcion,
         )
         self._marcar_estado_liquidacion([recepcion])
+        # Un día nuevo no entra a ninguna liquidación (eso lo hace Generar) ni recuadra
+        # ninguna: el reparto del fijo solo toca fotos de días sueltos.
+        recepcion.liquidaciones_devueltas_a_borrador = []
         return recepcion
 
     def actualizar(self, entity_id: uuid.UUID, payload: Any) -> RecepcionLeche:
@@ -1553,13 +1613,17 @@ class RecepcionService(BaseService[RecepcionLeche]):
         # pendiente pregunta, y el día vuelve a valer sus $150.000.
         #
         # Ver el bloque "DÓNDE VIVE LA CUENTA DEL DÍA FIJO".
-        self._recuadrar(liquidaciones)
+        devueltas = self._recuadrar(liquidaciones)
         grupo_de_ahora = (recepcion.transportador_id, recepcion.fecha, recepcion.ruta_id)
         for transportador_id, fecha, ruta_id in dict.fromkeys((grupo_de_antes, grupo_de_ahora)):
             self._repartir_el_fijo_del_dia(
                 transportador_id, fecha, ruta_id, recepcion_del_grupo=recepcion
             )
         self._marcar_estado_liquidacion([recepcion])
+        # Lo que este guardado le hizo a las liquidaciones, incluida la del viaje fijo al
+        # que el día acaba de ENTRAR: la respuesta lo dice (`RecepcionGuardada`). No es
+        # columna, y se escribe en cada guardado para no arrastrar el de uno anterior.
+        recepcion.liquidaciones_devueltas_a_borrador = devueltas
         return recepcion
 
     def validar_eliminar(self, obj: RecepcionLeche) -> None:
@@ -1581,7 +1645,8 @@ class RecepcionService(BaseService[RecepcionLeche]):
         self.db.flush()
         # El recuadre primero y el fijo pendiente después, por lo mismo que en
         # `actualizar`: el pendiente necesita saber qué días ya están cobrados, y eso lo
-        # dicen los renglones que el recuadre acaba de rehacer.
+        # dicen los renglones que el recuadre acaba de rehacer. Las que vuelven a
+        # borrador no se devuelven: el DELETE contesta 204, sin cuerpo donde decirlo.
         self._recuadrar(liquidaciones)
         self._repartir_el_fijo_del_dia(*grupo, recepcion_del_grupo=recepcion)
 
@@ -1739,10 +1804,15 @@ class RecepcionService(BaseService[RecepcionLeche]):
                 litros=r.cantidad_litros,
                 # "liquidada" es apenas "ya está dentro de una liquidación
                 # generada" (la de la leche o la del flete): es una seña, no un
-                # candado. El candado es "ya tiene pagos": pagada del todo o
-                # parcial, porque en las dos ya salió plata contra ese día.
+                # candado.
                 liquidada=r.liquidacion_estado is not None,
-                pagada=r.liquidacion_estado in _ESTADOS_CON_PAGO,
+                # `pagada` ES EL CANDADO DE LA CELDA y sale del MISMO candado que
+                # rebota el PUT (`_traba_el_dia`, vía leche_pagada/flete_pagado), no
+                # del estado guardado. Mirando el estado, el día de Beto —quincena
+                # 'aprobada' cuyos $120.000 de deuda ya se cobró la siguiente— salía
+                # sin candado y con "si lo cambia, vuelve a borrador", y el PUT daba 422.
+                pagada=r.leche_pagada or r.flete_pagado,
+                candado_aviso=r.candado_aviso,
                 liquidacion_estado=r.liquidacion_estado,
                 con_transporte=r.transportador_id is not None,
                 # Las dos platas por separado, que es lo que le faltaba a la

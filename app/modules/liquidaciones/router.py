@@ -25,6 +25,7 @@ from app.modules.liquidaciones.schemas import (
     PreLiquidacionRead,
     PrevisualizacionCorreccion,
     PrevisualizarLiquidacion,
+    ResumenLiquidaciones,
 )
 from app.modules.liquidaciones.service import (
     AdjuntoPagoLiquidacionService,
@@ -115,6 +116,25 @@ def listar(
         params, tipo=tipo, estado=estado, proveedor_id=proveedor_id, desde=desde, hasta=hasta
     )
     return Page.build([_to_read(liq) for liq in items], total, params)
+
+
+@router.get(
+    "/resumen",
+    response_model=ResumenLiquidaciones,
+    summary="Las tarjetas del listado: cuántas hay en cada estado y la plata de cada una",
+)
+def resumen(
+    db: DbSession,
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "consultar")),
+    tipo: str | None = Query(None),
+    desde: date | None = Query(None),
+    hasta: date | None = Query(None),
+) -> ResumenLiquidaciones:
+    """Los mismos `tipo`, `desde` y `hasta` del listado, sumado en la base: la pantalla ya
+    no pide cada estado con 200 filas para sumarlas ella (ver `resumen_por_estado`).
+
+    VA ANTES DE `/{entity_id}`: declarada después, "resumen" se leería como un id."""
+    return LiquidacionService(db, ctx).resumen_por_estado(tipo=tipo, desde=desde, hasta=hasta)
 
 
 @router.get("/{entity_id}", response_model=LiquidacionRead, summary="Obtener liquidación")

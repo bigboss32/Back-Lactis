@@ -355,6 +355,13 @@ class LiquidacionRead(TenantRead):
     # mostrar un "saldo -$4.955,77" bajo el rótulo "Saldo a pagar", que se lee al
     # revés. El porqué completo está en `Liquidacion.le_queda_debiendo`.
     le_queda_debiendo: Decimal
+    # LA DEUDA QUE BORRÓ LA MIGRACIÓN DE LOS ABONOS, en positivo (Σ pagos − pagado);
+    # cero en todas las demás. Mientras sea mayor que cero el servidor rebota Corregir,
+    # Pagar, registrar un pago, Anular y mover sus anticipos (`_exigir_sin_deuda_borrada`):
+    # la pantalla lee ESTE campo para no ofrecer esos botones y decir por qué. No es lo
+    # que el tercero debe hoy —eso es esta cifra − saldo—, es lo que se borró. Ver
+    # `Liquidacion.deuda_borrada_por_la_migracion`.
+    deuda_borrada_por_la_migracion: Decimal = Decimal("0")
     # CUÁNTAS VECES SE EMITIÓ ESTE COMPROBANTE. 1 en todos los que nunca se corrigieron
     # —o sea, casi todos—. Desde 2, la pantalla pinta la banda de "corregido" y el folio
     # sale con el sufijo, porque hay un papel viejo circulando con otra cifra.
@@ -405,6 +412,35 @@ class GenerarLiquidacionesResultado(BaseSchema):
 
     generadas: list[LiquidacionRead] = []
     omitidas: list[LiquidacionOmitida] = []
+
+
+class ResumenLiquidaciones(BaseSchema):
+    """Las tarjetas que encabezan el listado, contadas en la base y sin tope de filas.
+
+    Cada conteo es el `total` que da `GET /liquidaciones?estado=<ese>` con el mismo tipo
+    y fechas: al tocar la tarjeta salen exactamente esas filas. Las dos cifras de
+    "por pagar" suman solo saldos positivos, y lo que le deben a la quesera va aparte y
+    en positivo, sin las deudas que ya se cobró otra quincena.
+
+    La plata "por pagar" NO cuenta las filas con deuda borrada por la migración: el
+    servidor rebota Pagar y abonar en ellas, así que sumarlas es prometer una plata que
+    ningún botón entrega. Esas filas siguen en su conteo —la lista las muestra— y se
+    cuentan aparte en `por_reparar`.
+    """
+
+    borradores: int = 0
+    aprobadas: int = 0
+    saldo_aprobadas: Decimal = Decimal("0")
+    parciales: int = 0
+    saldo_parciales: Decimal = Decimal("0")
+    pagadas: int = 0
+    le_quedaron_debiendo: Decimal = Decimal("0")
+    liquidaciones_que_deben: int = 0
+    # Las que traen deuda borrada por la migración (menos las anuladas), y la suma de
+    # esa deuda: la misma cifra que da cada fila en `deuda_borrada_por_la_migracion` y
+    # que cita el mensaje del guardia. No es lo que deben hoy (eso es borrada − saldo).
+    por_reparar: int = 0
+    deuda_borrada: Decimal = Decimal("0")
 
 
 class LiquidacionUpdate(BaseSchema):
@@ -657,6 +693,15 @@ class AnticipoRead(TenantRead):
     # avisarle al usuario que al corregirlo va a mover una liquidación ya
     # generada, y que si estaba aprobada vuelve a borrador.
     liquidacion_estado: str | None = None
-    # El candado de verdad: ya salió plata contra este anticipo (la liquidación
-    # tiene pagos, sea 'parcial' o 'pagada') o quedó descontado en una nómina.
+    # El candado de verdad: True exactamente cuando modificarlo o eliminarlo rebota. No
+    # es solo "ya salió plata": también la quincena ya corregida, la que tiene deuda
+    # borrada por la migración, la cuya deuda se cobró en otra, el adelanto que una
+    # corrección soltó y el descontado en una nómina. Sale de `_por_que_no_se_mueve`,
+    # la misma función que escribe el 422.
     bloqueado: bool = False
+    # El porqué, escrito por el backend con las cifras: el MISMO texto del 422 de
+    # modificarlo o eliminarlo, con el verbo "modificar ni eliminar". Null cuando no
+    # está trabado. La
+    # pantalla lo muestra tal cual en vez de adivinarlo por `liquidacion_estado`, que
+    # decía "ya tiene un pago registrado" en quincenas sin ningún pago.
+    candado_aviso: str | None = None

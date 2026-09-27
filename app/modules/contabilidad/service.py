@@ -21,6 +21,7 @@ from app.modules.contabilidad.schemas import (
 from app.modules.empleados.models import PagoEmpleado
 from app.modules.gastos.repository import GastoRepository
 from app.modules.liquidaciones.models import Liquidacion
+from app.modules.liquidaciones.repository import LiquidacionRepository
 from app.modules.recepcion.models import RecepcionLeche
 from app.modules.ventas.models import Venta
 
@@ -260,13 +261,14 @@ class ContabilidadService:
         # distinto en dos pantallas.
         #
         # 'parcial' entra: se le abonó una parte y el resto sigue siendo deuda de la
-        # quesera. `saldo` ya trae solo lo que falta.
+        # quesera. `saldo` ya trae solo lo que falta. Y la fila con deuda borrada por la
+        # migración no, igual que en el tablero: `saldo_por_pagar` es la regla de los dos.
         por_pagar = self.db.scalar(
             select(func.coalesce(func.sum(Liquidacion.saldo), 0)).where(
                 Liquidacion.empresa_id == empresa,
                 Liquidacion.deleted_at.is_(None),
                 Liquidacion.estado.in_(["borrador", "aprobada", "parcial"]),
-                Liquidacion.saldo > 0,
+                *LiquidacionRepository.saldo_por_pagar(),
             )
         ) or CERO
 

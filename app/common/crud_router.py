@@ -21,8 +21,12 @@ def build_crud_router(
     create_schema: type,
     update_schema: type,
     tags: list[str] | None = None,
+    write_schema: type | None = None,
 ) -> APIRouter:
+    """`write_schema` es lo que contestan el POST y el PUT cuando dicen más que la
+    lectura (lo que el guardado hizo); por defecto, el mismo `read_schema`."""
     router = APIRouter(tags=tags or [modulo])
+    write_schema = write_schema or read_schema
 
     @router.get("", response_model=Page[read_schema], summary=f"Listar {modulo}")
     def listar(
@@ -44,7 +48,7 @@ def build_crud_router(
         return service_cls(db, ctx).obtener(entity_id)
 
     @router.post(
-        "", response_model=read_schema, status_code=status.HTTP_201_CREATED, summary=f"Crear {modulo}"
+        "", response_model=write_schema, status_code=status.HTTP_201_CREATED, summary=f"Crear {modulo}"
     )
     def crear(
         payload: create_schema,  # type: ignore[valid-type]
@@ -53,7 +57,7 @@ def build_crud_router(
     ) -> Any:
         return service_cls(db, ctx).crear(payload)
 
-    @router.put("/{entity_id}", response_model=read_schema, summary=f"Actualizar {modulo}")
+    @router.put("/{entity_id}", response_model=write_schema, summary=f"Actualizar {modulo}")
     def actualizar(
         entity_id: uuid.UUID,
         payload: update_schema,  # type: ignore[valid-type]

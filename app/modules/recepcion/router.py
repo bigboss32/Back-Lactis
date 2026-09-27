@@ -10,6 +10,7 @@ from app.core.pagination import Page, PageParams, page_params
 from app.modules.recepcion.schemas import (
     GrillaQuincena,
     RecepcionCreate,
+    RecepcionGuardada,
     RecepcionRead,
     RecepcionUpdate,
     ResumenPeriodo,
@@ -30,6 +31,8 @@ router = build_crud_router(
     create_schema=RecepcionCreate,
     update_schema=RecepcionUpdate,
     tags=["Recepción de Leche"],
+    # El POST y el PUT dicen además qué liquidaciones volvieron a borrador.
+    write_schema=RecepcionGuardada,
 )
 
 

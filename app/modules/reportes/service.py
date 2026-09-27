@@ -10,6 +10,7 @@ from app.core.exceptions import BusinessError
 from app.modules.gastos.models import Gasto
 from app.modules.gastos.repository import GastoRepository
 from app.modules.liquidaciones.models import Liquidacion
+from app.modules.liquidaciones.repository import LiquidacionRepository
 from app.modules.notificaciones.models import Notificacion
 from app.modules.produccion.models import Produccion, TipoQueso
 from app.modules.proveedores.models import Proveedor
@@ -198,11 +199,15 @@ class ReporteService:
             # 'parcial' cuenta: a esa liquidación se le abonó algo pero todavía se le
             # debe el resto, y `saldo` ya es solo lo que falta. Dejarla por fuera haría
             # desaparecer del tablero una deuda que sigue viva.
+            #
+            # Y LA FILA CON DEUDA BORRADA POR LA MIGRACIÓN NO CUENTA: el servidor no deja
+            # pagarla, y las tarjetas del listado ya no la suman. La regla está escrita
+            # una vez, en `LiquidacionRepository.saldo_por_pagar`.
             liquidaciones_por_pagar=self._sum(
                 Liquidacion.saldo,
                 Liquidacion,
                 Liquidacion.estado.in_(["borrador", "aprobada", "parcial"]),
-                Liquidacion.saldo > 0,
+                *LiquidacionRepository.saldo_por_pagar(),
             ),
             # LA OTRA MITAD, Y CON SU PROPIO NOMBRE: lo que los terceros le quedaron
             # debiendo a la quesera, en POSITIVO (de ahí el menos delante del saldo, que
