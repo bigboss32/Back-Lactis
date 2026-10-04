@@ -229,6 +229,15 @@ class ReporteService:
                 Liquidacion.saldo < 0,
                 Liquidacion.deuda_trasladada_a_id.is_(None),
             ),
+            # LO QUE "POR PAGAR" DEJÓ POR FUERA, DICHO: las quincenas con deuda borrada por
+            # la migración. Sin esto la corregida hacia arriba (parcial v2, $380.000 −
+            # $300.000, pagado −$120.000, saldo $200.000; de verdad falta entregarle
+            # $80.000) salía "$0 por pagar" sin una palabra, mientras el listado contaba
+            # una quincena por reparar. Sale de la misma regla que esa tarjeta y que el
+            # balance (`LiquidacionRepository.contar_por_reparar`), y NO se suma a
+            # ninguna de las dos cifras de arriba: lo que se debe en esas filas no lo dice
+            # el saldo guardado.
+            quincenas_por_reparar=LiquidacionRepository(self.db, empresa).contar_por_reparar(),
             alertas_no_leidas=alertas,
             litros_por_dia=litros_por_dia,
             ventas_por_dia=ventas_por_dia,

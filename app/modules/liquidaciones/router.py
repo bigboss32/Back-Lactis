@@ -31,15 +31,42 @@ from app.modules.liquidaciones.service import (
     AdjuntoPagoLiquidacionService,
     AnticipoService,
     LiquidacionService,
+    aviso_deuda_borrada,
+    aviso_sin_un_peso_por_la_deuda,
+    avisos_deuda_borrada,
+    avisos_deuda_cobrada,
+    cerrada_sin_pago,
 )
 
 router = APIRouter(tags=["Liquidaciones"])
 
 
-def _to_read(liq) -> LiquidacionRead:
+def _to_read(liq, ctx: RequestContext) -> LiquidacionRead:
+    """La liquidación como la lee la pantalla, para QUIEN PREGUNTA.
+
+    Lleva el contexto porque `avisos_deuda_cobrada` depende de los permisos: el consejo
+    de "anule primero esa liquidación" no se le da igual a quien puede anular que a
+    Compras. Va en todas las respuestas, el listado incluido: en las filas sin deuda
+    cobrada no lee nada, y en las que la tienen usa la otra quincena, que la respuesta ya
+    carga para `deuda_trasladada_a`.
+
+    `aviso_deuda_borrada` y `cerrada_sin_pago` también se arman aquí y no salen de una
+    columna: son las frases que el servidor dice en sus 422 sobre esa fila, escritas por
+    las mismas funciones, para que la pantalla las pinte tal cual. Las dos leen solo lo
+    que la fila ya trae (sus pagos son selectin).
+
+    `avisos_deuda_borrada` y `aviso_sin_un_peso_por_la_deuda` son los 422 de los guardias
+    de esos botones, preguntados a las mismas funciones que usan los guardias
+    (`_razon_para_no_pagar` y compañía): en una fila normal no pasan de mirar sus
+    columnas y sus pagos."""
     dto = LiquidacionRead.model_validate(liq)
     dto.proveedor_nombre = liq.proveedor.nombre if liq.proveedor else None
     dto.transportador_nombre = liq.transportador.nombre if liq.transportador else None
+    dto.avisos_deuda_cobrada = avisos_deuda_cobrada(liq, ctx)
+    dto.aviso_deuda_borrada = aviso_deuda_borrada(liq)
+    dto.avisos_deuda_borrada = avisos_deuda_borrada(liq, ctx)
+    dto.aviso_sin_un_peso_por_la_deuda = aviso_sin_un_peso_por_la_deuda(liq, ctx)
+    dto.cerrada_sin_pago = cerrada_sin_pago(liq)
     return dto
 
 
@@ -66,7 +93,7 @@ def generar(
         payload.periodo_inicio, payload.periodo_fin, payload.tipo, payload.proveedor_id
     )
     return GenerarLiquidacionesResultado(
-        generadas=[_to_read(liq) for liq in liquidaciones], omitidas=omitidas
+        generadas=[_to_read(liq, ctx) for liq in liquidaciones], omitidas=omitidas
     )
 
 
@@ -115,7 +142,7 @@ def listar(
     items, total = LiquidacionService(db, ctx).listar_filtrado(
         params, tipo=tipo, estado=estado, proveedor_id=proveedor_id, desde=desde, hasta=hasta
     )
-    return Page.build([_to_read(liq) for liq in items], total, params)
+    return Page.build([_to_read(liq, ctx) for liq in items], total, params)
 
 
 @router.get(
@@ -143,7 +170,7 @@ def obtener(
     db: DbSession,
     ctx: RequestContext = Depends(require_permission("liquidaciones", "consultar")),
 ) -> LiquidacionRead:
-    return _to_read(LiquidacionService(db, ctx).obtener(entity_id))
+    return _to_read(LiquidacionService(db, ctx).obtener(entity_id), ctx)
 
 
 @router.put("/{entity_id}", response_model=LiquidacionRead, summary="Actualizar observaciones")
@@ -153,7 +180,7 @@ def actualizar(
     db: DbSession,
     ctx: RequestContext = Depends(require_permission("liquidaciones", "editar")),
 ) -> LiquidacionRead:
-    return _to_read(LiquidacionService(db, ctx).actualizar(entity_id, payload))
+    return _to_read(LiquidacionService(db, ctx).actualizar(entity_id, payload), ctx)
 
 
 @router.put(
@@ -173,7 +200,8 @@ def actualizar_precio_detalle(
     return _to_read(
         LiquidacionService(db, ctx).actualizar_precio_detalle(
             entity_id, detalle_id, payload.precio_litro
-        )
+        ),
+        ctx,
     )
 
 
@@ -189,7 +217,7 @@ def recalcular(
     # editarlo, no administrarlo.
     ctx: RequestContext = Depends(require_permission("liquidaciones", "editar")),
 ) -> LiquidacionRead:
-    return _to_read(LiquidacionService(db, ctx).recalcular(entity_id))
+    return _to_read(LiquidacionService(db, ctx).recalcular(entity_id), ctx)
 
 
 # --------------------- corregir una quincena que ya se pagó
@@ -244,7 +272,7 @@ def corregir(
     puerta de siempre; si baja, queda con saldo negativo y la quincena siguiente lo
     descuenta sola, que es el mecanismo que ya existe.
     """
-    return _to_read(LiquidacionService(db, ctx).corregir_pagada(entity_id, payload))
+    return _to_read(LiquidacionService(db, ctx).corregir_pagada(entity_id, payload), ctx)
 
 
 @router.get(
@@ -273,7 +301,7 @@ def aprobar(
     db: DbSession,
     ctx: RequestContext = Depends(require_permission("liquidaciones", "administrar")),
 ) -> LiquidacionRead:
-    return _to_read(LiquidacionService(db, ctx).aprobar(entity_id))
+    return _to_read(LiquidacionService(db, ctx).aprobar(entity_id), ctx)
 
 
 @router.post("/{entity_id}/pagar", response_model=LiquidacionRead, summary="Pagar el saldo completo de la liquidación")
@@ -282,7 +310,7 @@ def pagar(
     db: DbSession,
     ctx: RequestContext = Depends(require_permission("liquidaciones", "administrar")),
 ) -> LiquidacionRead:
-    return _to_read(LiquidacionService(db, ctx).pagar(entity_id))
+    return _to_read(LiquidacionService(db, ctx).pagar(entity_id), ctx)
 
 
 @router.post(
@@ -299,7 +327,7 @@ def registrar_pago(
     # rol Compras— cualquiera que arma liquidaciones podría además pagarlas.
     ctx: RequestContext = Depends(require_permission("liquidaciones", "administrar")),
 ) -> LiquidacionRead:
-    return _to_read(LiquidacionService(db, ctx).registrar_pago(entity_id, payload))
+    return _to_read(LiquidacionService(db, ctx).registrar_pago(entity_id, payload), ctx)
 
 
 @router.delete(
@@ -318,7 +346,7 @@ def eliminar_pago(
 ) -> LiquidacionRead:
     """Borra el pago Y SUS SOPORTES, también del almacenamiento: la foto de una
     transferencia que ya no existe no se queda cobrando espacio en el bucket."""
-    return _to_read(LiquidacionService(db, ctx).eliminar_pago(entity_id, pago_id))
+    return _to_read(LiquidacionService(db, ctx).eliminar_pago(entity_id, pago_id), ctx)
 
 
 # ------------------------ soportes del pago (la foto de la transferencia)
@@ -412,7 +440,7 @@ def anular(
     db: DbSession,
     ctx: RequestContext = Depends(require_permission("liquidaciones", "administrar")),
 ) -> LiquidacionRead:
-    return _to_read(LiquidacionService(db, ctx).anular(entity_id))
+    return _to_read(LiquidacionService(db, ctx).anular(entity_id), ctx)
 
 
 @router.get("/{entity_id}/pdf", summary="Descargar comprobante PDF de la liquidación")

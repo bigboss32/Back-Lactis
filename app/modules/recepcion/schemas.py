@@ -142,10 +142,15 @@ class RecepcionRead(TenantRead):
     liquidacion_id: uuid.UUID | None
     liquidacion_transporte_id: uuid.UUID | None = None
     # Estado de la liquidación que manda sobre este día ('borrador', 'aprobada',
-    # 'parcial', 'pagada') o null si todavía no está en ninguna. Bloquean las que
-    # ya tienen pagos ('parcial' y 'pagada'); en borrador y aprobada se puede
-    # editar y la liquidación se recuadra sola.
+    # 'parcial', 'pagada') o null si todavía no está en ninguna. Es una seña: el
+    # candado de verdad son `leche_pagada`/`flete_pagado` y los campos de abajo.
     liquidacion_estado: str | None = None
+    # True si esa liquidación está en 'parcial' Y por ella salió plata en pagos
+    # (`Liquidacion.con_abonos`). Es lo que hace honesto un "Con abono" en la
+    # columna: 'parcial' solo no lo dice, porque la quincena corregida después de
+    # pagada queda 'parcial' v2 con pagado $0 y ningún pago —el adelanto de $180.000
+    # cubría exacto los $180.000 y el día olvidado de $36.000 está sin entregar—.
+    liquidacion_con_abono: bool = False
 
     # ------------------------------------------------------ el candado por campo
     # Un día vive en DOS liquidaciones de dos personas distintas: la leche al

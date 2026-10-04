@@ -1,11 +1,13 @@
 """LA MISMA QUINCENA DICE LO MISMO EN EL ANTICIPO Y EN SUS DÍAS.
 
 La 'pagada' que dejó el botón Pagar de antes con el tercero debiendo —100 L × $1.800 =
-$180.000 contra $300.000 de adelanto, pagado $0, saldo −$120.000— no le entregó un peso a
-nadie. El candado del anticipo ya lo decía ("sin que saliera un peso"); el día de esa
-misma quincena seguía diciendo "ya se le pagó", en el diálogo, en la celda de la grilla
-y en el 422 del PUT. Ahora las cuatro superficies salen de la misma pregunta,
-`pagada_sin_que_saliera_un_peso`.
+$180.000 contra $300.000 de adelanto, pagado $0, saldo −$120.000— no registró un solo
+pago: lo único que salió fue el adelanto. El candado del anticipo ya lo decía; el día de
+esa misma quincena seguía diciendo "ya se le pagó", en el diálogo, en la celda de la
+grilla y en el 422 del PUT. Ahora las cuatro superficies salen de la misma pregunta,
+`pagada_sin_que_saliera_un_peso`, y dicen el mismo porqué (`por_que_no_salio_un_peso`):
+como el adelanto sí salió de la caja, nombra las cifras en vez de "sin que saliera un
+peso".
 
 Y la migrada a la que le borraron la deuda (saldo 0, pagado −$120.000, sin pagos) tampoco
 dice "ya se le pagó" en sus días: dice la deuda borrada, igual que su anticipo.
@@ -77,13 +79,16 @@ def test_la_pagada_sin_un_peso_dice_lo_mismo_en_el_anticipo_y_en_el_dia(
     textos["anticipo"] = client.get(f"{ANT}/{ant}", headers=h).json()["candado_aviso"]
     for donde, texto in textos.items():
         print(f"\n  {donde}: {texto}")
-        assert "cerrada como pagada sin que saliera un peso" in texto, donde
+        # El adelanto de $300.000 salió de la caja: no "sin que saliera un peso".
+        assert "cerrada como pagada sin saldo por entregar" in texto, donde
+        assert "sin que saliera un peso" not in texto, donde
         assert "le quedó debiendo $120.000" in texto, donde
         assert "ya se pagó" not in texto and "ya se le pagó" not in texto, donde
     # El día nombra a quién, con la misma frase en el diálogo (que la pone de primera,
     # con mayúscula) y en los dos rebotes.
-    frase = ("la quincena de la leche de este día quedó cerrada como pagada sin que "
-             "saliera un peso, porque una verdad le quedó debiendo $120.000")
+    frase = ("la quincena de la leche de este día quedó cerrada como pagada sin saldo por "
+             "entregar, porque los anticipos que se le aplicaron ($300.000) pasaron de su "
+             "valor ($180.000) y una verdad le quedó debiendo $120.000")
     for donde in ("dialogo", "put", "delete"):
         assert frase in textos[donde].lower(), donde
     # Y nada se movió: el PUT rebotó antes de tocar la quincena.

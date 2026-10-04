@@ -4,9 +4,10 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import lazyload
+from sqlalchemy.orm import lazyload, selectinload
 
 from app.common.repository import BaseRepository
+from app.core.pagination import PageParams
 from app.modules.liquidaciones.models import (
     ESTADO_ANULADA,
     ESTADO_PAGADA,
@@ -196,6 +197,51 @@ class LiquidacionRepository(BaseRepository[Liquidacion]):
             Liquidacion.deuda_borrada_por_la_migracion <= Decimal("0"),
         ]
 
+    @staticmethod
+    def deuda_por_reparar() -> list[Any]:
+        """"Esta quincena trae deuda borrada por la migración y hay que repararla", en SQL.
+
+        Cualquier estado menos 'anulada' —la anulada no vale nada: no se paga ni se debe—
+        con la deuda borrada en positivo. Es el mismo universo de `aviso_deuda_borrada`
+        en cada fila.
+
+        UNA REGLA PARA LAS TRES PANTALLAS que avisan de estas filas: la tarjeta "Deuda
+        borrada por reparar" del listado (`LiquidacionService.resumen_por_estado`, sus
+        `por_reparar` y `deuda_borrada`) y la nota del tablero y del balance
+        (`contar_por_reparar`). Hacía falta en las tres porque estas filas no entran en
+        `saldo_por_pagar`, y sin una cuenta que lo diga desaparecen de "por pagar" sin
+        aviso. Medido: la de julio de $180.000 contra $300.000, corregida antes del
+        guardia con un día olvidado de $200.000, quedó parcial v2 con saldo $200.000 y
+        $120.000 borrados; de verdad falta entregarle $80.000. El listado contaba una
+        quincena por reparar, y el tablero y el balance decían $0 por pagar sin una
+        palabra.
+        """
+        return [
+            Liquidacion.estado != ESTADO_ANULADA,
+            Liquidacion.deuda_borrada_por_la_migracion > Decimal("0"),
+        ]
+
+    def contar_por_reparar(self) -> int:
+        """Cuántas quincenas de la empresa hay por reparar, de cualquier tipo y fecha.
+
+        Llena `quincenas_por_reparar` del tablero (`ReporteService`) y del balance
+        (`ContabilidadService`), que lo ponen al lado de "Liquidaciones por pagar" para
+        que el $0 no se lea como "no se le debe nada a nadie". CUENTA QUINCENAS Y NO
+        PESOS a propósito: lo borrado ($120.000) no es lo que se debe, y lo que se debe
+        cae de cualquiera de los dos lados. En la de arriba la quesera debe $80.000; en la
+        de $230.000 con la misma deuda borrada es el tercero el que debe $70.000.
+
+        Pasa por `base_query`, así que el filtro por empresa y el de borrados no se pueden
+        olvidar. Coincide con la tarjeta del listado solo cuando el listado está SIN
+        filtros: el listado filtra por tipo y por fechas, y el tablero y el balance no.
+        """
+        stmt = (
+            self.base_query()
+            .where(*self.deuda_por_reparar())
+            .with_only_columns(func.count(Liquidacion.id))
+        )
+        return int(self.db.scalar(stmt) or 0)
+
     def deuda_pendiente_de(self, tipo: str, tercero_id: uuid.UUID, antes_de: date) -> Decimal:
         """Cuánto debe ese tercero de quincenas anteriores, en POSITIVO. Solo para MIRAR.
 
@@ -226,6 +272,45 @@ class LiquidacionRepository(BaseRepository[Liquidacion]):
         """
         stmt = self.base_query().where(Liquidacion.deuda_trasladada_a_id == liquidacion_id)
         return list(self.db.scalars(stmt).all())
+
+    def pagina_del_listado(
+        self,
+        params: PageParams,
+        *,
+        filters: dict[str, Any] | None = None,
+        extra_criteria: list[Any] | None = None,
+    ) -> tuple[list[Liquidacion], int]:
+        """Una página del listado CON LAS DOS PUNTAS DE LA DEUDA cargadas de una vez.
+
+        Es `list_paginated` con dos `selectinload` explícitos, y existen por lo que no hace
+        el modelo: `deudas_cobradas` y `deuda_trasladada_a` apuntan a la misma tabla, y en
+        una relación así SQLAlchemy no aplica la carga selectin en la consulta de primer
+        nivel. La respuesta las lee en cada fila, así que cada una disparaba su SELECT:
+        con 50 proveedores de 100 L × $1.800, 57 consultas por página, 50 de ellas por
+        fila; y con la otra punta fuera de la página (8 deudas de $120.000 cobradas en la
+        del 16/06, listado hasta el 15/06), tres más por cada una —la otra, sus días y sus
+        pagos—. Con esto son las mismas consultas para 1 fila que para 50.
+
+        Solo aquí y no en `base_query`: esa la usan también las consultas con FOR UPDATE
+        (`deudas_sin_cobrar`), que tienen que apagar estas dos relaciones para no
+        cargarlas con el candado puesto, y las lecturas de una sola fila, que no las
+        necesitan todas. `joinedload` nunca: son FK anulables, y un LEFT JOIN hace que
+        Postgres rechace el FOR UPDATE con 0A000.
+        """
+        stmt = self.apply_filters(self.base_query(), filters)
+        if extra_criteria:
+            stmt = stmt.where(*extra_criteria)
+        total = self.db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+        stmt = (
+            stmt.options(
+                selectinload(Liquidacion.deudas_cobradas),
+                selectinload(Liquidacion.deuda_trasladada_a),
+            )
+            .order_by(getattr(Liquidacion, self.default_order_by).desc())
+            .offset(params.offset)
+            .limit(params.page_size)
+        )
+        return list(self.db.scalars(stmt).all()), total
 
     def viajes_ya_cobrados(
         self,

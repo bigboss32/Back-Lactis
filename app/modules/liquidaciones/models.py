@@ -167,8 +167,14 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
     # `selectin` y NUNCA `joined`, por lo mismo que se explica en `_bloquear` del
     # servicio: son FK anulables y un LEFT JOIN de por medio hace que Postgres rechace
     # el `SELECT ... FOR UPDATE` con un 0A000, que es el candado que evita que dos
-    # pagos simultáneos se pisen. Con selectin son consultas aparte, y en el listado
-    # SQLAlchemy las resuelve en UNA sola por página (no una por fila).
+    # pagos simultáneos se pisen. Con selectin son consultas aparte.
+    #
+    # OJO, QUE EL `selectin` DE AQUÍ NO ALCANZA EN EL LISTADO: en una relación de la tabla
+    # consigo misma SQLAlchemy no lo aplica en la consulta de primer nivel, y cada fila que
+    # la respuesta serializaba disparaba su propio SELECT (50 por página, medido). Quien
+    # lee estas puntas para muchas filas las pide explícitas en su consulta: el listado
+    # (`LiquidacionRepository.pagina_del_listado`, las dos) y el candado de los anticipos
+    # (`AnticipoService._marcar_liquidacion`, que solo nombra `deuda_trasladada_a`).
     deuda_trasladada_a: Mapped["Liquidacion | None"] = relationship(
         "Liquidacion",
         remote_side="Liquidacion.id",
@@ -390,6 +396,43 @@ class Liquidacion(TenantMixin, AuditMixin, Base):
         solo pago hecho, cambiar los litros deja ese pago descuadrado.
         """
         return Decimal(self.pagado or 0) > Decimal("0")
+
+    @property
+    def con_abonos(self) -> bool:
+        """¿Salió plata POR PAGOS contra esta quincena? Es la pregunta que va detrás de
+        la palabra "abono" en cualquier texto, y no el estado guardado.
+
+        EL ESTADO NO LO DICE. La quincena de $180.000 cubierta EXACTO por un adelanto de
+        $180.000 se cierra 'pagada' con pagado $0; si después Corregir le mete un día
+        olvidado de 20 L ($36.000), queda 'parcial' v2 con pagado $0 y ningún pago
+        (`_estado_tras_corregir`). Decir de ella "se le abonó una parte" o "Con abono" es
+        mandar al dueño a buscar con la calculadora un abono que no existe: no ha salido
+        un peso por pagos y se le deben $36.000.
+
+        TAMPOCO `tiene_pagos` (pagado > 0), que miente en las filas con deuda borrada por
+        la migración: ahí `pagado` lleva restada la deuda que se borró, y la de $180.000
+        contra $300.000, corregida con $200.000 más y pagada, tiene un pago de $200.000
+        con pagado $80.000 —o uno de $50.000 con pagado −$70.000, donde `tiene_pagos` dice
+        que no hubo nada—. Lo que salió está en los renglones de `pagos`.
+
+        Son dos casos y los dos son plata que salió:
+          · Σ(pagos) > 0: hay renglones de pago, la regla de hoy;
+          · pagado > 0 SIN ningún renglón: la 'pagada' de antes del 01/08/2026, a la que
+            la migración de los abonos le escribió pagado = neto (se pagó por fuera del
+            sistema). Si después se corrigió hacia arriba queda 'parcial' con esa plata
+            entregada, y ahí "se le abonó una parte" es verdad. Sin renglones, pagado > 0
+            implica que la migración no borró nada (Σpagos − pagado da negativo), así que
+            esta rama nunca cuenta una fila con deuda borrada.
+
+        La leen la respuesta de la API (`LiquidacionRead.con_abonos`), Recepción diaria y
+        los textos del servidor que dicen "abono" o "abonó", para que ninguno lo saque del
+        estado por su cuenta. `pagos` es selectin: en el listado no cuesta una consulta
+        por fila.
+        """
+        entregado = sum((Decimal(p.valor or 0) for p in self.pagos), Decimal("0"))
+        if entregado > Decimal("0"):
+            return True
+        return not self.pagos and Decimal(self.pagado or 0) > Decimal("0")
 
     @property
     def periodo_texto(self) -> str:

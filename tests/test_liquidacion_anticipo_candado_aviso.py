@@ -167,13 +167,17 @@ def test_pagada_con_plata_entregada_dice_ya_se_pago(client, base_datos):
 
 def test_pagada_sin_que_saliera_un_peso_no_dice_ya_se_pago(client, base_datos, db_session):
     """La que el botón Pagar de antes dejó 'pagada' con el tercero debiendo: $180.000
-    contra $300.000, pagado $0, saldo −$120.000. No se le entregó nada a nadie."""
+    contra $300.000, pagado $0, saldo −$120.000. No hubo ningún pago; lo que salió fue el
+    adelanto de $300.000, y el candado de ese mismo adelanto no puede decir que no salió
+    un peso: nombra las cifras, que con calculadora dan 300.000 − 180.000 = 120.000."""
     h = auth_headers(client, "admin.a")
     _, ant, liq = _quincena(client, h, "Pagada Debiendo", "100", "300000")
     db_session.get(Liquidacion, uuid.UUID(liq)).estado = "pagada"
     db_session.commit()
     aviso = _trabado(client, h, ant, liq)
-    assert "sin que saliera un peso" in aviso and "debiendo $120.000" in aviso
+    assert ("sin saldo por entregar, porque los anticipos que se le aplicaron ($300.000) "
+            "pasaron de su valor ($180.000) y el tercero le quedó debiendo $120.000") in aviso
+    assert "sin que saliera un peso" not in aviso
     assert "ya se pagó" not in aviso
 
 

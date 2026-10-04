@@ -9,10 +9,11 @@ from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Any, Iterable, NamedTuple, Sequence
 
 from sqlalchemy import and_, case, func, or_, select
-from sqlalchemy.orm import Session, lazyload
+from sqlalchemy.orm import Session, lazyload, selectinload
 
 from app.common.service import BaseService, serialize_entity
 from app.core.config import settings
+from app.core.context import RequestContext
 from app.core.exceptions import BusinessError, NotFoundError
 from app.core.imagenes import leer_y_validar_soporte
 from app.core.logging_config import get_logger
@@ -1143,6 +1144,11 @@ _ANCHOS_DETALLE_FLETE = (2.4, 5.4, 2.7, 2.9, 3.5)
 _ROTULO_DIA_FIJO = "Día completo"
 _ROTULO_DIA_FIJO_YA_COBRADO = "Ya cobrado"
 
+# EL RENGLÓN DEL RESUMEN DONDE VA LA DEUDA QUE BORRÓ LA MIGRACIÓN, y que el AVISO del
+# mismo papel nombra entre comillas: si el renglón cambiara de nombre y la nota no, el
+# aviso mandaría a buscar un renglón que no está.
+_ROTULO_DEUDA_BORRADA = "Deuda borrada por la migración"
+
 
 def _ya_cobrado_en_otro(detalle: Any) -> bool:
     """Si ESTE renglón fijo va en $0,00 porque el día ya se cobró en otro comprobante.
@@ -1440,19 +1446,25 @@ def cifras_congeladas(liquidacion: Liquidacion) -> bool:
 
 
 def pagada_sin_que_saliera_un_peso(liquidacion: Liquidacion) -> bool:
-    """¿Está 'pagada' sin que se le haya entregado un peso a nadie?
+    """¿Está 'pagada' sin que se le haya registrado un solo pago, y sin que hiciera falta?
 
     Es la que dejó el botón Pagar de antes con el tercero debiendo: $180.000 de leche
     contra $300.000 de adelanto, pagado $0 y saldo −$120.000. Está trabada igual que
     cualquier pagada (`cifras_congeladas`), pero decir "ya se pagó" o "ya se le pagó"
-    es falso: por esas cifras no salió plata, el tercero quedó debiendo.
+    es falso: por esas cifras no hubo pago, el tercero quedó debiendo. El nombre se
+    quedó por quienes la importan; lo que sí salió —el adelanto— lo nombra el porqué
+    (`por_que_no_salio_un_peso`).
 
-    Y LA DEL NETO EN CERO POR LA DEUDA ARRASTRADA, que el mismo botón cerraba igual:
-    $120.000 de leche contra $120.000 que el tercero quedó debiendo de la quincena
-    pasada, saldo $0 clavado y ningún pago. No queda debiendo nada, así que la primera
-    pregunta no la veía y sus días decían "ya se pagó" — el aviso que el guardia de
-    Pagar de hoy llama "un aviso que no es cierto". Es la misma pregunta de ese guardia
-    (`_no_sale_un_peso_por_la_deuda`), llamada y no copiada.
+    Y LA DEL NETO EN CERO POR LA DEUDA ARRASTRADA: $120.000 de leche contra $120.000 que
+    el tercero quedó debiendo de la quincena pasada, saldo $0 clavado y ningún pago. No
+    queda debiendo nada, así que la primera pregunta no la veía y sus días decían "ya se
+    pagó", que era falso. Es la misma pregunta del guardia de Pagar
+    (`_no_sale_un_peso_por_la_deuda`), llamada y no copiada. A esta no se llega por
+    Pagar: su guardia nació en el mismo cambio que `saldo_anterior` (04/08/2026), así que
+    nunca la dejó pasar. Se llega corrigiendo una
+    pagada y borrándole después el pago: Q2 de $200.000 se cobra los $120.000 de Q1, se
+    paga con $80.000, Corregir le baja el precio a $1.200 (valor $120.000, v2) y se borra
+    el pago; `eliminar_pago` la deja 'pagada' por la versión, con pagado $0.
 
     UNA PREGUNTA PARA TODOS LOS QUE EXPLICAN EL CANDADO: el del anticipo
     (`_por_que_no_se_mueve`), el del día en Recepción diaria (aviso y rebotes) y el
@@ -1469,18 +1481,81 @@ def pagada_sin_que_saliera_un_peso(liquidacion: Liquidacion) -> bool:
 
 
 def por_que_no_salio_un_peso(liquidacion: Liquidacion, quien: str = "el tercero") -> str:
-    """'sin que saliera un peso, porque …': el remate de `pagada_sin_que_saliera_un_peso`.
+    """El remate de `pagada_sin_que_saliera_un_peso`, para pegar tras "quedó cerrada como
+    pagada …".
 
     Son DOS situaciones y cada una con su cifra: si quedó debiendo, lo que debe; si el
     neto se fue a cero por la deuda de la quincena pasada, esa deuda (`saldo_anterior`).
-    Decir "le quedó debiendo $0" en la segunda sería otra frase falsa."""
+    Decir "le quedó debiendo $0" en la segunda sería otra frase falsa.
+
+    "SIN QUE SALIERA UN PESO" SOLO CUANDO LA QUINCENA NO TIENE ADELANTOS PROPIOS. El
+    adelanto es plata que salió de la caja contra estas mismas cifras —lo dicen `pagar` y
+    el punto 2 de `ya_salio_papel_o_plata`—, y esta frase sale justo en el candado de ese
+    adelanto. Medido por el camino real: Q1 de 90 L × $2.000 = $180.000 contra $300.000
+    deja $120.000 de deuda; Q2 de 100 L × $2.000 = $200.000 se los cobra y se paga con
+    $80.000; esos $80.000 resultan ser un adelanto entregado en la mano, se incluye con
+    Corregir y se borra el pago. Queda 'pagada' v2 con 200.000 − 80.000 − 120.000 = 0, y
+    el candado del adelanto de $80.000 decía que se cerró "sin que saliera un peso".
+    Con adelantos se nombran las cifras que cubrieron el valor, y suman exacto con
+    calculadora: $80.000 + $120.000 = $200.000; en la que quedó debiendo, $300.000 −
+    $180.000 = $120.000. Cuadran porque aquí pagado es $0: la única fila con pagado
+    negativo es la de la deuda borrada, y todos los que llaman la nombran antes.
+
+    Va pegado a tres frases con su propia gramática —el anticipo ("la liquidación en la
+    que se descontó quedó cerrada como pagada …"), el día ("la quincena de la leche de
+    este día …", con el nombre del tercero en `quien`) y las observaciones ("Esta
+    quincena …")—, así que no lleva dos puntos: el día sigue con ": no se puede cambiar".
+    """
     debe = Decimal(liquidacion.le_queda_debiendo or 0)
+    anticipos = Decimal(liquidacion.anticipos or 0)
+    arrastrada = Decimal(liquidacion.saldo_anterior or 0)
+    if anticipos <= CERO:
+        if debe > CERO:
+            return f"sin que saliera un peso, porque {quien} le quedó debiendo {pesos(debe)}"
+        return (
+            f"sin que saliera un peso, porque lo que {quien} quedó debiendo de la quincena "
+            f"pasada ({pesos(arrastrada)}) se llevó el neto"
+        )
+    adelantos = f"los anticipos que se le aplicaron ({pesos(anticipos)})"
+    valor = pesos(liquidacion.valor_total)
+    if arrastrada > CERO:
+        las_dos = (
+            f"{adelantos} y lo que {quien} quedó debiendo de la quincena pasada "
+            f"({pesos(arrastrada)})"
+        )
+        if debe > CERO:
+            return (
+                f"sin saldo por entregar, porque {las_dos} pasaron de su valor ({valor}), y "
+                f"{quien} le quedó debiendo {pesos(debe)}"
+            )
+        return f"sin saldo por entregar, porque {las_dos} cubrieron exacto su valor ({valor})"
     if debe > CERO:
-        return f"sin que saliera un peso, porque {quien} le quedó debiendo {pesos(debe)}"
-    return (
-        f"sin que saliera un peso, porque lo que {quien} quedó debiendo de la quincena "
-        f"pasada ({pesos(liquidacion.saldo_anterior)}) se llevó el neto"
-    )
+        return (
+            f"sin saldo por entregar, porque {adelantos} pasaron de su valor ({valor}) y "
+            f"{quien} le quedó debiendo {pesos(debe)}"
+        )
+    return f"sin saldo por entregar, porque {adelantos} cubrieron exacto su valor ({valor})"
+
+
+def cerrada_sin_pago(liquidacion: Liquidacion) -> str | None:
+    """'Esta quincena quedó cerrada como pagada …': la frase entera, o None si no aplica.
+
+    Es el hecho con que rebota el PUT de observaciones sobre esa quincena, y es lo que la
+    pantalla lee (`LiquidacionRead.cerrada_sin_pago`) para no decir "El pago quedó
+    registrado" en la pagada v2 sin pagos: Q2 de $200.000 que cobró los $120.000 de Q1,
+    pagada con $80.000, corregida a $120.000 y con el pago borrado. Sus días y su
+    anticipo dicen el mismo porqué (`por_que_no_salio_un_peso`); con dos redacciones, el
+    detalle afirmaba un pago sobre una tabla de pagos vacía.
+
+    None también en la fila con deuda borrada por la migración: el servidor nunca dice
+    esta frase de ella —todos sus guardias nombran primero la deuda borrada— y sus
+    cifras no cuadrarían, porque ahí `pagado` lleva restada la deuda que se borró.
+    """
+    if liquidacion.deuda_borrada_por_la_migracion > CERO:
+        return None
+    if not pagada_sin_que_saliera_un_peso(liquidacion):
+        return None
+    return f"Esta quincena quedó cerrada como pagada {por_que_no_salio_un_peso(liquidacion)}"
 
 
 class _Simulacion(NamedTuple):
@@ -1561,21 +1636,52 @@ def _no_sale_un_peso_por_la_deuda(liquidacion: Liquidacion) -> str | None:
     ANTICIPOS DE ESTA QUINCENA los que la cubrieron exacto (sin deuda arrastrada de por
     medio). Ahí sí salió plata —el anticipo, entregado en la mano contra estas mismas
     cifras— y 'pagada' es la verdad. La diferencia es de dónde vino lo que tapó el neto.
+
+    EL PORQUÉ QUE DICE EL REBOTE TIENE QUE SER EL DE HOY. Decía que marcarla pagada
+    "trabaría los días de la quincena con un aviso que no es cierto": ese aviso era el "ya
+    se pagó" de antes, y desde que el candado dice por qué quedó cerrada sin pago ya no
+    existe. Medido con la mixta —Q2 de 85 L × $2.000 = $170.000 − $50.000 de su adelanto −
+    $120.000 de la deuda = $0—: si quedara 'pagada', su día diría que la cerraron "los
+    anticipos ($50.000) y lo que quedó debiendo ($120.000)", que con calculadora da exacto
+    los $170.000. El aviso sería cierto y el rebote le daba al dueño una razón que el
+    sistema ya no cumple. Lo cierto es lo de la regla: Pagar no le entrega un peso a nadie
+    (por eso "sin que salga", del acto de hoy, y no "sin que saliera", que en la mixta es
+    falso: el adelanto sí salió), y en 'aprobada' sus días y sus anticipos todavía se
+    corrigen, cosa que en 'pagada' se trabaría. El mismo texto lo dice Abonar
+    (`_razon_para_no_abonar`) y lo lee la pantalla (`aviso_sin_un_peso_por_la_deuda`).
+
+    LOS ANTICIPOS SE NOMBRAN SOLO SI LA QUINCENA TIENE. En la pura —$120.000 de leche
+    contra los $120.000 de la deuda, `anticipos` en $0— "le trabaría los días y los
+    anticipos" nombraba unos anticipos que no existen, y el dueño se iba a buscarlos. Ahí
+    lo que se trabaría son sus días; en la mixta ($200.000 = $80.000 de su adelanto +
+    $120.000 de la deuda), sus días y ese adelanto.
     """
     if Decimal(liquidacion.saldo or 0) > CERO:
         return None
     arrastrada = Decimal(liquidacion.saldo_anterior or 0)
     if arrastrada <= CERO or liquidacion.tiene_pagos:
         return None
+    que_se_trabaria = (
+        "los días y los anticipos"
+        if Decimal(liquidacion.anticipos or 0) > CERO
+        else "los días"
+    )
     return (
         "Esta liquidación no hay que pagarla: no queda un peso por entregar —lo que el "
         f"tercero quedó debiendo de la quincena pasada ({pesos(arrastrada)}) se llevó lo "
-        f"que faltaba del neto—. Déjela en '{ESTADO_APROBADA}': marcarla pagada sin que "
-        "salga un peso trabaría los días de la quincena con un aviso que no es cierto"
+        f"que faltaba del neto—. Déjela en '{ESTADO_APROBADA}': marcarla pagada no le "
+        f"entrega un peso a nadie y le trabaría {que_se_trabaria}, que en "
+        f"'{ESTADO_APROBADA}' todavía se pueden corregir"
     )
 
 
-def _exigir_deuda_no_trasladada(liquidacion: Liquidacion, verbo: str) -> None:
+def _exigir_deuda_no_trasladada(
+    liquidacion: Liquidacion,
+    verbo: str,
+    ctx: RequestContext | None = None,
+    *,
+    por_que_sigue: str | None = None,
+) -> None:
     """Rebota cuando la deuda de ESTA liquidación ya se le cobró en otra.
 
     Es el guardia del caso peligroso, y hay que leerlo con la plata en la mano: esta
@@ -1585,15 +1691,13 @@ def _exigir_deuda_no_trasladada(liquidacion: Liquidacion, verbo: str) -> None:
     anticipo o un día— descuadra DOS comprobantes de una sola vez: este dejaría de
     deber lo que el otro le cobró.
 
-    EL MENSAJE NOMBRA la liquidación que se la cobró y su período, porque lo que el
-    dueño necesita saber es qué anular primero. Con un "no se puede" a secas queda
-    atascado sin saber por dónde salir.
+    EL MENSAJE NOMBRA la liquidación que se la cobró y su período, y dice qué hacer
+    (`consejo_deuda_cobrada`). Con un "no se puede" a secas el dueño queda atascado sin
+    saber por dónde salir.
 
-    Y DICE EL ORDEN EN QUE HAY QUE VOLVER A GENERARLAS, con las fechas concretas, porque
-    el flujo que este mismo mensaje recomienda saca plata de más si se hace al revés:
-    $480.000 por $430.000 de leche, medido. La redacción está en
-    `Liquidacion.orden_para_volver_a_generar`, que es la misma que usan los mensajes del
-    candado de Recepción diaria.
+    `por_que_sigue` es lo que el que llama sabe de SU acción: por qué esta seguiría
+    trabada aunque la otra se anulara (ver `consejo_deuda_cobrada`). None si anular la
+    otra sí la destraba.
 
     Es una función del módulo y no un método porque la usan los DOS servicios (el de
     liquidaciones y el de anticipos) y el candado de Recepción diaria pregunta lo mismo
@@ -1601,26 +1705,952 @@ def _exigir_deuda_no_trasladada(liquidacion: Liquidacion, verbo: str) -> None:
     `_aviso_deuda_trasladada`, que también lo usa el candado de los anticipos para
     decirlo en pantalla sin rebotar nada.
     """
-    aviso = _aviso_deuda_trasladada(liquidacion, verbo)
+    aviso = _aviso_deuda_trasladada(liquidacion, verbo, ctx, por_que_sigue=por_que_sigue)
     if aviso is not None:
         raise BusinessError(aviso)
 
 
-def _aviso_deuda_trasladada(liquidacion: Liquidacion, verbo: str) -> str | None:
-    """El mensaje de `_exigir_deuda_no_trasladada`, o None si su deuda no ha viajado."""
+def _aviso_deuda_trasladada(
+    liquidacion: Liquidacion,
+    verbo: str,
+    ctx: RequestContext | None = None,
+    *,
+    por_que_sigue: str | None = None,
+) -> str | None:
+    """El mensaje de `_exigir_deuda_no_trasladada`, o None si su deuda no ha viajado.
+
+    Dos partes: EL HECHO —cuánto quedó debiendo y en cuál se le cobró—, igual para
+    todos los verbos, y EL CONSEJO, que depende de la acción, de la otra liquidación y
+    de quién pregunta (`consejo_deuda_cobrada`).
+
+    LA CIFRA NO PUEDE SER "$0". `eliminar_pago` dejaba borrarle el pago a una quincena
+    cuya deuda ya se había cobrado en otra (hoy rebota), y las filas que quedaron así
+    siguen en la base. Henri: la quincena del 01/06 pagada con $500.000 y corregida a
+    $400.000 quedó debiendo $100.000; la del 16/06 se los cobró; se le borró el pago y
+    la primera quedó debiendo $0 con la marca puesta. El aviso decía "lo que el tercero
+    quedó debiendo ($0) ya se le cobró", que es falso. Ahí se nombra lo que de verdad se
+    cobró: el `saldo_anterior` de la otra, si esta fue la única deuda que la otra se
+    cobró; si se cobró varias, ese renglón no se puede partir y se dice sin cifra.
+    """
     if not liquidacion.deuda_ya_cobrada:
         return None
     otra = liquidacion.deuda_trasladada_a
     donde = (
         f"la liquidación del {otra.periodo_texto}" if otra is not None else "otra liquidación"
     )
-    orden = liquidacion.orden_para_volver_a_generar
+    debe = Decimal(liquidacion.le_queda_debiendo or 0)
+    if debe > CERO:
+        lo_cobrado = f"lo que el tercero quedó debiendo ({pesos(debe)})"
+    elif otra is not None and [o.id for o in otra.deudas_cobradas] == [liquidacion.id]:
+        lo_cobrado = f"lo que el tercero quedaba debiendo ({pesos(otra.saldo_anterior)})"
+    else:
+        lo_cobrado = "lo que el tercero quedaba debiendo"
+    consejo = consejo_deuda_cobrada(liquidacion, ctx, por_que_sigue=por_que_sigue)
     return (
-        f"No se puede {verbo} esta liquidación: lo que el tercero quedó debiendo "
-        f"({pesos(liquidacion.le_queda_debiendo)}) ya se le cobró en {donde}. Anule "
-        "primero esa liquidación —así esta deuda vuelve a quedar libre— y vuelva a "
-        f"intentarlo. {orden}".rstrip()
+        f"No se puede {verbo} esta liquidación: {lo_cobrado} ya se le cobró en {donde}. "
+        f"{consejo}".rstrip()
     )
+
+
+def _puede(ctx: RequestContext | None, accion: str) -> bool:
+    """¿Quien pregunta tiene esta acción en liquidaciones? Sin contexto (un proceso
+    interno), sí: el consejo no se recorta para nadie."""
+    return ctx is None or ctx.tiene_permiso("liquidaciones", accion)
+
+
+def _usar_corregir(liquidacion: Liquidacion, ctx: RequestContext | None) -> str | None:
+    """"use 'Corregir esta quincena'" para quien tiene el botón, "pídale a un Administrador
+    de la empresa que use …" para quien no; None si Corregir rebota esta quincena.
+
+    SON DOS PREGUNTAS Y VAN EN ESTE ORDEN: la de la fila, al botón (`por_que_no_se_corrige`,
+    no una copia de su regla), y la de quien mira, al permiso que pide el router
+    ('administrar'). El candado del anticipo, las observaciones y Anular decían "use
+    'Corregir esta quincena'" sin la segunda: Supervisor, Compras, Contador y Consulta leían
+    en el candado de la lista de Anticipos un botón que el servidor les contesta con 403,
+    mientras el día de esa misma quincena ya les decía "pídale a un Administrador". Es la
+    misma redacción del día (`_consejo_de_corregir` en Recepción diaria).
+    """
+    if por_que_no_se_corrige(liquidacion, ctx) is not None:
+        return None
+    if _puede(ctx, "administrar"):
+        return "use 'Corregir esta quincena'"
+    return "pídale a un Administrador de la empresa que use 'Corregir esta quincena'"
+
+
+def _pagos_que_se_pueden_borrar(liquidacion: Liquidacion) -> Decimal:
+    """Lo que suman los renglones de pago SI borrarlos todos deja la quincena sin pagos.
+
+    CERO cuando no alcanza: la 'pagada' de antes de los abonos trae `pagado` sin
+    renglón (la migración a5e7c1b4d9f2 lo escribió a mano), y a esa no hay pago que
+    borrar para destrabarla. Sobre una fila sana Σ(pagos) nunca pasa de `pagado`
+    —eso sería deuda borrada—, así que alcanza cuando son iguales.
+    """
+    suma = sum((Decimal(p.valor or 0) for p in liquidacion.pagos), CERO)
+    if suma > CERO and suma >= Decimal(liquidacion.pagado or 0):
+        return suma
+    return CERO
+
+
+def _traba_para_anular(liquidacion: Liquidacion, *, desde_la_version: bool = False) -> str | None:
+    """LA PRIMERA RAZÓN POR LA QUE `anular` REBOTA, como una clave; None si se puede.
+
+    Es el ORDEN de `anular` y nada más —los textos están en `por_que_no_se_anula`—, y
+    existe para poder preguntárselo a LA OTRA liquidación sin armar su mensaje: el
+    consejo de la deuda cobrada solo dice "anule primero esa" si de verdad se puede.
+    Sin textos no hay vuelta: preguntarle a la otra no le pregunta a una tercera.
+
+    `desde_la_version` salta las dos de la deuda, para saber qué traba a ESTA una vez
+    que su deuda quedara libre.
+    """
+    if not desde_la_version:
+        if liquidacion.deuda_borrada_por_la_migracion > CERO:
+            return "deuda_borrada"
+        if liquidacion.deuda_ya_cobrada:
+            return "deuda_cobrada"
+    if int(liquidacion.version or 1) > 1:
+        return "version"
+    if liquidacion.tiene_pagos:
+        return "pagos"
+    if liquidacion.estado == ESTADO_PAGADA:
+        return "pagada"
+    if liquidacion.estado not in (ESTADO_BORRADOR, ESTADO_APROBADA):
+        return "estado"
+    return None
+
+
+def consejo_deuda_cobrada(
+    liquidacion: Liquidacion,
+    ctx: RequestContext | None = None,
+    *,
+    por_que_sigue: str | None = None,
+    y_que_despues: str | None = None,
+) -> str:
+    """QUÉ HACER cuando lo que esta liquidación quedó debiendo ya se le cobró en otra.
+
+    Va después del hecho ("... ya se le cobró en la del 16/06/2026 al 30/06/2026").
+    Antes era siempre "Anule primero esa liquidación y vuelva a intentarlo", y medido
+    era falso en tres casos:
+      · LA OTRA NO SE DEJA ANULAR. Beto: $180.000 de leche contra $300.000 de adelanto,
+        debe $120.000; la del 16/06 ($250.000 − $120.000 = $130.000) se pagó y se
+        corrigió con un día olvidado (versión 2). Anularla rebota para siempre, aunque
+        se le borre el pago de $130.000 con su soporte. El consejo mandaba a un muro.
+      · ANULAR LA OTRA NO DESTRABA ESTA. Carla: $180.000 cubiertos exacto por el
+        adelanto, pagada y corregida a $150.000 (debe $30.000); la siguiente se los
+        cobra. Se anulaba la siguiente siguiendo el consejo y el día de Carla seguía
+        trabado, ahora por estar pagada: un comprobante anulado para nada.
+      · QUIEN PREGUNTA NO PUEDE ANULAR. Compras recalcula ('editar') pero no anula
+        ('administrar'): el consejo le nombraba un botón que el servidor le niega.
+
+    Por eso el consejo sale de tres preguntas, en este orden:
+      1. ¿Anular la otra destraba ESTA acción? Lo sabe quien llama, y si no, manda
+         `por_que_sigue`: entonces no se nombra anular, se dice por qué y se manda al
+         ajuste en la quincena siguiente.
+      2. ¿La otra se puede anular? La misma pregunta de `anular`, sin copiarla
+         (`_traba_para_anular`). Si tiene pagos que se pueden borrar, se dice con la
+         cifra y avisando que los soportes no vuelven; si no se puede, se dice que por
+         ahí no hay salida.
+      3. ¿Quien pregunta puede hacerlo? Si no, que se lo pida a un Administrador de la
+         empresa.
+
+    `y_que_despues` es para cuando la acción trabada TAMPOCO es de quien pregunta: lo que
+    el Administrador haría después de soltar la deuda ("pague esta"). Sin él, "y después
+    vuelva a intentarlo" le habla a quien lee, y eso está bien en Recalcular o en el día de
+    Recepción, que son suyos. Pero el descuadre de la deuda cobrada lo leen todos los roles
+    (`avisos_deuda_cobrada`, claves 'pagar' y 'registrar_pago'), y a Compras o a Consulta
+    "vuelva a intentarlo" le nombraba Pagar, que el servidor le contesta con 403.
+
+    Cuando el consejo es anular, dice EL ORDEN para volver a generarlas, con las fechas
+    (`orden_para_volver_a_generar`): ese flujo hecho al revés saca plata de más, $480.000
+    por $430.000 de leche, medido. Pero solo si ESTA también se podría anular una vez
+    libre su deuda: a Henri, pagada y corregida (versión 2), "si le toca volver a generar
+    las dos" le nombraría un paso que el servidor le rechaza. Y sin salida por la otra,
+    "empiece por la más vieja" sobra y confunde.
+
+    Es pública porque el candado de Recepción diaria dice el mismo consejo con su propio
+    encabezado.
+    """
+    ajuste = "Si la cifra está mala, registre el ajuste en la quincena siguiente"
+    if por_que_sigue is not None:
+        return f"Y anular esa liquidación no la destrabaría, porque {por_que_sigue}. {ajuste}"
+    otra = liquidacion.deuda_trasladada_a
+    if otra is None:
+        return ajuste
+    orden = (
+        liquidacion.orden_para_volver_a_generar
+        if _traba_para_anular(liquidacion, desde_la_version=True) is None
+        else ""
+    )
+    traba = _traba_para_anular(otra)
+    reintento = (
+        f"y que después {y_que_despues}"
+        if y_que_despues is not None
+        else "y después vuelva a intentarlo"
+    )
+    if traba is None:
+        if _puede(ctx, "administrar"):
+            consejo = (
+                "Anule primero esa liquidación —así esta deuda vuelve a quedar libre— y "
+                "vuelva a intentarlo."
+            )
+        else:
+            consejo = (
+                "Pídale a un Administrador de la empresa que anule primero esa "
+                f"liquidación —así esta deuda vuelve a quedar libre— {reintento}."
+            )
+        return f"{consejo} {orden}".rstrip()
+    borrables = _pagos_que_se_pueden_borrar(otra)
+    if traba == "pagos" and borrables > CERO:
+        uno = len(otra.pagos) == 1
+        cuantos = "un pago registrado" if uno else f"{len(otra.pagos)} pagos registrados"
+        mal = "ese pago quedó mal registrado" if uno else "esos pagos quedaron mal registrados"
+        if _puede(ctx, "eliminar") and _puede(ctx, "administrar"):
+            salida = (
+                f"{'bórrelo' if uno else 'bórrelos'}, anule esa liquidación y vuelva a "
+                "intentarlo"
+            )
+        else:
+            salida = (
+                "pídale a un Administrador de la empresa que "
+                f"{'lo borre' if uno else 'los borre'} y anule esa liquidación, {reintento}"
+            )
+        borrarlos = "borrárselo antes, y con él" if uno else "borrárselos antes, y con ellos"
+        return (
+            f"Esa liquidación ya tiene {cuantos} por {pesos(borrables)}: para anularla "
+            f"habría que {borrarlos} sus soportes, que no se recuperan. Si esa plata sí se "
+            "le entregó, no la anule y registre el ajuste en la quincena siguiente; si "
+            f"{mal}, {salida}. {orden}"
+        ).rstrip()
+    if traba == "deuda_cobrada":
+        # LA CADENA: la otra tampoco se deja anular porque SU deuda se la cobró una
+        # tercera. No se arma el consejo de la tercera —eso sería preguntar sin fin—: se
+        # dice dónde está el nudo y se manda al ajuste.
+        tercera = otra.deuda_trasladada_a
+        en_cual = f"la del {tercera.periodo_texto}" if tercera is not None else "otra"
+        return (
+            "Y esa liquidación tampoco se puede anular: lo que ella quedó debiendo ya se "
+            f"le cobró en {en_cual}. {ajuste}"
+        )
+    return (
+        f"Y esa liquidación no se puede anular, porque {_por_que_no_hay_salida(otra, traba)}: "
+        f"por ahí no hay salida dentro del sistema. {ajuste}"
+    )
+
+
+def _por_que_no_hay_salida(liquidacion: Liquidacion, traba: str) -> str:
+    """El remate de "… no se puede anular, porque …" cuando ni borrando pagos se destraba.
+
+    Lo dicen el consejo de la deuda cobrada sobre LA OTRA (`consejo_deuda_cobrada`) y el
+    de la que cobró una deuda que ya no cuadra sobre SÍ MISMA
+    (`_consejo_para_la_que_cobro`): una redacción para los dos.
+    """
+    if traba == "deuda_cobrada":
+        otra = liquidacion.deuda_trasladada_a
+        en_cual = f"la del {otra.periodo_texto}" if otra is not None else "otra"
+        return f"lo que ella quedó debiendo ya se le cobró en {en_cual}"
+    return {
+        "deuda_borrada": (
+            "la migración de los abonos le borró una deuda y hay que repararla antes de "
+            "tocarla"
+        ),
+        "version": (
+            f"de ella ya salieron {liquidacion.version} comprobantes (el original y sus "
+            "correcciones)"
+        ),
+        "pagos": (
+            "tiene pagos de antes de que existieran los abonos, sin un renglón de pago "
+            "que se pueda borrar"
+        ),
+        "pagada": "quedó cerrada como pagada",
+    }.get(traba, f"está en '{liquidacion.estado}'")
+
+
+# ---------------------------------------------------------------------------
+# LA DEUDA COBRADA QUE YA NO CUADRA: las filas que dejó el borrado de pagos de antes
+# ---------------------------------------------------------------------------
+# EL CASO, con las cifras del dueño. Henri: Q1 (01–15/06) de 250 L × $2.000 = $500.000,
+# pagada con $500.000 y corregida a $1.600 → vale $400.000 y debe $100.000. Q2 (16–30/06)
+# de 150 L × $2.000 = $300.000 se cobra esos $100.000 y queda en $200.000. Hasta el guardia
+# de `eliminar_pago`, la basura del pago de Q1 respondía 200: Q1 pasaba a 'parcial' con
+# $400.000 por pagar y debiendo $0, y Q2 seguía descontando los $100.000, con un desglose
+# que ya sumaba $0. Pagando las dos salían $600.000 por $700.000 de leche. El guardia
+# impide filas nuevas así; las que el código de antes ya dejó siguen en la base, y Pagar y
+# Abonar las pagaban en silencio.
+#
+# LA PREGUNTA, por las dos puntas y sin una sola fila sana marcada:
+#   · LA QUE DEJÓ LA DEUDA: tiene la marca y hoy ya no debe nada (saldo ≥ 0). Una sana con
+#     la deuda cobrada SIEMPRE tiene saldo negativo —sus cifras se congelan en el instante
+#     en que la deuda viaja: recalcular, anular, corregir, mover un anticipo y borrar un
+#     pago rebotan—, así que esa ya rebotaba en Pagar y Abonar por "quedó debiendo".
+#   · LA QUE LA COBRÓ: su `saldo_anterior` ya no es lo que hoy deben las que se cobró
+#     (Σ `le_queda_debiendo` de `deudas_cobradas`). Al generarla son iguales por
+#     construcción (`_cobrar_deudas_anteriores`), y la otra punta congelada no se mueve.
+#     Es la punta donde se pierde la plata: Q2 pagaría $200.000 donde hoy se deben
+#     $300.000. Sin `deudas_cobradas` no se marca: no habría a quién nombrar.
+# Se rebota Pagar (y con él "Marcar pagada") y Abonar, en las dos, y la pantalla lee el
+# mismo texto (`avisos_deuda_cobrada`, claves 'pagar' y 'registrar_pago') para no ofrecer
+# un botón que siempre rebota.
+#
+# NO DICE CUÁL DE LAS DOS ESTÁ MAL, porque el sistema no lo sabe: si el pago borrado de
+# verdad quedó mal registrado, a Q1 se le deben $400.000 y Q2 tiene que descontar $0; si
+# sí se le entregó, Q1 sigue debiendo $100.000 y es Q2 la que está bien. Dice el hecho,
+# que hay que revisarlas, y la salida medida: anular la que cobró (en borrador o aprobada,
+# versión 1 y sin pagos) suelta la marca, y generarla otra vez solo descuenta lo que hoy
+# se deba: $400.000 + $300.000 = $700.000, la leche entera.
+#
+# LO LEEN TODOS LOS ROLES: es un hecho de la fila, como `aviso_sin_un_peso_por_la_deuda`.
+# Por eso el consejo se dice para quien pregunta, hasta el último paso: a quien no puede
+# Pagar ni Abonar, "y que después pague esta" en vez de "vuelva a intentarlo". "Esta" y no
+# "la": la frase acaba de nombrar "esa liquidación", que es la otra.
+_LO_QUE_HACE_DESPUES_EL_ADMINISTRADOR = {
+    "pagar": "pague esta",
+    "registrarle un pago a": "le registre el pago a esta",
+}
+
+
+def _deuda_cobrada_que_no_cuadra(
+    liquidacion: Liquidacion, verbo: str, ctx: RequestContext | None = None
+) -> str | None:
+    """El 422 de Pagar y Abonar sobre una de las dos puntas de una deuda cobrada que ya no
+    cuadra; None en las sanas. La pregunta y el porqué, en la nota de arriba."""
+    if liquidacion.deuda_ya_cobrada:
+        if Decimal(liquidacion.saldo or 0) >= CERO:
+            return _aviso_de_la_que_dejo_la_deuda(liquidacion, verbo, ctx)
+        return None
+    arrastrada = Decimal(liquidacion.saldo_anterior or 0)
+    if arrastrada <= CERO:
+        return None
+    origenes = list(liquidacion.deudas_cobradas)
+    if not origenes:
+        return None
+    hoy = sum((o.le_queda_debiendo for o in origenes), CERO)
+    if hoy == arrastrada:
+        return None
+    return _aviso_de_la_que_cobro(liquidacion, origenes, hoy, verbo, ctx)
+
+
+def _aviso_de_la_que_dejo_la_deuda(
+    liquidacion: Liquidacion, verbo: str, ctx: RequestContext | None
+) -> str:
+    """Q1 de Henri: la marca puesta hacia Q2 y hoy $400.000 por entregar.
+
+    La cifra de lo cobrado es el `saldo_anterior` de la otra si esta fue la única deuda que
+    la otra se cobró —lo mismo que hace `_aviso_deuda_trasladada`—; si se cobró varias, ese
+    renglón no se puede partir y se dice sin cifra. El consejo es el de la deuda cobrada
+    (`consejo_deuda_cobrada`): si la otra se deja anular, si tiene pagos que se pueden
+    borrar, y si quien pregunta puede hacerlo.
+
+    Y SI QUIEN PREGUNTA NO PUEDE PAGAR NI ABONAR (los dos piden 'administrar' en el
+    router), el paso de después también es del Administrador: "y que después pague esta",
+    no "vuelva a intentarlo". Este texto lo leen todos los roles (`avisos_deuda_cobrada`).
+    """
+    despues = (
+        None
+        if _puede(ctx, "administrar")
+        else _LO_QUE_HACE_DESPUES_EL_ADMINISTRADOR.get(verbo)
+    )
+    otra = liquidacion.deuda_trasladada_a
+    donde = (
+        f"la liquidación del {otra.periodo_texto}" if otra is not None else "otra liquidación"
+    )
+    cobrado = (
+        f" ({pesos(otra.saldo_anterior)})"
+        if otra is not None and [o.id for o in otra.deudas_cobradas] == [liquidacion.id]
+        else ""
+    )
+    saldo = Decimal(liquidacion.saldo or 0)
+    hoy = "hoy ya no queda debiendo nada" + (
+        f" y su saldo dice {pesos(saldo)} por entregar" if saldo > CERO else ""
+    )
+    return (
+        f"No se puede {verbo} esta liquidación: lo que el tercero quedaba debiendo en ella"
+        f"{cobrado} ya se le cobró en {donde}, pero después sus cifras cambiaron: {hoy}. "
+        "Los dos comprobantes ya no cuadran entre sí, y hay que revisarlos antes de "
+        f"entregarle plata. {consejo_deuda_cobrada(liquidacion, ctx, y_que_despues=despues)}"
+    ).rstrip()
+
+
+def _aviso_de_la_que_cobro(
+    liquidacion: Liquidacion,
+    origenes: list[Liquidacion],
+    hoy: Decimal,
+    verbo: str,
+    ctx: RequestContext | None,
+) -> str:
+    """Q2 de Henri: descuenta $100.000 que la del 01/06 hoy ya no debe."""
+    uno = len(origenes) == 1
+    periodos = [o.periodo_texto for o in origenes]
+    cuales = (
+        f"la liquidación del {periodos[0]}"
+        if uno
+        else f"las liquidaciones del {', del '.join(periodos[:-1])} y del {periodos[-1]}"
+    )
+    if hoy > CERO:
+        deben = f"hoy {'queda' if uno else 'quedan'} debiendo {pesos(hoy)}"
+    else:
+        deben = f"hoy ya no {'queda' if uno else 'quedan'} debiendo nada"
+    return (
+        f"No se puede {verbo} esta liquidación: descuenta "
+        f"{pesos(liquidacion.saldo_anterior)} de lo que el tercero quedaba debiendo en "
+        f"{cuales}, pero después de cobrárselo las cifras de "
+        f"{'esa quincena' if uno else 'esas quincenas'} cambiaron y {deben}. "
+        f"{'Los dos comprobantes' if uno else 'Los comprobantes'} ya no cuadran entre sí, "
+        "y hay que revisarlos antes de entregarle plata. "
+        f"{_consejo_para_la_que_cobro(liquidacion, ctx)}"
+    )
+
+
+def _consejo_para_la_que_cobro(liquidacion: Liquidacion, ctx: RequestContext | None) -> str:
+    """La salida de la que cobró una deuda que ya no cuadra: anularla y volver a generarla.
+
+    Las mismas tres preguntas de `consejo_deuda_cobrada`, dichas de ella misma: ¿se deja
+    anular? (`_traba_para_anular`, sin copiarla); si solo la traban pagos con renglón,
+    con la cifra y avisando que los soportes no vuelven; y ¿quien pregunta puede? Medido
+    con Q2 de Henri en borrador o aprobada, versión 1 y sin pagos: anular da 200, suelta la
+    marca de Q1, y la del 16/06 generada otra vez queda con $0 de deuda vieja y neto
+    $300.000. Con pagos de por medio, borrárselos sí se puede (la marca está en la que
+    dejó la deuda, no en esta).
+    """
+    ajuste = "Si la cifra está mala, registre el ajuste en la quincena siguiente"
+    nueva = "la nueva solo descontará lo que hoy se deba"
+    traba = _traba_para_anular(liquidacion)
+    if traba is None:
+        if _puede(ctx, "administrar"):
+            return f"Si hay que rehacerla, anúlela y vuelva a generarla: {nueva}"
+        return (
+            "Si hay que rehacerla, pídale a un Administrador de la empresa que la anule y "
+            f"la vuelva a generar: {nueva}"
+        )
+    borrables = _pagos_que_se_pueden_borrar(liquidacion)
+    if traba == "pagos" and borrables > CERO:
+        uno = len(liquidacion.pagos) == 1
+        cuantos = (
+            "un pago registrado" if uno else f"{len(liquidacion.pagos)} pagos registrados"
+        )
+        mal = "ese pago quedó mal registrado" if uno else "esos pagos quedaron mal registrados"
+        if _puede(ctx, "eliminar") and _puede(ctx, "administrar"):
+            salida = f"{'bórrelo' if uno else 'bórrelos'}, anúlela y vuelva a generarla"
+        else:
+            salida = (
+                "pídale a un Administrador de la empresa que "
+                f"{'lo borre' if uno else 'los borre'}, la anule y la vuelva a generar"
+            )
+        borrarlos = "borrárselo antes, y con él" if uno else "borrárselos antes, y con ellos"
+        return (
+            f"Esta liquidación ya tiene {cuantos} por {pesos(borrables)}: para anularla "
+            f"habría que {borrarlos} sus soportes, que no se recuperan. Si esa plata sí se "
+            f"le entregó, no la anule y registre el ajuste en la quincena siguiente; si "
+            f"{mal}, {salida}: {nueva}"
+        )
+    return (
+        "Y esta liquidación no se puede anular, porque "
+        f"{_por_que_no_hay_salida(liquidacion, traba)}: por ahí no hay salida dentro del "
+        f"sistema. {ajuste}"
+    )
+
+
+def por_que_seguiria_congelada(liquidacion: Liquidacion) -> str | None:
+    """Por qué las cifras de esta quincena seguirían congeladas aunque se anulara la que
+    le cobró la deuda; None si anular esa sí las suelta.
+
+    Es la otra mitad de `cifras_congeladas`: `ya_salio_papel_o_plata`, dicha como el
+    remate de "anular esa no la destrabaría, porque …". La usan los que traban por esa
+    pregunta —el anticipo, el día en Recepción diaria, el recuadre y el borrado—. En el
+    orden del candado del anticipo: pagada, corregida y, de último, el abono.
+    """
+    if not ya_salio_papel_o_plata(liquidacion):
+        return None
+    if liquidacion.estado == ESTADO_PAGADA:
+        return "esta quincena ya quedó cerrada como pagada"
+    if int(liquidacion.version or 1) > 1:
+        return "esta quincena ya emitió un comprobante corregido"
+    return "esta quincena ya tiene pagos registrados"
+
+
+def _deuda_borrada_que_rebota(liquidacion: Liquidacion, verbo: str) -> str | None:
+    """El rebote de `_exigir_sin_deuda_borrada` como texto, o None si deja pasar.
+
+    Se pregunta POR EL GUARDIA y no por su texto a propósito: es el mismo rebote que
+    dan Pagar y abonar, y las pruebas que reproducen el código de agosto —el que corrigió
+    y pagó esas filas en producción— apagan ese guardia en un solo sitio
+    (`_antes_del_guardia`). Si los predicados lo esquivaran, la mitad de los caminos
+    seguiría con el guardia puesto y esa reproducción dejaría de ser la de agosto.
+    """
+    try:
+        _exigir_sin_deuda_borrada(liquidacion, verbo)
+    except BusinessError as rebote:
+        return rebote.detail
+    return None
+
+
+def _razon_para_no_anular(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> tuple[str, str] | None:
+    """(clave, texto) de la primera razón por la que `anular` rebota; None si se puede.
+
+    EL ORDEN ES LO QUE DECIDE SI EL DUEÑO PIERDE PLATA SIGUIENDO EL MENSAJE: se nombra
+    PRIMERO la condición que NO tiene salida.
+
+    · La deuda borrada por la migración, antes que todo: las de abajo mandan a
+      "Corregir esta quincena" o a anular otra, y sobre esa fila corregir rebota
+      siempre. A la migrada de $180.000 contra $300.000 ya corregida (v2) el guardia de
+      la versión le decía "use 'Corregir esta quincena'", y Corregir, "repararla".
+    · La que DEJÓ una deuda que ya se cobró en otra: su `le_queda_debiendo` está restado
+      en un segundo comprobante, y anularla dejaría a ese comprobante cobrando una deuda
+      de un documento anulado.
+    · La versión, antes que los pagos. Estuvo mal dos veces. Primero, 'pagada' iba antes
+      que 'tiene_pagos', así que el mensaje que sí nombra una salida no se alcanzaba
+      nunca. Se invirtió —y eso destapó algo peor con la corrección: sobre una quincena
+      CORREGIDA el guardia de los pagos decía "elimine primero los pagos", el dueño
+      borraba un pago de $200.000 —Y CON ÉL LAS FOTOS DE LA TRANSFERENCIA, que se van del
+      bucket y no vuelven— y recién entonces chocaba con "de esta quincena ya salieron 2
+      comprobantes". Un pago y su prueba destruidos para nada. Medido. La versión es la
+      única que no se deshace con ningún paso, y su mensaje no manda a borrar pagos.
+    · Los pagos: anular suelta los días y los anticipos para volver a liquidar el
+      período, y con un abono hecho dejaría un pago colgando de un documento que ya no
+      representa nada.
+    · 'pagada', y de último cualquier otro estado que no sea borrador ni aprobada (el
+      mismo rebote de `_transicionar`).
+    """
+    borrada = _deuda_borrada_que_rebota(liquidacion, "anular")
+    if borrada is not None:
+        return "deuda_borrada", borrada
+    traba = _traba_para_anular(liquidacion, desde_la_version=True)
+    if liquidacion.deuda_ya_cobrada:
+        sigue = None if traba is None else _por_que_sigue_sin_anular(liquidacion, traba)
+        aviso = _aviso_deuda_trasladada(liquidacion, "anular", ctx, por_que_sigue=sigue)
+        return "deuda_cobrada", aviso or ""
+    if traba is None:
+        return None
+    # "USE 'CORREGIR ESTA QUINCENA'" SOLO SI CORREGIR LA ACEPTA (`_usar_corregir`): en la
+    # del flete rebota siempre ("solo se puede corregir una quincena de leche"), y la
+    # pagada o la que tiene abonos de un flete la nombraban igual. Anular y Corregir piden
+    # el mismo permiso, así que a quien le llega este 422 el botón sí le sale.
+    if traba == "version":
+        usar = _usar_corregir(liquidacion, ctx)
+        return traba, (
+            f"De esta quincena ya salieron {liquidacion.version} comprobantes (el "
+            "original y sus correcciones): no se puede anular, y borrarle los pagos "
+            "tampoco la destraba"
+            + (f". Para arreglarle una cifra {usar}" if usar else "")
+        )
+    if traba == "pagos":
+        usar = _usar_corregir(liquidacion, ctx)
+        # LA 'PAGADA' DE ANTES DE LOS ABONOS NO TIENE PAGO QUE BORRAR. La migración
+        # a5e7c1b4d9f2 le escribió pagado = neto sin renglón: 100 L × $2.000 − $50.000 de
+        # adelanto = $150.000 "pagados" y `pagos` vacío. Este 422 le decía "elimine primero
+        # los pagos … eso conserva los pagos y sus soportes", y no hay ningún pago de
+        # $150.000 que eliminar ni soporte que conservar. Se pregunta lo mismo que el
+        # consejo de la otra quincena (`_pagos_que_se_pueden_borrar`), y la clave sigue
+        # siendo 'pagos': esa plata salió, por fuera del sistema, y la fila no se anula.
+        if _pagos_que_se_pueden_borrar(liquidacion) <= CERO:
+            entregado = sum((Decimal(p.valor or 0) for p in liquidacion.pagos), CERO)
+            pagado = Decimal(liquidacion.pagado or 0)
+            cuanto = (
+                f"{pesos(pagado - entregado)} de sus pagos quedaron anotados"
+                if entregado > CERO
+                else f"sus pagos ({pesos(pagado)}) quedaron anotados"
+            )
+            return traba, (
+                f"No se puede anular esta liquidación: {cuanto} antes de que existieran "
+                "los abonos, sin un renglón de pago que se pueda borrar, así que no hay "
+                "cómo dejarla sin pagos"
+                + (f". Si lo que necesita es arreglarle una cifra, {usar}" if usar else "")
+            )
+        # Borrar el pago pide 'eliminar', que Anular ('administrar') no trae consigo.
+        eliminar = (
+            "elimine primero los pagos"
+            if _puede(ctx, "eliminar")
+            else "pídale a un Administrador de la empresa que elimine primero los pagos"
+        )
+        return traba, (
+            f"No se puede anular una liquidación con pagos registrados: {eliminar}"
+            + (
+                ". Si lo único que necesita es arreglarle una cifra —un día que faltó o "
+                f"un precio mal digitado— {usar}: eso conserva los pagos y sus soportes"
+                if usar
+                else ""
+            )
+        )
+    if traba == "pagada":
+        usar = _usar_corregir(liquidacion, ctx)
+        return traba, (
+            "No se puede anular una liquidación ya pagada"
+            + (f". Si lo que necesita es arreglarle una cifra, {usar}" if usar else "")
+        )
+    return traba, f"No se puede pasar de '{liquidacion.estado}' a '{ESTADO_ANULADA}'"
+
+
+def _por_que_sigue_sin_anular(liquidacion: Liquidacion, traba: str) -> str:
+    """El remate de "anular esa no la destrabaría, porque …" para Anular ESTA."""
+    if traba == "version":
+        return (
+            f"de esta quincena ya salieron {liquidacion.version} comprobantes (el "
+            "original y sus correcciones), y una quincena así no se anula"
+        )
+    if traba == "pagos":
+        return "esta quincena ya tiene pagos registrados"
+    if traba == "pagada":
+        return "esta quincena quedó cerrada como pagada, y una pagada no se anula"
+    return f"esta quincena está en '{liquidacion.estado}'"
+
+
+def por_que_no_se_anula(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> str | None:
+    """Por qué `anular` rebota esta liquidación, con el texto del 422; None si se puede.
+
+    Es la pregunta de `anular` sacada a un solo sitio: `anular` la usa para rebotar y
+    la pantalla lee lo mismo (`avisos_deuda_cobrada`). El orden y el porqué de cada
+    razón están en `_razon_para_no_anular`. `ctx` adapta el consejo a quien pregunta.
+    """
+    razon = _razon_para_no_anular(liquidacion, ctx)
+    return razon[1] if razon is not None else None
+
+
+def _razon_para_no_corregir(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> tuple[str, str] | None:
+    """(clave, texto) de la primera razón por la que Corregir rebota; None si se puede.
+
+    El orden importa: la deuda borrada por la migración va de PRIMERA porque no tiene
+    salida dentro del sistema (ver `_exigir_sin_deuda_borrada`); con las dos, mandar
+    antes a anular la otra liquidación sería anularla para nada. Después la deuda ya
+    cobrada, porque su respuesta es "no se puede, y esto es lo que hay que hacer
+    primero". Si fuera de último, el dueño leería antes un "solo se corrigen las de
+    proveedor" que no le sirve.
+
+    LA VENTANA DE LA CORRECCIÓN SE CIERRA CUANDO LA DEUDA VIAJA, y no se abre ni para el
+    Administrador Empresa. La razón está en el papel, no en la política: el renglón del
+    resumen sale de la COLUMNA CONGELADA `saldo_anterior` de la otra liquidación,
+    mientras la nota al pie imprime `le_queda_debiendo` EN VIVO desde esta. Mover un peso
+    aquí hace que esa hoja se contradiga sola: "− $120.000" arriba y "donde quedó
+    debiendo $60.000" abajo, en un papel que el dueño suma con calculadora.
+    """
+    borrada = _deuda_borrada_que_rebota(liquidacion, "corregir")
+    if borrada is not None:
+        return "deuda_borrada", borrada
+    if liquidacion.tipo != TIPO_PROVEEDOR:
+        traba, sigue = "tipo", "la corrección es solo para las quincenas de leche"
+    elif liquidacion.estado not in (ESTADO_PAGADA, ESTADO_PARCIAL):
+        traba, sigue = "estado", (
+            f"esta quincena está en '{liquidacion.estado}', y la corrección es solo para "
+            "las que ya se pagaron"
+        )
+    else:
+        traba, sigue = None, None
+    if liquidacion.deuda_ya_cobrada:
+        aviso = _aviso_deuda_trasladada(liquidacion, "corregir", ctx, por_que_sigue=sigue)
+        return "deuda_cobrada", aviso or ""
+    if traba == "tipo":
+        return traba, (
+            "Solo se puede corregir una quincena de leche. Para el flete, genere un "
+            "segundo comprobante del período: una liquidación pagada no reserva sus "
+            "fechas, así que el día anotado tarde entra ahí"
+        )
+    if traba == "estado":
+        return traba, (
+            f"Esta liquidación está en '{liquidacion.estado}': la corrección es solo "
+            "para las que ya se pagaron. Esta todavía se puede editar por el camino "
+            "normal"
+        )
+    return None
+
+
+def por_que_no_se_corrige(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> str | None:
+    """Por qué 'Corregir esta quincena' rebota esta liquidación, con el texto del 422;
+    None si se puede.
+
+    Es la pregunta de `_exigir_corregible` sacada a un solo sitio, para que quien
+    aconseja Corregir —las observaciones, el adelanto que soltó una corrección, el día en
+    Recepción diaria— pregunte lo mismo que el botón en vez de copiarlo. El orden está en
+    `_razon_para_no_corregir`.
+    """
+    razon = _razon_para_no_corregir(liquidacion, ctx)
+    return razon[1] if razon is not None else None
+
+
+def _razon_para_no_recalcular(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> tuple[str, str] | None:
+    """(clave, texto) del rebote de Recalcular; None si se puede.
+
+    EL ESTADO VA PRIMERO, y es lo que cierra el consejo falso. Con la deuda primero, la
+    quincena APROBADA cuya deuda ya se cobró decía "anule primero esa liquidación y vuelva
+    a intentarlo"; se anulaba la otra y Recalcular volvía a rebotar, ahora porque no es un
+    borrador. Un comprobante anulado para nada. Con este orden la deuda solo se nombra
+    sobre un borrador, y ahí anular la otra sí lo destraba. Es la misma pregunta que se
+    hace la pantalla para el botón.
+
+    El recuadre no se abre por esto: `recuadrar` pregunta la deuda antes de pasar la
+    aprobada a borrador, y llega aquí ya en borrador.
+    """
+    if liquidacion.estado != ESTADO_BORRADOR:
+        return "estado", (
+            f"Esta liquidación está en '{liquidacion.estado}': solo se puede "
+            "recalcular mientras sea un borrador"
+        )
+    aviso = _aviso_deuda_trasladada(liquidacion, "recalcular", ctx)
+    return ("deuda_cobrada", aviso) if aviso is not None else None
+
+
+def _razon_para_no_cambiar_el_precio(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> tuple[str, str] | None:
+    """(clave, texto) del rebote del lápiz del precio por día; None si se puede.
+
+    Mismo orden que Recalcular y por lo mismo: el estado y el tipo primero, la deuda
+    después. Así "anule primero esa liquidación y vuelva a intentarlo" solo sale sobre un
+    borrador de leche, que es donde anular la otra de verdad lo deja corregir.
+    """
+    if liquidacion.estado != ESTADO_BORRADOR:
+        return "estado", (
+            f"Esta liquidación está en '{liquidacion.estado}': solo se puede "
+            "corregir el precio mientras sea un borrador"
+        )
+    if liquidacion.tipo != TIPO_PROVEEDOR:
+        return "tipo", (
+            "Solo se puede corregir el precio por litro en liquidaciones de proveedor"
+        )
+    aviso = _aviso_deuda_trasladada(liquidacion, "corregir el precio de un día de", ctx)
+    return ("deuda_cobrada", aviso) if aviso is not None else None
+
+
+def _razon_para_no_borrar_un_pago(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> tuple[str, str] | None:
+    """(clave, texto) del rebote de borrar un pago; None si se puede.
+
+    Solo mira la deuda YA COBRADA EN OTRA, y a propósito nada más:
+    · no la versión: borrarle el pago a una corregida cuya deuda TODAVÍA no viajó es
+      legítimo, porque la siguiente que se genere lee el saldo vivo;
+    · no la deuda borrada por la migración: en esas filas borrar un pago es la salida
+      medida, sin recorte a cero (ver `eliminar_pago`);
+    · y no a la quincena que COBRÓ la deuda: la marca está en la que la dejó, así que
+      borrarle el pago a la que la cobró —el paso previo a anularla— sigue abierto.
+    """
+    aviso = _aviso_deuda_trasladada(liquidacion, "eliminarle un pago a", ctx)
+    return ("deuda_cobrada", aviso) if aviso is not None else None
+
+
+def _razon_para_no_pagar(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> tuple[str, str] | None:
+    """(clave, texto) del primer rebote de Pagar —y de "Marcar pagada", que es el mismo
+    botón con el saldo en cero—; None si Pagar sigue.
+
+    Es el orden que `pagar` tenía escrito en línea, sacado a un solo sitio para que la
+    respuesta lea las MISMAS frases (`avisos_deuda_borrada`, `avisos_deuda_cobrada`,
+    `aviso_sin_un_peso_por_la_deuda`) en vez de copias:
+      1. la deuda borrada por la migración, por el guardia (`_deuda_borrada_que_rebota`),
+         para que `_antes_del_guardia` de las pruebas lo siga apagando en un solo sitio;
+      2. el estado;
+      3. la deuda cobrada que ya no cuadra (`_deuda_cobrada_que_no_cuadra`). Va antes de
+         las dos de abajo porque en la que cobró las dos dirían algo falso: "quedó
+         debiendo" o "la deuda de la quincena pasada se llevó el neto" sobre una deuda
+         que la otra punta hoy ya no tiene;
+      4. el tercero quedó debiendo;
+      5. el neto en cero por la deuda arrastrada (`_no_sale_un_peso_por_la_deuda`).
+    """
+    borrada = _deuda_borrada_que_rebota(liquidacion, "pagar")
+    if borrada is not None:
+        return "deuda_borrada", borrada
+    if liquidacion.estado not in (ESTADO_APROBADA, ESTADO_PARCIAL):
+        return "estado", f"No se puede pasar de '{liquidacion.estado}' a '{ESTADO_PAGADA}'"
+    descuadre = _deuda_cobrada_que_no_cuadra(liquidacion, "pagar", ctx)
+    if descuadre is not None:
+        return "deuda_que_no_cuadra", descuadre
+    debe = Decimal(liquidacion.le_queda_debiendo or 0)
+    if debe > CERO:
+        return "debe", (
+            f"Esta liquidación no hay que pagarla: el tercero le quedó debiendo "
+            f"{pesos(debe)}, y ese saldo se le cobra en la próxima liquidación que "
+            f"se le genere. Déjela en '{ESTADO_APROBADA}'; marcarla pagada sin que "
+            "salga un peso trabaría los días de la quincena sin razón"
+        )
+    por_la_deuda = _no_sale_un_peso_por_la_deuda(liquidacion)
+    if por_la_deuda is not None:
+        return "sin_un_peso", por_la_deuda
+    return None
+
+
+def _razon_para_no_abonar(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> tuple[str, str] | None:
+    """(clave, texto) del rebote de registrar un pago (Abonar); None si se puede.
+
+    Solo se le abona a una liquidación EN FIRME y que todavía deba algo. En borrador no, y
+    no es formalismo: un borrador se recalcula solo cuando cambian las recepciones o entra
+    un anticipo, así que el total contra el que se abonó puede cambiar debajo del pago y
+    dejarlo descuadrado. Aprobar es justamente el momento en que las cifras quedan en
+    firme. El orden es el de Pagar (`_razon_para_no_pagar`), con su mismo porqué.
+    """
+    # Primero la deuda borrada por la migración: sobre esa fila el saldo trae la deuda
+    # sumada, y abonarle es entregarle plata a quien todavía debe.
+    borrada = _deuda_borrada_que_rebota(liquidacion, "registrarle un pago a")
+    if borrada is not None:
+        return "deuda_borrada", borrada
+    if liquidacion.estado not in (ESTADO_APROBADA, ESTADO_PARCIAL):
+        return "estado", (
+            f"Esta liquidación está en '{liquidacion.estado}': solo se le puede "
+            "pagar a una liquidación aprobada"
+        )
+    descuadre = _deuda_cobrada_que_no_cuadra(liquidacion, "registrarle un pago a", ctx)
+    if descuadre is not None:
+        return "deuda_que_no_cuadra", descuadre
+    if Decimal(liquidacion.saldo) > CERO:
+        return None
+    # Dos mensajes, porque son dos situaciones distintas: la saldada no tiene nada
+    # pendiente y ya está; en la otra es EL TERCERO el que debe, y lo que el usuario
+    # necesita saber es que esa plata no se pierde —se le cobra en la próxima— y no que
+    # "no hay saldo", que suena a que la cuenta está en ceros.
+    debe = Decimal(liquidacion.le_queda_debiendo or 0)
+    if debe > CERO:
+        return "debe", (
+            f"A esta liquidación no se le puede abonar: el tercero le quedó "
+            f"debiendo {pesos(debe)}, y ese saldo se le cobra en la próxima "
+            "liquidación que se le genere"
+        )
+    # Y el tercer caso: el neto cayó JUSTO en cero porque la deuda de la quincena pasada
+    # se llevó lo que faltaba. "No tiene saldo pendiente" es verdad pero no explica nada;
+    # este aviso dice de dónde salió el cero.
+    por_la_deuda = _no_sale_un_peso_por_la_deuda(liquidacion)
+    if por_la_deuda is not None:
+        return "sin_un_peso", por_la_deuda
+    return "saldada", "Esta liquidación no tiene saldo pendiente por pagar"
+
+
+# Las acciones de la pantalla del detalle que la deuda ya cobrada puede trabar, con el
+# permiso que pide cada una en el router y la pregunta que hace su guardia.
+_ACCIONES_DE_LA_DEUDA_COBRADA = (
+    ("anular", "administrar", _razon_para_no_anular),
+    ("corregir", "administrar", _razon_para_no_corregir),
+    ("recalcular", "editar", _razon_para_no_recalcular),
+    ("precio", "editar", _razon_para_no_cambiar_el_precio),
+    ("eliminar_pago", "eliminar", _razon_para_no_borrar_un_pago),
+)
+# Y las que traba la deuda cobrada QUE YA NO CUADRA, en cualquiera de sus dos puntas
+# (`_deuda_cobrada_que_no_cuadra`). Pagar y Abonar piden 'administrar' en el router, pero
+# estas dos NO se filtran por el permiso: el descuadre es un hecho de la fila, y sin él la
+# pantalla de Compras o de Consulta le decía "el pago lo registra un Administrador" sobre
+# un pago que el servidor le rebota también al Administrador. El consejo de adentro ya va
+# dicho para quien pregunta (`_aviso_de_la_que_dejo_la_deuda`, `_consejo_para_la_que_cobro`).
+_ACCIONES_DE_LA_DEUDA_QUE_NO_CUADRA = (
+    ("pagar", _razon_para_no_pagar),
+    ("registrar_pago", _razon_para_no_abonar),
+)
+
+
+def avisos_deuda_cobrada(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> dict[str, str]:
+    """Para cada botón que hoy rebota POR LA DEUDA YA COBRADA, el texto exacto del 422.
+
+    Es lo que lee la pantalla (`LiquidacionRead.avisos_deuda_cobrada`) en vez de armar
+    su copia: la copia no podía saber si la otra quincena se deja anular —no trae su
+    estado, su versión ni sus pagos— y repetía "anule primero esa liquidación" donde el
+    servidor después rebotaba. Aquí cada texto sale de la MISMA función que usa el
+    guardia de esa acción, así que el candado de la pantalla y el 422 no pueden decir
+    cosas distintas.
+
+    Una clave entra solo si el 422 de esa acción, sobre esta fila y para quien pregunta,
+    es el de la deuda ya cobrada. Las acciones para las que no tiene permiso no van: ahí
+    el servidor contesta 403 y la pantalla ni pinta el botón. 'eliminar_pago' va solo si
+    hay pagos que borrar.
+
+    'pagar' y 'registrar_pago' van cuando la deuda cobrada YA NO CUADRA, en la que la dejó
+    o en la que la cobró (ver la nota de `_deuda_cobrada_que_no_cuadra`): son las filas que
+    dejó el borrado de pagos de antes, y sin la clave la pantalla pintaría un Pagar que
+    siempre rebota. Esas dos van PARA TODO EL QUE LEE LA FILA, tenga o no el permiso de
+    Pagar: son un hecho de la fila, no de quien la mira. Medido con Henri y Q2 aprobada:
+    sin ellas, Compras y Consulta leían "el pago lo registra un Administrador de la
+    empresa" en las dos quincenas, y el Administrador recibía 422 en las dos. Su consejo
+    ya va dicho para quien pregunta ("pídale a un Administrador … y que después pague
+    esta").
+
+    Sin deuda cobrada ni deuda vieja que cobrar devuelve {} sin leer nada más: en el
+    listado no le cuesta una consulta a ninguna fila normal. En las que sí la tienen usa la
+    otra punta, que el listado carga de una vez para toda la página
+    (`LiquidacionRepository.pagina_del_listado`).
+    """
+    cobrada = liquidacion.deuda_ya_cobrada
+    if not cobrada and Decimal(liquidacion.saldo_anterior or 0) <= CERO:
+        return {}
+    avisos: dict[str, str] = {}
+    if cobrada:
+        for accion, permiso, razon_de in _ACCIONES_DE_LA_DEUDA_COBRADA:
+            if not _puede(ctx, permiso):
+                continue
+            if accion == "eliminar_pago" and not liquidacion.pagos:
+                continue
+            razon = razon_de(liquidacion, ctx)
+            if razon is not None and razon[0] == "deuda_cobrada":
+                avisos[accion] = razon[1]
+    for accion, razon_de in _ACCIONES_DE_LA_DEUDA_QUE_NO_CUADRA:
+        razon = razon_de(liquidacion, ctx)
+        if razon is not None and razon[0] == "deuda_que_no_cuadra":
+            avisos[accion] = razon[1]
+    return avisos
+
+
+# Las acciones que la deuda borrada por la migración traba, con el permiso que pide cada
+# una en el router y la pregunta que hace su guardia. Las cuatro van por
+# `_deuda_borrada_que_rebota`, así que la respuesta y el 422 salen del mismo guardia.
+_ACCIONES_DE_LA_DEUDA_BORRADA = (
+    ("corregir", "administrar", _razon_para_no_corregir),
+    ("pagar", "administrar", _razon_para_no_pagar),
+    ("registrar_pago", "administrar", _razon_para_no_abonar),
+    ("anular", "administrar", _razon_para_no_anular),
+)
+
+
+def avisos_deuda_borrada(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> dict[str, str]:
+    """`LiquidacionRead.avisos_deuda_borrada`: para cada botón que la deuda borrada por la
+    migración traba, el texto exacto de su 422 (`_aviso_deuda_borrada` con el verbo de esa
+    acción).
+
+    La pantalla tenía su propia redacción para los candados de Corregir, Pagar y Anular de
+    esa fila, y medida no era la del servidor: en la de Arriba v2 (saldo $200.000, borrada
+    $120.000) el candado de Pagar decía "le pagaría esos $ 120.000 de más" y el 422 "El
+    saldo dice $200.000, pero lo que de verdad falta entregarle es $80.000". Con este
+    campo cada candado pinta el 422 de su botón, preguntado a la MISMA función que usa su
+    guardia (`_razon_para_no_corregir`, `_razon_para_no_pagar`, `_razon_para_no_abonar`,
+    `_razon_para_no_anular`).
+
+    Igual que `avisos_deuda_cobrada`: solo las acciones para las que quien pregunta tiene
+    permiso (a las demás el servidor les contesta 403), y {} en toda fila sin deuda
+    borrada, sin leer nada más que sus pagos, que ya vienen cargados.
+    """
+    if liquidacion.deuda_borrada_por_la_migracion <= CERO:
+        return {}
+    avisos: dict[str, str] = {}
+    for accion, permiso, razon_de in _ACCIONES_DE_LA_DEUDA_BORRADA:
+        if not _puede(ctx, permiso):
+            continue
+        razon = razon_de(liquidacion, ctx)
+        if razon is not None and razon[0] == "deuda_borrada":
+            avisos[accion] = razon[1]
+    return avisos
+
+
+def aviso_sin_un_peso_por_la_deuda(
+    liquidacion: Liquidacion, ctx: RequestContext | None = None
+) -> str | None:
+    """`LiquidacionRead.aviso_sin_un_peso_por_la_deuda`: el 422 de Pagar cuando la deuda de
+    la quincena pasada se llevó el neto, o None si Pagar no rebota por eso.
+
+    La pantalla copiaba las tres condiciones de `_no_sale_un_peso_por_la_deuda` para
+    esconder "Marcar pagada" y escribía su propio porqué ("un aviso que no es cierto",
+    que dejó de ser cierto). Aquí la pregunta es la de Pagar entera, en su orden
+    (`_razon_para_no_pagar`): si antes rebota por otra cosa —la deuda borrada, el estado,
+    la deuda cobrada que ya no cuadra— este campo va en None y el porqué es el de esa otra.
+    No depende de los permisos: dice un hecho de la fila, no nombra ningún botón.
+    """
+    razon = _razon_para_no_pagar(liquidacion, ctx)
+    return razon[1] if razon is not None and razon[0] == "sin_un_peso" else None
 
 
 def _exigir_sin_deuda_borrada(liquidacion: Liquidacion, verbo: str) -> None:
@@ -1662,39 +2692,168 @@ def _aviso_deuda_borrada(liquidacion: Liquidacion, verbo: str) -> str | None:
         entregaría $120.000 de más.
     Si parte de lo que debe ya se le cobró en otra quincena (la columna saldo negativa
     que viajó), esa parte no se cuenta como pendiente: se nombra aparte.
+
+    Las dos piezas que también dicen la pantalla y el papel —de dónde viene la deuda
+    borrada y la posición de hoy— salen de `_de_donde_viene_la_deuda_borrada` y de
+    `posicion_de_hoy`; aquí solo se les pone el "no se puede" delante y la consecuencia
+    detrás.
+    """
+    posicion = posicion_de_hoy(liquidacion)
+    if posicion is None:
+        return None
+    borrada = liquidacion.deuda_borrada_por_la_migracion
+    inicio = (
+        f"No se puede {verbo} esta quincena: {_de_donde_viene_la_deuda_borrada(borrada)}."
+    )
+    reparar = "Hay que repararla antes de tocarla"
+    if borrada - Decimal(liquidacion.saldo or 0) > CERO:
+        return (
+            f"{inicio} {posicion}. {reparar}: tal como está, el sistema le sumaría esos "
+            f"{pesos(borrada)} a lo que falta por entregarle y mandaría a pagarle a "
+            "alguien que todavía debe"
+        )
+    return (
+        f"{inicio} {posicion}, así que pagarle el saldo le entregaría {pesos(borrada)} de "
+        f"más. {reparar}"
+    )
+
+
+def _de_donde_viene_la_deuda_borrada(borrada: Decimal) -> str:
+    """'viene de antes de que existieran los abonos, y …': el hecho, con la cifra.
+
+    Lo dicen el 422 (`_aviso_deuda_borrada`) y el AVISO del PDF con estas mismas
+    palabras: el dueño lee el rebote en la pantalla y el papel con la calculadora al
+    lado, y dos redacciones del mismo hecho le harían buscar dos cosas distintas.
+    """
+    return (
+        "viene de antes de que existieran los abonos, y el sistema de esa época le borró "
+        f"lo que el tercero quedaba debiendo ({pesos(borrada)})"
+    )
+
+
+def posicion_de_hoy(liquidacion: Liquidacion) -> str | None:
+    """CÓMO ESTÁ HOY LA FILA CON DEUDA BORRADA, en una frase; None si no le borraron nada.
+
+    Es la frase que cambia de una fila a otra, y la que el dueño tiene que poder creerle
+    a cualquiera de las tres superficies que la dicen: el 422 de Pagar, Corregir y los
+    demás guardias (`_aviso_deuda_borrada`), el aviso rojo de la pantalla
+    (`LiquidacionRead.aviso_deuda_borrada`) y el AVISO del PDF. La pantalla hacía la
+    cuenta por su lado y el papel no decía nada: la migrada de $180.000 contra $300.000,
+    corregida con un día de $50.000, imprimía "SALDO A PAGAR $50.000" mientras el
+    servidor decía que el tercero todavía debe $70.000.
+
+    La verdad de la fila es saldo − borrada (lo que falta entregar), así que lo que él
+    debe hoy es borrada − saldo, y cae de cualquiera de los dos lados:
+      · él debe: "Hoy el tercero todavía le debe $70.000 a la quesera". Si parte ya se
+        le cobró en otra quincena (la de precio bajado a $1.500: saldo −$45.000 cobrado
+        en la siguiente) esa parte se nombra aparte y no se cuenta dos veces: "$120.000,
+        aparte de los $45.000 que ya se le cobraron";
+      · la quesera le debe menos que el saldo (la corregida con $200.000 más): "El saldo
+        dice $200.000, pero lo que de verdad falta entregarle es $80.000: los otros
+        $120.000 son la deuda que borró la migración", o en cero, "de verdad no falta
+        entregarle nada: esos $120.000 son la deuda que borró la migración".
+    "LOS OTROS" SOLO CUANDO HAY UNOS PRIMEROS. En cero el saldo entero es lo borrado —la
+    corregida a $300.000 contra $300.000 de adelanto: saldo $120.000, borrados $120.000—,
+    y "los otros $120.000" se leía como si quedaran otros $120.000 aparte: son esos mismos.
+    Sin punto final, como los textos de los 422: quien la pega le pone lo que sigue.
     """
     borrada = liquidacion.deuda_borrada_por_la_migracion
     if borrada <= CERO:
         return None
     saldo = Decimal(liquidacion.saldo or 0)
     debe_hoy = borrada - saldo
-    inicio = (
-        f"No se puede {verbo} esta quincena: viene de antes de que existieran los abonos, "
-        "y el sistema de esa época le borró lo que el tercero quedaba debiendo "
-        f"({pesos(borrada)})."
-    )
-    reparar = "Hay que repararla antes de tocarla"
     if debe_hoy > CERO:
         cobrada = liquidacion.le_queda_debiendo if liquidacion.deuda_ya_cobrada else CERO
         hoy = f"Hoy el tercero todavía le debe {pesos(debe_hoy - cobrada)} a la quesera"
         if cobrada > CERO:
             hoy += f", aparte de los {pesos(cobrada)} que ya se le cobraron en otra quincena"
-        return (
-            f"{inicio} {hoy}. {reparar}: tal como está, el sistema le sumaría esos "
-            f"{pesos(borrada)} a lo que falta por entregarle y mandaría a pagarle a "
-            "alguien que todavía debe"
-        )
+        return hoy
     falta = saldo - borrada
-    de_verdad = (
-        f"lo que de verdad falta entregarle es {pesos(falta)}"
-        if falta > CERO
-        else "de verdad no falta entregarle nada"
-    )
+    if falta > CERO:
+        return (
+            f"El saldo dice {pesos(saldo)}, pero lo que de verdad falta entregarle es "
+            f"{pesos(falta)}: los otros {pesos(borrada)} son la deuda que borró la migración"
+        )
     return (
-        f"{inicio} El saldo dice {pesos(saldo)}, pero {de_verdad}: los otros "
-        f"{pesos(borrada)} son la deuda que borró la migración, así que pagarle el saldo "
-        f"le entregaría {pesos(borrada)} de más. {reparar}"
+        f"El saldo dice {pesos(saldo)}, pero de verdad no falta entregarle nada: esos "
+        f"{pesos(borrada)} son la deuda que borró la migración"
     )
+
+
+def aviso_deuda_borrada(liquidacion: Liquidacion) -> str | None:
+    """`LiquidacionRead.aviso_deuda_borrada`: la posición de hoy de la fila que hay que
+    reparar, o None.
+
+    Con el MISMO universo que la tarjeta "por reparar" (`por_reparar`) y la marca de la
+    pantalla: deuda borrada y NO anulada. La anulada no vale nada —no se paga ni se debe,
+    y al anularse soltó sus anticipos—, así que decirle "hoy el tercero todavía le debe"
+    sería falso. El AVISO del PDF usa esta misma función.
+    """
+    if liquidacion.estado == ESTADO_ANULADA:
+        return None
+    return posicion_de_hoy(liquidacion)
+
+
+def lo_que_se_le_pago_de_mas(neto: Decimal, pagado: Decimal) -> Decimal:
+    """LO QUE SE LE PAGÓ DE MÁS: la deuda del tercero cuando TODA es efectivo entregado por
+    encima del neto; CERO en las demás.
+
+    Es la pregunta del renglón de cierre del PDF ("SE LE PAGÓ DE MÁS" o "LE QUEDA
+    DEBIENDO") y la de la vista previa de Corregir, escrita una vez para las dos: el neto
+    en cero o por encima, y se le entregó más que eso. Si el neto ya está por debajo de
+    cero lo pusieron los anticipos (o la deuda de la quincena pasada), y la palabra es "le
+    queda debiendo" aunque además haya salido efectivo.
+
+    Medido por la puerta de Corregir: 250 L × $2.000 = $500.000 con $300.000 de anticipo,
+    pagada con $200.000 y corregida a $1.000 el litro: valor $250.000, neto −$50.000,
+    pagado $200.000, debe $250.000. El papel cierra en "LE QUEDA DEBIENDO $250.000", y la
+    vista previa decía "se le pagó de más" $250.000 y que "esa plata ya salió de la caja en
+    efectivo", cuando en efectivo salieron $200.000: los otros $50.000 son anticipo que pasó
+    del valor.
+    """
+    if neto >= CERO and pagado > neto:
+        return pagado - neto
+    return CERO
+
+
+def _aviso_le_queda_debiendo(
+    debe: Decimal,
+    valor_total: Decimal,
+    anticipos: Decimal,
+    arrastrada: Decimal,
+    pagado: Decimal,
+) -> str:
+    """El aviso de la vista previa de Corregir cuando la corrección deja al tercero
+    debiendo y NO todo es efectivo entregado de más (`lo_que_se_le_pago_de_mas` en cero).
+
+    Nombra de dónde sale cada peso, y las partes suman la deuda con calculadora. Con la de
+    arriba: "Le queda debiendo $250.000: ya se le habían entregado $200.000, y además los
+    anticipos aplicados ($300.000) pasan en $50.000 del valor total de la quincena
+    corregida ($250.000)" — 200.000 + 50.000 = 250.000, y 300.000 − 250.000 = 50.000. Sin
+    efectivo de por medio (la que sus anticipos cubrían exacto, corregida hacia abajo) la
+    deuda entera es lo que los anticipos pasan del valor, y no se repite la cifra.
+
+    `pagado` en cero o menos es "no salió efectivo": con pagado negativo la fila trae deuda
+    borrada, y a esa Corregir ya la rebotó antes de llegar aquí.
+    """
+    partes = []
+    if anticipos > CERO:
+        partes.append(f"los anticipos aplicados ({pesos(anticipos)})")
+    if arrastrada > CERO:
+        partes.append(f"lo que quedó debiendo de la quincena pasada ({pesos(arrastrada)})")
+    # "los anticipos … PASAN" aunque sean el único renglón; "lo que quedó debiendo … PASA".
+    pasan = f"{' y '.join(partes)} {'pasan' if anticipos > CERO else 'pasa'}"
+    valor = f"del valor total de la quincena corregida ({pesos(valor_total)})"
+    cobro = (
+        "Esa deuda se le descuenta de la quincena siguiente; si el productor deja de "
+        "entregar leche, no vuelve"
+    )
+    if pagado > CERO:
+        return (
+            f"Le queda debiendo {pesos(debe)}: ya se le habían entregado {pesos(pagado)}, y "
+            f"además {pasan} en {pesos(debe - pagado)} {valor}. {cobro}"
+        )
+    return f"Le queda debiendo {pesos(debe)}: {pasan} {valor}. {cobro}"
 
 
 def _bloquear(db: Session, liquidacion: Liquidacion) -> Liquidacion:
@@ -2846,18 +4005,14 @@ class LiquidacionService(BaseService[Liquidacion]):
           alcanzar desde que la deuda de un borrador también viaja: corregirle el
           precio le cambiaría el `le_queda_debiendo` que ya está restado en un segundo
           comprobante, y descuadraría los dos papeles de una sola vez.
+
+        Las tres preguntas y su orden están en `_razon_para_no_cambiar_el_precio`, la
+        misma que lee la pantalla para el lápiz (`avisos_deuda_cobrada`).
         """
         liquidacion = self.repo.get_or_fail(entity_id)
-        _exigir_deuda_no_trasladada(liquidacion, "corregir el precio de un día de")
-        if liquidacion.estado != ESTADO_BORRADOR:
-            raise BusinessError(
-                f"Esta liquidación está en '{liquidacion.estado}': solo se puede "
-                "corregir el precio mientras sea un borrador"
-            )
-        if liquidacion.tipo != TIPO_PROVEEDOR:
-            raise BusinessError(
-                "Solo se puede corregir el precio por litro en liquidaciones de proveedor"
-            )
+        razon = _razon_para_no_cambiar_el_precio(liquidacion, self.ctx)
+        if razon is not None:
+            raise BusinessError(razon[1])
 
         detalle = next(
             (d for d in liquidacion.detalles if d.id == detalle_id and d.deleted_at is None), None
@@ -3057,37 +4212,13 @@ class LiquidacionService(BaseService[Liquidacion]):
     def _exigir_corregible(self, liquidacion: Liquidacion) -> None:
         """Las condiciones para poder corregir. En este orden y sin saltarse una.
 
-        El orden importa: la deuda borrada por la migración va de PRIMERA porque no
-        tiene salida dentro del sistema (ver `_exigir_sin_deuda_borrada`); con las dos,
-        mandar antes a anular la otra liquidación sería anularla para nada. Después
-        `_exigir_deuda_no_trasladada`, porque su respuesta es "no se puede, y esto es
-        lo que hay que hacer primero" — el mensaje nombra la otra liquidación. Si fuera
-        de último, el dueño leería antes un "solo se corrigen las de proveedor" que no
-        le sirve.
+        La pregunta, el orden y sus porqués están en `por_que_no_se_corrige`: es la misma
+        que hacen quienes aconsejan Corregir (las observaciones, el adelanto que soltó una
+        corrección, el día en Recepción diaria), así que no puede haber una copia aquí.
         """
-        # LA QUE TRAE LA DEUDA BORRADA POR LA MIGRACIÓN: corregida tal como está, le
-        # suma la deuda borrada a lo que falta por entregar.
-        _exigir_sin_deuda_borrada(liquidacion, "corregir")
-        # LA VENTANA DE LA CORRECCIÓN SE CIERRA CUANDO LA DEUDA VIAJA, y no se abre ni
-        # para el Administrador Empresa. La razón está en el papel, no en la política:
-        # el renglón del resumen sale de la COLUMNA CONGELADA `saldo_anterior` de la
-        # otra liquidación, mientras la nota al pie imprime `le_queda_debiendo` EN VIVO
-        # desde esta. Mover un peso aquí hace que esa hoja se contradiga sola: "− $120.000"
-        # arriba y "donde quedó debiendo $60.000" abajo, en un papel que el dueño suma
-        # con calculadora. Y esa hoja también puede estar ya en la mano del productor.
-        _exigir_deuda_no_trasladada(liquidacion, "corregir")
-        if liquidacion.tipo != TIPO_PROVEEDOR:
-            raise BusinessError(
-                "Solo se puede corregir una quincena de leche. Para el flete, genere un "
-                "segundo comprobante del período: una liquidación pagada no reserva sus "
-                "fechas, así que el día anotado tarde entra ahí"
-            )
-        if liquidacion.estado not in (ESTADO_PAGADA, ESTADO_PARCIAL):
-            raise BusinessError(
-                f"Esta liquidación está en '{liquidacion.estado}': la corrección es solo "
-                "para las que ya se pagaron. Esta todavía se puede editar por el camino "
-                "normal"
-            )
+        aviso = por_que_no_se_corrige(liquidacion, self.ctx)
+        if aviso is not None:
+            raise BusinessError(aviso)
 
     def _nombre_de_quien_corrige(self) -> str | None:
         usuario = getattr(self.ctx, "user", None)
@@ -3397,9 +4528,25 @@ class LiquidacionService(BaseService[Liquidacion]):
         """El antes y el después, sin escribir un peso.
 
         Es la calculadora del dueño puesta en la pantalla: ve la cifra que va a quedar y
-        la compara con el papel que tiene al lado ANTES de confirmar. No toma el candado
-        de escritura a propósito —no escribe— pero por eso mismo su resultado es una
+        la compara con el papel que tiene al lado ANTES de confirmar. Su resultado es una
         foto: la corrección de verdad vuelve a calcular todo con el candado puesto.
+
+        PERO ESA FOTO TIENE QUE SER UNA SOLA, y por eso toma el candado aunque no escriba.
+        La deuda borrada es Σ(pagos) − pagado, y las dos mitades salen de dos SELECT (la
+        fila y su colección selectin): sin candado, un abono que otro usuario confirmara
+        entre los dos hacía rebotar una quincena normal con el aviso de la migración.
+        Medido en Postgres: la de agosto de $250.000 con pagos de $60.000 + $40.000 +
+        $50.000 + $10.000 recibía, con un abono ajeno de $5.000 en el medio, "le borró lo
+        que el tercero quedaba debiendo ($5.000) … le entregaría $5.000 de más", y sin la
+        carrera la misma vista previa daba 200 con $85.000 antes y $97.500 después.
+        Se escogió `_bloquear` y no sumar los pagos en la misma sentencia porque es el
+        mismo candado de Pagar, Anular, Corregir y las observaciones: todo el que escribe
+        pagos lo toma, así que mientras se tiene nadie cambia ninguna de las dos mitades,
+        y `populate_existing` las relee después de él —también el `pagado` con que se
+        calcula el saldo de abajo—. Sumarlos en el SELECT solo arreglaría la deuda
+        borrada y dejaría el resto de la foto con la lectura vieja. El costo es frenar
+        unos milisegundos a quien esté pagando esa misma quincena; la transacción termina
+        con la respuesta.
         """
         from app.modules.liquidaciones.schemas import (
             AnticipoDeLaQuincena,
@@ -3408,6 +4555,7 @@ class LiquidacionService(BaseService[Liquidacion]):
         )
 
         liquidacion = self.repo.get_or_fail(entity_id)
+        liquidacion = _bloquear(self.db, liquidacion)
         self._exigir_corregible(liquidacion)
 
         sueltos = self._dias_sueltos_del_periodo(liquidacion)
@@ -3435,12 +4583,30 @@ class LiquidacionService(BaseService[Liquidacion]):
                 "Esto NO le entrega la plata: deja pendiente lo que falta. Después hay "
                 "que oprimir Pagar"
             )
-        if saldo < CERO:
+        # "SE LE PAGÓ DE MÁS" SOLO CUANDO TODA LA DEUDA ES EFECTIVO ENTREGADO DE MÁS, con la
+        # pregunta del renglón de cierre del PDF (`lo_que_se_le_pago_de_mas`). Si no, la
+        # deuda se dice como la dice el papel —"le queda debiendo"— y con de dónde sale
+        # cada peso (`_aviso_le_queda_debiendo`).
+        pagado = Decimal(liquidacion.pagado or 0)
+        de_mas = lo_que_se_le_pago_de_mas(neto, pagado)
+        debe = -saldo if saldo < CERO else CERO
+        if de_mas > CERO:
             avisos.append(
                 "Se le pagó de más. Esa plata ya salió de la caja en efectivo y se "
                 "recupera descontándola de la quincena siguiente, igual que un anticipo; "
                 "si el productor deja de entregar leche, no vuelve"
             )
+        elif debe > CERO:
+            avisos.append(
+                _aviso_le_queda_debiendo(
+                    debe,
+                    valor_total,
+                    sim.anticipos,
+                    Decimal(liquidacion.saldo_anterior or 0),
+                    pagado,
+                )
+            )
+        if saldo < CERO:
             avisos.append(
                 "Mientras esa deuda no se le cobre, este productor sale en 'omitidas' si "
                 "se intenta generar otro comprobante que se pise con este período. Se "
@@ -3516,7 +4682,10 @@ class LiquidacionService(BaseService[Liquidacion]):
                 else (ESTADO_PARCIAL if saldo > CERO else ESTADO_PAGADA)
             ),
             queda_por_entregar=saldo if saldo > CERO else CERO,
-            se_le_pago_de_mas=-saldo if saldo < CERO else CERO,
+            # Las dos maneras de deber, con el rótulo del PDF: una de las dos es la deuda
+            # entera y la otra cero (queda_por_entregar − estas dos = saldo_despues).
+            se_le_pago_de_mas=de_mas,
+            le_queda_debiendo=debe - de_mas,
             version_actual=liquidacion.version,
             avisos=avisos,
         )
@@ -4111,17 +5280,15 @@ class LiquidacionService(BaseService[Liquidacion]):
         exacta después de recalcular.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
-        # Y SI LA DEUDA DE ESTA YA SE COBRÓ EN OTRA, no se recalcula: cambiarle el
-        # total le cambiaría el descuento a un comprobante ya emitido. Este es el
+        # Solo un borrador, y si la deuda de esta ya se cobró en otra, tampoco: cambiarle
+        # el total le cambiaría el descuento a un comprobante ya emitido. Este es el
         # camino por el que de verdad llega —el recuadre automático de una recepción
         # editada la devuelve a borrador y entra por acá—, y por eso el guardia está
-        # aquí y no solo en `recuadrar`.
-        _exigir_deuda_no_trasladada(liquidacion, "recalcular")
-        if liquidacion.estado != ESTADO_BORRADOR:
-            raise BusinessError(
-                f"Esta liquidación está en '{liquidacion.estado}': solo se puede "
-                "recalcular mientras sea un borrador"
-            )
+        # aquí y no solo en `recuadrar`. El orden (el estado primero) está explicado en
+        # `_razon_para_no_recalcular`.
+        razon = _razon_para_no_recalcular(liquidacion, self.ctx)
+        if razon is not None:
+            raise BusinessError(razon[1])
         antes = serialize_entity(liquidacion)
         total_antes = Decimal(liquidacion.valor_total or 0)
         transporte_antes = Decimal(liquidacion.valor_transporte or 0)
@@ -4299,7 +5466,12 @@ class LiquidacionService(BaseService[Liquidacion]):
         # borrador (y quedado en la bitácora) para rebotar un renglón después. Rebota
         # de una y no escribe nada. El candado de Recepción diaria además lo para más
         # arriba, con el mismo motivo, para que el usuario lo lea en el día que editó.
-        _exigir_deuda_no_trasladada(liquidacion, "volver a cuadrar")
+        _exigir_deuda_no_trasladada(
+            liquidacion,
+            "volver a cuadrar",
+            self.ctx,
+            por_que_sigue=por_que_seguiria_congelada(liquidacion),
+        )
         if liquidacion.estado == ESTADO_PAGADA:
             raise BusinessError(
                 "Esta liquidación ya está pagada: sus días no se pueden modificar"
@@ -4375,39 +5547,13 @@ class LiquidacionService(BaseService[Liquidacion]):
     def _exigir_pagable(self, liquidacion: Liquidacion) -> None:
         """Solo se le abona a una liquidación EN FIRME y que todavía deba algo.
 
-        En borrador no, y esto no es formalismo: un borrador se recalcula solo
-        cuando cambian las recepciones o entra un anticipo, así que el total
-        contra el que se abonó puede cambiar debajo del pago y dejarlo
-        descuadrado. Aprobar es justamente el momento en que las cifras quedan
-        en firme.
+        La pregunta, el orden y sus porqués están en `_razon_para_no_abonar`: es la misma
+        que lee la respuesta para no ofrecer Abonar donde rebota, así que aquí no puede
+        haber una copia.
         """
-        # Primero la deuda borrada por la migración: sobre esa fila el saldo trae la
-        # deuda sumada, y abonarle es entregarle plata a quien todavía debe.
-        _exigir_sin_deuda_borrada(liquidacion, "registrarle un pago a")
-        if liquidacion.estado not in (ESTADO_APROBADA, ESTADO_PARCIAL):
-            raise BusinessError(
-                f"Esta liquidación está en '{liquidacion.estado}': solo se le puede "
-                "pagar a una liquidación aprobada"
-            )
-        if Decimal(liquidacion.saldo) <= CERO:
-            # Dos mensajes, porque son dos situaciones distintas: la saldada no tiene
-            # nada pendiente y ya está; en la otra es EL TERCERO el que debe, y lo que
-            # el usuario necesita saber es que esa plata no se pierde —se le cobra en la
-            # próxima— y no que "no hay saldo", que suena a que la cuenta está en ceros.
-            debe = Decimal(liquidacion.le_queda_debiendo or 0)
-            if debe > CERO:
-                raise BusinessError(
-                    f"A esta liquidación no se le puede abonar: el tercero le quedó "
-                    f"debiendo {pesos(debe)}, y ese saldo se le cobra en la próxima "
-                    "liquidación que se le genere"
-                )
-            # Y el tercer caso: el neto cayó JUSTO en cero porque la deuda de la
-            # quincena pasada se llevó lo que faltaba. "No tiene saldo pendiente" es
-            # verdad pero no explica nada; este aviso dice de dónde salió el cero.
-            por_la_deuda = _no_sale_un_peso_por_la_deuda(liquidacion)
-            if por_la_deuda is not None:
-                raise BusinessError(por_la_deuda)
-            raise BusinessError("Esta liquidación no tiene saldo pendiente por pagar")
+        razon = _razon_para_no_abonar(liquidacion, self.ctx)
+        if razon is not None:
+            raise BusinessError(razon[1])
 
     def registrar_pago(self, entity_id: uuid.UUID, payload: Any) -> Liquidacion:
         """Registra un pago parcial (abono) contra una liquidación aprobada.
@@ -4466,6 +5612,21 @@ class LiquidacionService(BaseService[Liquidacion]):
         pago = next((p for p in liquidacion.pagos if p.id == pago_id), None)
         if pago is None:
             raise NotFoundError("Pago no encontrado")
+        # NO SE LE BORRA EL PAGO A LA QUE DEJÓ UNA DEUDA QUE YA SE COBRÓ EN OTRA. Era el
+        # último camino que le movía las cifras a un origen congelado, y la plata dejaba
+        # de cuadrar. Henri: la del 01/06 (250 L × $2.000) pagada con $500.000 y corregida
+        # a $1.600 vale $400.000 y debe $100.000; la del 16/06 (150 L × $2.000) se los
+        # cobra y queda en $200.000. Se borraba el pago de $500.000: la primera pasaba a
+        # 'parcial' con $400.000 por pagar y debiendo $0, la segunda seguía descontando
+        # los $100.000, y pagando las dos salían $600.000 por $700.000 de leche. Henri
+        # quedaba con $100.000 a su favor que ninguna pantalla mostraba.
+        #
+        # Va DESPUÉS del candado, que relee la marca que Generar pone con su propio FOR
+        # UPDATE, y ANTES de tocar los soportes: un rebote no se puede llevar las fotos de
+        # la transferencia. Qué mira y qué no, en `_razon_para_no_borrar_un_pago`.
+        razon = _razon_para_no_borrar_un_pago(liquidacion, self.ctx)
+        if razon is not None:
+            raise BusinessError(razon[1])
         valor = Decimal(pago.valor)
         # LOS SOPORTES SE VAN CON EL PAGO, y sus FILAS antes de borrarlo. Sin esto,
         # la foto de la transferencia quedaba en el bucket para siempre: el pago ya
@@ -4547,24 +5708,21 @@ class LiquidacionService(BaseService[Liquidacion]):
         pasar. Ver `_no_sale_un_peso_por_la_deuda`, que trae las cifras.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
-        # Antes que todo, igual que al abonar (`_exigir_pagable`): con la deuda borrada
-        # por la migración, "el saldo" que este botón pagaría es esa deuda sumada.
-        _exigir_sin_deuda_borrada(liquidacion, "pagar")
-        if liquidacion.estado not in (ESTADO_APROBADA, ESTADO_PARCIAL):
-            raise BusinessError(
-                f"No se puede pasar de '{liquidacion.estado}' a '{ESTADO_PAGADA}'"
-            )
-        debe = Decimal(liquidacion.le_queda_debiendo or 0)
-        if debe > CERO:
-            raise BusinessError(
-                f"Esta liquidación no hay que pagarla: el tercero le quedó debiendo "
-                f"{pesos(debe)}, y ese saldo se le cobra en la próxima liquidación que "
-                f"se le genere. Déjela en '{ESTADO_APROBADA}'; marcarla pagada sin que "
-                "salga un peso trabaría los días de la quincena sin razón"
-            )
-        por_la_deuda = _no_sale_un_peso_por_la_deuda(liquidacion)
-        if por_la_deuda is not None:
-            raise BusinessError(por_la_deuda)
+        # CON EL CANDADO PUESTO ANTES DE MIRAR UNA CIFRA, igual que al abonar. La deuda
+        # borrada es Σ(pagos) − pagado, y las dos mitades salen de dos SELECT distintos (la
+        # fila y su colección selectin). Sin candado, un abono de $50.000 que otro usuario
+        # confirme entre los dos hacía rebotar una quincena normal de agosto —pagado
+        # $100.000 y pagos de $60.000 + $40.000— con el aviso de la migración por
+        # "$50.000 borrados". Con el FOR UPDATE nadie más registra un pago en el medio y
+        # `populate_existing` relee las dos mitades después de él.
+        liquidacion = _bloquear(self.db, liquidacion)
+        # LA MISMA PREGUNTA QUE LEE LA PANTALLA, en su orden (ver `_razon_para_no_pagar`):
+        # la deuda borrada antes que todo —"el saldo" que este botón pagaría trae esa
+        # deuda sumada—, el estado, la deuda cobrada que ya no cuadra, el tercero que
+        # quedó debiendo y el neto que se llevó la deuda arrastrada.
+        razon = _razon_para_no_pagar(liquidacion, self.ctx)
+        if razon is not None:
+            raise BusinessError(razon[1])
         pendiente = Decimal(liquidacion.saldo)
         if pendiente <= CERO:
             return self._transicionar(
@@ -4581,54 +5739,15 @@ class LiquidacionService(BaseService[Liquidacion]):
 
     def anular(self, entity_id: uuid.UUID) -> Liquidacion:
         liquidacion = self.repo.get_or_fail(entity_id)
-        # La deuda borrada por la migración, ANTES QUE TODO: los tres de abajo mandan a
-        # "Corregir esta quincena" o a anular otra, y sobre esta fila corregir rebota
-        # siempre: a la migrada de $180.000 contra $300.000 ya corregida (v2) el guardia
-        # de la versión le decía "use 'Corregir esta quincena'", y Corregir, "repararla".
-        _exigir_sin_deuda_borrada(liquidacion, "anular")
-        # No se anula la que DEJÓ una deuda que ya se cobró en otra: su
-        # `le_queda_debiendo` está restado en un segundo comprobante y anularla dejaría
-        # a ese comprobante cobrando una deuda de un documento anulado. El mensaje
-        # nombra cuál anular primero.
-        _exigir_deuda_no_trasladada(liquidacion, "anular")
-        # EL ORDEN DE ESTOS TRES GUARDIAS ES LO QUE DECIDE SI EL DUEÑO PIERDE PLATA
-        # SIGUIENDO EL MENSAJE. Se nombra PRIMERO la condición que NO tiene salida.
-        #
-        # Estuvo mal dos veces. Primero, 'pagada' iba antes que 'tiene_pagos', así que el
-        # mensaje que sí nombra una salida no se alcanzaba nunca y el dueño chocaba con
-        # un muro mudo. Se invirtió — y eso destapó algo peor en cuanto apareció la
-        # corrección: sobre una quincena CORREGIDA, el guardia de 'tiene_pagos' se
-        # disparaba primero y decía "elimine primero los pagos". El dueño lo hacía,
-        # borraba un pago de $200.000 —Y CON ÉL LAS FOTOS DE LA TRANSFERENCIA, que se van
-        # del bucket y no vuelven— y recién entonces chocaba con el muro de verdad: "de
-        # esta quincena ya salieron 2 comprobantes, no se puede anular". Un pago y su
-        # prueba destruidos para nada. Medido.
-        #
-        # Por eso la versión va de PRIMERA: es la única de las tres que no se puede
-        # deshacer con ningún paso. Y su mensaje no manda a borrar pagos, porque eso no
-        # abre nada: nombra la única puerta que existe, que es corregir.
-        if int(liquidacion.version or 1) > 1:
-            raise BusinessError(
-                f"De esta quincena ya salieron {liquidacion.version} comprobantes (el "
-                "original y sus correcciones): no se puede anular, y borrarle los pagos "
-                "tampoco la destraba. Para arreglarle una cifra use 'Corregir esta "
-                "quincena'"
-            )
-        # Anular suelta las recepciones y los anticipos para volver a liquidar el
-        # período. Con un abono hecho eso dejaría un pago colgando de un documento que ya
-        # no representa nada: primero se borra el pago.
-        if liquidacion.tiene_pagos:
-            raise BusinessError(
-                "No se puede anular una liquidación con pagos registrados: elimine "
-                "primero los pagos. Si lo único que necesita es arreglarle una cifra "
-                "—un día que faltó o un precio mal digitado— use 'Corregir esta "
-                "quincena': eso conserva los pagos y sus soportes"
-            )
-        if liquidacion.estado == ESTADO_PAGADA:
-            raise BusinessError(
-                "No se puede anular una liquidación ya pagada. Si lo que necesita es "
-                "arreglarle una cifra, use 'Corregir esta quincena'"
-            )
+        # Con el candado antes de preguntar, por lo mismo que en `pagar`: la deuda
+        # borrada y `tiene_pagos` leen `pagado` y los pagos, y un abono que entre en el
+        # medio no puede quedar colgando de una quincena que se está anulando.
+        liquidacion = _bloquear(self.db, liquidacion)
+        # LA MISMA PREGUNTA QUE LEE LA PANTALLA, en el orden que decide si el dueño
+        # pierde plata siguiendo el mensaje (ver `_razon_para_no_anular`).
+        aviso = por_que_no_se_anula(liquidacion, self.ctx)
+        if aviso is not None:
+            raise BusinessError(aviso)
         self._soltar_lo_apartado(
             liquidacion, "se anuló la liquidación que se estaba cobrando esta deuda"
         )
@@ -4751,6 +5870,11 @@ class LiquidacionService(BaseService[Liquidacion]):
         renglón de corrección para el valor total, y dejar el texto que se imprime al
         lado abierto de par en par.
         """
+        # Con el candado antes de preguntar, por lo mismo que en `pagar`: un abono que
+        # otro usuario confirme entre la lectura de `pagado` y la de los pagos haría decir
+        # "deuda borrada" a una quincena normal. `populate_existing` refresca este mismo
+        # objeto, que es el que `actualizar` escribe después.
+        obj = _bloquear(self.db, obj)
         # La deuda borrada por la migración va de primera, como en los demás guardias:
         # el mensaje de abajo manda a "Corregir esta quincena", que en esa fila rebota
         # siempre.
@@ -4760,8 +5884,11 @@ class LiquidacionService(BaseService[Liquidacion]):
         # "YA SE PAGÓ" SOLO SI ES VERDAD. Este guardia también traba la 'pagada' que
         # dejó el botón Pagar de antes con el tercero debiendo (pagado $0) y la corregida
         # en 'parcial' sin ningún pago, y a esas no se les pagó nada.
-        if pagada_sin_que_saliera_un_peso(obj):
-            hecho = f"Esta quincena quedó cerrada como pagada {por_que_no_salio_un_peso(obj)}"
+        # La frase es la misma que lee la pantalla (`cerrada_sin_pago`): la deuda borrada,
+        # que es lo único que la deja en None siendo pagada sin un peso, ya rebotó arriba.
+        sin_pago = cerrada_sin_pago(obj)
+        if sin_pago is not None:
+            hecho = sin_pago
         elif obj.estado == ESTADO_PAGADA:
             hecho = "Esta quincena ya se pagó"
         elif obj.tiene_pagos:
@@ -4776,14 +5903,17 @@ class LiquidacionService(BaseService[Liquidacion]):
         # Y SOLO PARA UNA CIFRA: Corregir no trae observaciones (con solo el motivo
         # rebota "no hay nada que corregir"), así que mandarlo ahí para arreglar la nota
         # es otro botón que siempre falla. La nota del papel emitido no se cambia.
-        try:
-            self._exigir_corregible(obj)
-            salida = (
-                ". Si lo que está mal es una cifra, use 'Corregir esta quincena', que deja "
-                "escrito el motivo y sube la versión del papel"
-            )
-        except BusinessError:
-            salida = ""
+        # Y A QUIEN NO TIENE EL BOTÓN SE LE DICE QUIÉN LO TIENE: a este guardia llega
+        # Compras ('editar'), y Corregir pide 'administrar'. Medido con la 'parcial' v2 de
+        # $216.000 (saldo $36.000): el 422 le decía "use 'Corregir esta quincena'" y su
+        # vista previa le contestaba 403 (`_usar_corregir`).
+        usar = _usar_corregir(obj, self.ctx)
+        salida = (
+            f". Si lo que está mal es una cifra, {usar}, que deja escrito el motivo y sube "
+            "la versión del papel"
+            if usar
+            else ""
+        )
         raise BusinessError(
             f"{hecho}: sus observaciones se imprimen en el comprobante ya emitido, y las "
             f"de un comprobante emitido no se cambian{salida}"
@@ -4801,7 +5931,9 @@ class LiquidacionService(BaseService[Liquidacion]):
           existe, y de paso soltaría sus días y sus anticipos para que otra liquidación
           se los vuelva a cobrar. Esa plata se contaría dos veces.
         """
-        _exigir_deuda_no_trasladada(obj, "eliminar")
+        _exigir_deuda_no_trasladada(
+            obj, "eliminar", self.ctx, por_que_sigue=por_que_seguiria_congelada(obj)
+        )
         if obj.tiene_pagos:
             raise BusinessError(
                 "No se puede eliminar una liquidación con pagos registrados: "
@@ -4918,7 +6050,9 @@ class LiquidacionService(BaseService[Liquidacion]):
         desde: date | None = None,
         hasta: date | None = None,
     ) -> tuple[list[Liquidacion], int]:
-        return self.repo.list_paginated(
+        # Con las dos puntas de la deuda cargadas para toda la página: la respuesta las lee
+        # en cada fila (ver `pagina_del_listado`).
+        return self.repo.pagina_del_listado(
             params,
             filters={"proveedor_id": proveedor_id},
             extra_criteria=[
@@ -4954,7 +6088,10 @@ class LiquidacionService(BaseService[Liquidacion]):
         abonar: la tarjeta prometía $50.000 que ningún botón entrega. Se sigue contando en
         "parciales" —la lista la muestra al tocar la tarjeta— y va aparte en
         `por_reparar`/`deuda_borrada`. La regla es `LiquidacionRepository.saldo_por_pagar`,
-        la misma del tablero y del balance.
+        la misma del tablero y del balance. Y `por_reparar` sale de
+        `LiquidacionRepository.deuda_por_reparar`, el mismo universo que cuentan el
+        tablero y el balance en su `quincenas_por_reparar`: sin filtros de tipo ni de
+        fechas, las tres pantallas dicen el mismo número.
         """
 
         def en(estado: str) -> Any:
@@ -4968,7 +6105,7 @@ class LiquidacionService(BaseService[Liquidacion]):
 
         borrada = Liquidacion.deuda_borrada_por_la_migracion
         por_pagar = and_(*LiquidacionRepository.saldo_por_pagar())
-        por_reparar = and_(Liquidacion.estado != ESTADO_ANULADA, borrada > CERO)
+        por_reparar = and_(*LiquidacionRepository.deuda_por_reparar())
         deben = and_(*LiquidacionRepository.deuda_sin_cobrar())
         stmt = (
             self.repo.base_query()
@@ -5036,14 +6173,16 @@ class LiquidacionService(BaseService[Liquidacion]):
             liquidacion.detalles, es_proveedor
         )
 
-        # El renglón "Pagado" solo aparece cuando de verdad se abonó algo. Sin él
-        # el comprobante de una liquidación a medio pagar mostraría un SALDO A
-        # PAGAR más chico que VALOR TOTAL menos anticipos, sin explicar por qué:
-        # el dueño cuadra estas cifras a mano y esa diferencia muda es justo lo
-        # que le hace perder la confianza en el papel.
+        # El renglón "Pagado" solo aparece cuando de verdad se abonó algo
+        # (`con_abonos`, la misma pregunta de la pantalla). Sin él el comprobante de una
+        # liquidación a medio pagar mostraría un SALDO A PAGAR más chico que VALOR TOTAL
+        # menos anticipos, sin explicar por qué: el dueño cuadra estas cifras a mano y
+        # esa diferencia muda es justo lo que le hace perder la confianza en el papel.
+        # Fuera de la deuda borrada, `con_abonos` es lo mismo que pagado > 0, así que en
+        # esas filas el renglón sale igual que siempre.
         pagado_rows = (
             [("Pagado", f"- {pesos(liquidacion.pagado)}", False)]
-            if Decimal(liquidacion.pagado or 0) > CERO
+            if liquidacion.con_abonos
             else []
         )
         # CON LA DEUDA BORRADA POR LA MIGRACIÓN, LA MISMA REGLA DE LA PANTALLA (el
@@ -5058,8 +6197,12 @@ class LiquidacionService(BaseService[Liquidacion]):
         if borrada > CERO:
             entregado = sum((Decimal(p.valor or 0) for p in liquidacion.pagos), CERO)
             pagado_rows = [
-                *([("Pagado", f"- {pesos(entregado)}", False)] if entregado > CERO else []),
-                ("Deuda borrada por la migración", f"+ {pesos(borrada)}", False),
+                *(
+                    [("Pagado", f"- {pesos(entregado)}", False)]
+                    if liquidacion.con_abonos
+                    else []
+                ),
+                (_ROTULO_DEUDA_BORRADA, f"+ {pesos(borrada)}", False),
             ]
 
         # EL ÚLTIMO RENGLÓN CAMBIA DE RÓTULO CUANDO EL SALDO QUEDA POR DEBAJO DE CERO,
@@ -5102,10 +6245,12 @@ class LiquidacionService(BaseService[Liquidacion]):
         # que no salió un peso en efectivo — y mandaría al dueño a buscar un pago que no
         # existe. Reproducido: lo cantaron cuatro pruebas de
         # tests/test_liquidacion_saldo_anterior.py y de test_liquidacion_saldo_negativo.py.
+        # La pregunta es una sola para el papel y para la vista previa de Corregir
+        # (`lo_que_se_le_pago_de_mas`): las dos dicen el mismo rótulo sobre la misma plata.
         debe = Decimal(liquidacion.le_queda_debiendo or 0)
         pagado_actual = Decimal(liquidacion.pagado or 0)
         neto_actual = liquidacion.neto_a_pagar
-        if debe > CERO and neto_actual >= CERO and pagado_actual > neto_actual:
+        if debe > CERO and lo_que_se_le_pago_de_mas(neto_actual, pagado_actual) > CERO:
             saldo_row = ("SE LE PAGÓ DE MÁS", pesos(debe), True)
         elif debe > CERO:
             saldo_row = ("LE QUEDA DEBIENDO", pesos(debe), True)
@@ -5205,28 +6350,44 @@ class LiquidacionService(BaseService[Liquidacion]):
             detalle_col_widths=detalle_anchos,
             detalle_wrap_cols=detalle_envuelven,
             resumen_rows=resumen_rows,
-            # LAS NOTAS DEL DÍA FIJO VAN PRIMERO: explican cómo se lee la tabla que el
+            # EL AVISO DE LA DEUDA BORRADA VA ANTES QUE TODO: dice que el renglón
+            # destacado de arriba no es lo que queda, y eso se tiene que leer antes de
+            # cualquier otra explicación de una cifra. Y antes, en especial, que la nota
+            # de la deuda trasladada ("no hay que volver a cobrarlo"), que sola se leería
+            # como si no quedara nada más que cobrar.
+            # LAS NOTAS DEL DÍA FIJO VAN DESPUÉS: explican cómo se lee la tabla que el
             # conductor acaba de mirar, y eso se lee antes que de dónde vino un descuento.
             # LAS DE LA CORRECCIÓN VAN DE ÚLTIMAS, y a propósito: las dos primeras
             # explican cómo se lee la tabla que el tercero acaba de mirar, y esta dice
             # que este papel reemplaza a otro. Es lo que se lee al final y con lo que se
             # queda, justo antes de firmar.
             notas_resumen=(
-                self._notas_del_dia_fijo(liquidacion.detalles)
+                self._aviso_de_la_deuda_borrada(liquidacion, saldo_row[0])
+                + self._notas_del_dia_fijo(liquidacion.detalles)
                 + self._notas_de_la_deuda(liquidacion)
                 + self._notas_de_la_correccion(liquidacion)
             ),
             anticipos_rows=anticipos_rows,
             pagos_rows=pagos_rows,
             observaciones=liquidacion.observaciones,
-            # La banda del encabezado, solo desde la v2. Sin ella, las dos hojas de la
-            # misma quincena se ven iguales a un metro de distancia: lo único que las
-            # distingue es el '-v2' pegado al folio, en gris y a 7 puntos.
-            marca=(
-                f"COMPROBANTE CORREGIDO (v{int(liquidacion.version or 1)})"
-                if int(liquidacion.version or 1) > 1
-                else None
-            ),
+            # La banda del encabezado. La de la versión, solo desde la v2: sin ella, las
+            # dos hojas de la misma quincena se ven iguales a un metro de distancia —lo
+            # único que las distingue es el '-v2' pegado al folio, en gris y a 7 puntos—.
+            # La de la deuda borrada va DEBAJO y no en su lugar: la corregida con la
+            # deuda borrada es las dos cosas, y quien tiene la hoja vieja necesita saber
+            # que esta la reemplaza.
+            marca=[
+                *(
+                    [f"COMPROBANTE CORREGIDO (v{int(liquidacion.version or 1)})"]
+                    if int(liquidacion.version or 1) > 1
+                    else []
+                ),
+                *(
+                    ["PENDIENTE DE REPARAR · VER EL AVISO"]
+                    if aviso_deuda_borrada(liquidacion) is not None
+                    else []
+                ),
+            ],
         )
         # SE ANOTA CUÁNDO SALIÓ EL PAPEL POR PRIMERA VEZ, y SOLO la primera.
         #
@@ -5455,6 +6616,34 @@ class LiquidacionService(BaseService[Liquidacion]):
             )
         return notas
 
+    @staticmethod
+    def _aviso_de_la_deuda_borrada(liquidacion: Liquidacion, rotulo_final: str) -> list[str]:
+        """El AVISO del papel de la fila con deuda borrada. Vacío en todas las demás.
+
+        EL PAPEL CUADRA Y AUN ASÍ MENTÍA. Desde que lleva el renglón "Deuda borrada por la
+        migración" la columna cierra exacto sobre el saldo guardado —que es la cifra que el
+        propio servidor declara falsa—, y en la hoja no había una palabra que lo dijera. La
+        migrada de $180.000 contra $300.000, corregida con un día de $50.000, imprimía
+        "SALDO A PAGAR $50.000" con las firmas de "Entregué conforme / Recibí conforme",
+        mientras el 422 de Pagar decía "Hoy el tercero todavía le debe $70.000 a la
+        quesera". Pagarle lo que dice el papel es entregarle $50.000 a quien debe $70.000.
+
+        Los renglones y el cierre NO se tocan: el dueño suma la columna con calculadora y
+        tiene que seguir cayendo exacto en el renglón destacado. Lo que se agrega es esta
+        nota, que nombra ese renglón y dice lo que de verdad queda, con la MISMA frase del
+        422 y de la pantalla (`posicion_de_hoy`, por `aviso_deuda_borrada`, que deja fuera
+        a la anulada igual que la tarjeta "por reparar").
+        """
+        posicion = aviso_deuda_borrada(liquidacion)
+        if posicion is None:
+            return []
+        hecho = _de_donde_viene_la_deuda_borrada(liquidacion.deuda_borrada_por_la_migracion)
+        return [
+            f"AVISO: esta quincena está pendiente de reparar. {hecho[0].upper()}{hecho[1:]}. "
+            f"Por eso el resumen lleva el renglón «{_ROTULO_DEUDA_BORRADA}» y el "
+            f"«{rotulo_final}» de arriba no es lo que queda. {posicion}."
+        ]
+
     def _notas_de_la_deuda(self, liquidacion: Liquidacion) -> list[str]:
         """Las dos puntas de la deuda arrastrada, en letra chica bajo el resumen.
 
@@ -5636,7 +6825,12 @@ _VERBO_DEL_CANDADO = "modificar ni eliminar"
 
 
 def _por_que_no_se_mueve(
-    anticipo: Anticipo, liquidacion: Liquidacion | None, verbo: str
+    anticipo: Anticipo,
+    liquidacion: Liquidacion | None,
+    verbo: str,
+    *,
+    origen: Liquidacion | None = None,
+    ctx: RequestContext | None = None,
 ) -> str | None:
     """Por qué este anticipo no se puede tocar, en palabras del dueño; None si se puede.
 
@@ -5650,6 +6844,11 @@ def _por_que_no_se_mueve(
     `liquidacion` es la del anticipo tal como la ve esta empresa: None si no tiene, o si
     apunta a una que no se puede consultar (eso se distingue por
     `anticipo.liquidacion_id`). El guardia la pasa ya con su FOR UPDATE puesto.
+
+    `origen` es la quincena de la que una corrección SOLTÓ este adelanto
+    (`soltado_de_liquidacion_id`), leída igual, por la empresa; solo cuenta para el
+    adelanto suelto. `ctx` es quien pregunta: el consejo no le nombra un botón que el
+    servidor le niega.
     """
     # NÓMINA: camino aparte y sin tocar. Un pago de empleado no tiene estados
     # (ni borrador, ni aprobada) ni pagos parciales: existe = ya se le pagó al
@@ -5681,13 +6880,38 @@ def _por_que_no_se_mueve(
     # EL CAMINO CORRECTO EXISTE Y SE NOMBRA EN EL MENSAJE: volver a incluirlo con
     # "Corregir esta quincena", que exige motivo, sube la versión del comprobante y
     # deja escrito qué se movió.
+    #
+    # PERO SOLO SI ESA QUINCENA SE DEJA CORREGIR HOY, y eso se le pregunta al botón
+    # (`por_que_no_se_corrige`), no se supone. La quincena de julio de 90 L × $2.000 =
+    # $180.000 contra $300.000 de adelanto, migrada con la deuda borrada, se pudo corregir
+    # en producción soltando el adelanto antes de que Corregir tuviera su guardia: quedó
+    # 'parcial' v2 con saldo $300.000 y $120.000 de deuda borrada. El candado de ese
+    # adelanto mandaba a "vuelva a incluirlo con 'Corregir esta quincena'", y Corregir
+    # sobre esa fila rebota siempre (ni el botón sale en el detalle). La pregunta va en
+    # vivo: cuando se repare la fila, el texto vuelve a ofrecer Corregir solo.
     if anticipo.soltado_de_liquidacion_id is not None and anticipo.liquidacion_id is None:
-        return (
+        hecho = (
             f"No se puede {verbo} este adelanto: una corrección lo sacó de una "
             "quincena que YA SE IMPRIMIÓ, y ese comprobante dice que se le descuenta "
-            "en la siguiente. Hay dos salidas: vuelva a incluirlo con 'Corregir esta "
-            "quincena' —que deja escrito el motivo—, o espere a que la quincena "
-            "siguiente lo recoja y corríjalo ahí antes de pagarla"
+            "en la siguiente."
+        )
+        esperar = (
+            "espere a que la quincena siguiente lo recoja y corríjalo ahí antes de pagarla"
+        )
+        if origen is not None and por_que_no_se_corrige(origen, ctx) is None:
+            incluir = (
+                "vuelva a incluirlo con 'Corregir esta quincena'"
+                if _puede(ctx, "administrar")
+                else "pídale a un Administrador de la empresa que lo vuelva a incluir con "
+                "'Corregir esta quincena'"
+            )
+            return (
+                f"{hecho} Hay dos salidas: {incluir} —que deja escrito el motivo—, o "
+                f"{esperar}"
+            )
+        return (
+            f"{hecho} {_por_que_no_vuelve_a_su_quincena(origen)} Queda una salida: "
+            f"{esperar}"
         )
 
     if anticipo.liquidacion_id is None:
@@ -5723,12 +6947,24 @@ def _por_que_no_se_mueve(
     # anticipo a $200.000 cambiaría la deuda a $20.000 y ese segundo comprobante
     # —que puede estar pagado— quedaría cobrando $100.000 que ya nadie debe. Sin
     # este guardia el recuadre de `actualizar` lo hacía en silencio.
-    aviso = _aviso_deuda_trasladada(liquidacion, f"{verbo} el anticipo de")
+    #
+    # Y EL CONSEJO SOLO MANDA A ANULAR LA OTRA SI ESO SUELTA ESTE ADELANTO: con esta
+    # quincena pagada o corregida seguiría trabado igual (`por_que_seguiria_congelada`).
+    aviso = _aviso_deuda_trasladada(
+        liquidacion,
+        f"{verbo} el anticipo de",
+        ctx,
+        por_que_sigue=por_que_seguiria_congelada(liquidacion),
+    )
     if aviso is not None:
         return aviso
-    # Dos mensajes porque son dos situaciones distintas para el usuario: de la
-    # pagada no hay nada que hacer por dentro; del abono sí, se puede borrar el
-    # pago, corregir el anticipo y volver a abonar.
+    # LA RAZÓN SE ESCOGE POR EL ESTADO; EL CONSEJO, NO. Lo de abajo nombra la misma razón
+    # que el día de esta quincena en Recepción diaria y en el mismo orden (pagada sin un
+    # peso, pagada, corregida, abono), pero la salida se le pregunta en vivo al botón y al
+    # permiso de quien mira (`_consejo_del_candado`). Antes salía del estado: a la pagada,
+    # solo el ajuste, aunque Corregir sí cambia el valor de un anticipo, lo saca o lo
+    # borra (`valores_de_anticipos`, `anticipos_a_soltar`, `anticipos_a_borrar`); y al
+    # abono, "Elimine primero ese pago" siempre.
     if liquidacion.estado == ESTADO_PAGADA:
         # "YA SE PAGÓ" SOLO SI SALIÓ PLATA. La 'pagada' que dejó el botón Pagar de
         # antes con el tercero debiendo ($180.000 contra $300.000, pagado $0) no le
@@ -5737,13 +6973,12 @@ def _por_que_no_se_mueve(
             return (
                 f"No se puede {verbo} este anticipo: la liquidación en la que se "
                 "descontó quedó cerrada como pagada "
-                f"{por_que_no_salio_un_peso(liquidacion)}. Si la cifra está mala, "
-                "registre el ajuste en la quincena siguiente"
+                f"{por_que_no_salio_un_peso(liquidacion)}. "
+                f"{_consejo_del_candado(liquidacion, ctx)}"
             )
         return (
             f"No se puede {verbo} este anticipo: la liquidación en la que se "
-            "descontó ya se pagó. Si la cifra está mala, registre el ajuste en "
-            "la quincena siguiente"
+            f"descontó ya se pagó. {_consejo_del_candado(liquidacion, ctx)}"
         )
     # Y LA QUE YA SE CORRIGIO, aunque ahora este en 'parcial' y sin pagos. Es el
     # mismo hueco que se tapo en Recepcion diaria: corregir manda el documento a
@@ -5751,18 +6986,23 @@ def _por_que_no_se_mueve(
     # las otras dos preguntas caen a la vez. Medido: moverle el anticipo de $180.000
     # a una quincena corregida la mandaba a 'borrador' y la recalculaba, y el neto
     # del papel que el productor ya tiene pasaba de $90.000 a $260.000.
+    # Aquí no se manda a borrar pagos aunque los tenga: la versión no baja borrándolos.
     if int(liquidacion.version or 1) > 1:
+        usar = _usar_corregir(liquidacion, ctx)
         return (
             f"No se puede {verbo} este anticipo: la quincena en la que se descontó "
-            "ya emitió un comprobante corregido. Si hay que arreglarle una cifra, "
-            "use 'Corregir esta quincena'"
+            "ya emitió un comprobante corregido. "
+            + (
+                f"Si hay que arreglarle una cifra, {usar}"
+                if usar
+                else "Si la cifra está mala, registre el ajuste en la quincena siguiente"
+            )
         )
     if liquidacion.tiene_pagos:
         return (
             f"No se puede {verbo} este anticipo: la liquidación en la que se "
-            "descontó ya tiene un pago registrado. Elimine primero ese pago si "
-            "de verdad hay que corregirlo, o registre el ajuste en la quincena "
-            "siguiente"
+            "descontó ya tiene un pago registrado. "
+            f"{_consejo_del_candado(liquidacion, ctx, borrar_los_pagos=True)}"
         )
     # Con las razones de hoy no se llega aquí. Si `cifras_congeladas` suma una, el
     # guardia rebota igual que lo pinta la pantalla, aunque sea con un mensaje general.
@@ -5770,6 +7010,100 @@ def _por_que_no_se_mueve(
         f"No se puede {verbo} este anticipo: la quincena en la que se descontó ya "
         "tiene sus cifras en firme"
     )
+
+
+def _consejo_del_candado(
+    liquidacion: Liquidacion,
+    ctx: RequestContext | None,
+    *,
+    borrar_los_pagos: bool = False,
+) -> str:
+    """Qué hacer con el anticipo de una quincena pagada o con abonos, para quien mira.
+
+    EL MISMO CONSEJO QUE EL DÍA DE ESA QUINCENA, en el mismo orden (`_consejo_del_abono`
+    en Recepción diaria): primero Corregir si el botón la acepta —conserva los pagos y sus
+    soportes—, después el ajuste, y de último borrar los pagos. Medido con 100 L × $1.800
+    = $180.000, adelanto de $30.000 y abonos de $50.000 y $20.000 ('parcial', saldo
+    $80.000): el candado decía "ya tiene un pago registrado. Elimine primero ese pago" y
+    el día, "use 'Corregir esta quincena' … Elimine primero esos 2 pagos solo si …". Se
+    seguía el del anticipo, se borraba el de $50.000 (saldo $130.000) y el anticipo seguía
+    trabado con el mismo texto: un pago y sus soportes perdidos para nada. Corregir 30.000
+    → 20.000 daba en cambio 180.000 − 20.000 − 70.000 = $90.000 con los dos pagos vivos.
+
+    A diferencia del día, Corregir no se recorta "al precio": en el anticipo sí cambia la
+    cifra que se quiere tocar.
+
+    BORRAR LOS PAGOS va solo si `borrar_los_pagos` (el abono; en la pagada el día tampoco
+    lo nombra) y solo si borrarlos todos deja la quincena sin pagos
+    (`_pagos_que_se_pueden_borrar`): "ese pago" con uno, "esos N pagos" con más, porque
+    borrar uno de dos no destraba. Y cada salida, al permiso que pide su botón: Corregir
+    'administrar', borrar un pago 'eliminar'; sin él, "pídale a un Administrador de la
+    empresa", como en el día.
+    """
+    pagos = len(liquidacion.pagos)
+    ajuste = "registre el ajuste en la quincena siguiente"
+    usar = _usar_corregir(liquidacion, ctx)
+    if usar is not None:
+        conserva = (
+            f", que conserva {'el pago' if pagos == 1 else 'los pagos'} y sus soportes,"
+            if pagos
+            else ""
+        )
+        corregir = f"Si la cifra está mala, {usar}{conserva} o {ajuste}"
+    else:
+        corregir = f"Si la cifra está mala, {ajuste}"
+    if not borrar_los_pagos or _pagos_que_se_pueden_borrar(liquidacion) <= CERO:
+        return corregir
+    ese_pago = "ese pago" if pagos == 1 else f"esos {pagos} pagos"
+    con_el = "con él" if pagos == 1 else "con ellos"
+    soportes = f"{con_el} se van sus soportes, que no se recuperan"
+    puede_borrar = _puede(ctx, "eliminar")
+    if usar is not None:
+        borrar = (
+            f"Elimine primero {ese_pago} solo si de verdad hay que cambiarlo desde aquí"
+            if puede_borrar
+            else "Si de verdad hay que cambiarlo desde aquí, pídale a un Administrador de "
+            f"la empresa que elimine primero {ese_pago}"
+        )
+        return f"{corregir}. {borrar}: {soportes}"
+    # Corregir rebota (la quincena del flete): borrar los pagos es la única salida por
+    # dentro, y va con su advertencia.
+    if puede_borrar:
+        return (
+            f"Elimine primero {ese_pago} si de verdad hay que corregirlo —{soportes}—, o "
+            f"{ajuste}"
+        )
+    return (
+        "Si de verdad hay que corregirlo, pídale a un Administrador de la empresa que "
+        f"elimine primero {ese_pago} —{soportes}—, o {ajuste}"
+    )
+
+
+def _por_que_no_vuelve_a_su_quincena(origen: Liquidacion | None) -> str:
+    """Por qué el adelanto suelto no se puede volver a incluir en la quincena de la que
+    salió. Se dice de ESA quincena, nombrándola: la frase de `_aviso_deuda_borrada`
+    ("el anticipo de esta quincena") sería falsa, porque el adelanto ya no está en ella.
+    """
+    if origen is None:
+        return (
+            "La quincena de la que salió no se puede consultar, así que no se puede "
+            "volver a incluir ahí."
+        )
+    cual = f"La quincena de la que salió (la del {origen.periodo_texto})"
+    borrada = origen.deuda_borrada_por_la_migracion
+    if borrada > CERO:
+        return (
+            f"{cual} no se puede corregir: {_de_donde_viene_la_deuda_borrada(borrada)}. "
+            "Hay que repararla antes de volver a incluirlo ahí."
+        )
+    if origen.deuda_ya_cobrada:
+        otra = origen.deuda_trasladada_a
+        en_cual = f"la del {otra.periodo_texto}" if otra is not None else "otra"
+        return (
+            f"{cual} no se puede corregir: lo que el tercero quedó debiendo en ella ya se "
+            f"le cobró en {en_cual}."
+        )
+    return f"{cual} hoy no se puede corregir, así que no se puede volver a incluir ahí."
 
 
 class AnticipoService(BaseService[Anticipo]):
@@ -5804,18 +7138,19 @@ class AnticipoService(BaseService[Anticipo]):
 
     # ------------------------------------------- el candado: "ya se pagó", no
     #                                              "ya se liquidó"
-    def _liquidacion_de(self, anticipo: Anticipo) -> Liquidacion | None:
-        """La liquidación en la que este anticipo quedó descontado, si hay alguna.
+    def _liquidacion_de(self, liquidacion_id: uuid.UUID | None) -> Liquidacion | None:
+        """La liquidación con ese id, si esta empresa la ve: la del anticipo, o la de la
+        que una corrección lo soltó.
 
         Va por el repositorio para no saltarse el filtro por empresa ni el de
         borrados: de esto depende si se deja o no tocar plata de un tenant.
         """
-        if anticipo.liquidacion_id is None:
+        if liquidacion_id is None:
             return None
         stmt = (
             LiquidacionRepository(self.db, self.ctx.empresa_id)
             .base_query()
-            .where(Liquidacion.id == anticipo.liquidacion_id)
+            .where(Liquidacion.id == liquidacion_id)
         )
         return self.db.scalars(stmt).first()
 
@@ -5838,14 +7173,23 @@ class AnticipoService(BaseService[Anticipo]):
 
         Devuelve la liquidación tocada, para recuadrarla después de escribir.
         """
-        liquidacion = self._liquidacion_de(anticipo)
+        liquidacion = self._liquidacion_de(anticipo.liquidacion_id)
         if liquidacion is not None:
             # Con candado antes de decidir: se va a mirar `pagado` y enseguida a
             # reescribir el total de la liquidación. Sin el FOR UPDATE, un pago que
             # entre en ese instante se lee como "todavía no hay pagos" y el recálculo
             # le pasa por encima. Ver `_bloquear`.
             liquidacion = _bloquear(self.db, liquidacion)
-        aviso = _por_que_no_se_mueve(anticipo, liquidacion, verbo)
+        # La de la que una corrección lo soltó, sin candado: no se le va a escribir nada,
+        # solo se lee para saber si el mensaje puede mandar a "Corregir esta quincena".
+        origen = (
+            self._liquidacion_de(anticipo.soltado_de_liquidacion_id)
+            if anticipo.liquidacion_id is None
+            else None
+        )
+        aviso = _por_que_no_se_mueve(
+            anticipo, liquidacion, verbo, origen=origen, ctx=self.ctx
+        )
         if aviso is not None:
             raise BusinessError(aviso)
         return liquidacion
@@ -5872,14 +7216,28 @@ class AnticipoService(BaseService[Anticipo]):
         `aplicado`; ahora "aplicado" y "trabado" son cosas distintas, y si la
         pantalla siguiera mirando `aplicado` seguiría escondiendo los botones de
         anticipos que sí se pueden corregir.
+
+        EN LA MISMA CONSULTA van las quincenas de las que una corrección soltó un
+        adelanto (su candado pregunta si esa quincena se deja corregir) y, con
+        `selectinload`, la OTRA punta de la deuda cobrada. Esa relación apunta a la misma
+        tabla, y SQLAlchemy no la carga sola en la consulta de primer nivel: cada quincena
+        con la deuda cobrada disparaba tres SELECT más (la otra, sus días y sus pagos).
+        Medido con 50 anticipos y 7 quincenas cobradas: 30 consultas contra 9; con esto,
+        una para todas las de la página.
         """
         ids = {a.liquidacion_id for a in anticipos if a.liquidacion_id is not None}
+        ids |= {
+            a.soltado_de_liquidacion_id
+            for a in anticipos
+            if a.liquidacion_id is None and a.soltado_de_liquidacion_id is not None
+        }
         liquidaciones: dict[uuid.UUID, Liquidacion] = {}
         if ids:
             stmt = (
                 LiquidacionRepository(self.db, self.ctx.empresa_id)
                 .base_query()
                 .where(Liquidacion.id.in_(ids))
+                .options(selectinload(Liquidacion.deuda_trasladada_a))
             )
             liquidaciones = {liq.id: liq for liq in self.db.scalars(stmt).all()}
         for anticipo in anticipos:
@@ -5887,11 +7245,16 @@ class AnticipoService(BaseService[Anticipo]):
             # no se ve; `_por_que_no_se_mueve` los distingue y traba el segundo.
             liquidacion = liquidaciones.get(anticipo.liquidacion_id)
             anticipo.liquidacion_estado = liquidacion.estado if liquidacion else None
+            origen = (
+                liquidaciones.get(anticipo.soltado_de_liquidacion_id)
+                if anticipo.liquidacion_id is None
+                else None
+            )
             # LA MISMA FUNCIÓN QUE ESCRIBE EL REBOTE DE `_exigir_no_pagado`, y no una
             # copia parecida: el candado sale donde el servidor rebota, y el porqué que
             # lee el dueño es el mismo texto que le daría el 422.
             anticipo.candado_aviso = _por_que_no_se_mueve(
-                anticipo, liquidacion, _VERBO_DEL_CANDADO
+                anticipo, liquidacion, _VERBO_DEL_CANDADO, origen=origen, ctx=self.ctx
             )
             anticipo.bloqueado = anticipo.candado_aviso is not None
 

@@ -286,6 +286,12 @@ class ContabilidadService:
             )
         ) or CERO
 
+        # Y LAS QUINCENAS QUE "POR PAGAR" DEJÓ POR FUERA porque traen deuda borrada por la
+        # migración, contadas con la regla del tablero y de la tarjeta del listado. Van
+        # como un conteo y no dentro de ninguna de las dos cifras: lo que se debe en esas
+        # filas no lo dice el saldo guardado (el porqué, en `contar_por_reparar`).
+        por_reparar = LiquidacionRepository(self.db, empresa).contar_por_reparar()
+
         return BalanceResponse(
             fecha_corte=date.today(),
             saldo_cajas=saldo_cajas,
@@ -293,5 +299,6 @@ class ContabilidadService:
             cartera_por_cobrar=cartera,
             liquidaciones_por_pagar=por_pagar,
             terceros_le_quedan_debiendo=le_quedan_debiendo,
+            quincenas_por_reparar=por_reparar,
             total_disponible=saldo_cajas + saldo_bancos,
         )

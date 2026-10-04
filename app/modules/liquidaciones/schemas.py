@@ -362,6 +362,33 @@ class LiquidacionRead(TenantRead):
     # que el tercero debe hoy —eso es esta cifra − saldo—, es lo que se borró. Ver
     # `Liquidacion.deuda_borrada_por_la_migracion`.
     deuda_borrada_por_la_migracion: Decimal = Decimal("0")
+    # Y LA POSICIÓN DE HOY DE ESA FILA, escrita por el servidor: cuánto le debe todavía el
+    # tercero a la quesera, o cuánto falta de verdad por entregarle. Es la misma frase del
+    # 422 de Pagar o Corregir esa fila y del AVISO de su PDF (`posicion_de_hoy` en el
+    # servicio), así que la pantalla la pinta tal cual en vez de hacer la cuenta por su
+    # lado. None en las demás y en la anulada, que no se paga ni se debe. No sale de una
+    # columna, así que lo llena el router.
+    aviso_deuda_borrada: str | None = None
+    # Y EL PORQUÉ DE CADA BOTÓN QUE ESA DEUDA BORRADA TRABA, con el texto exacto de su 422
+    # (`_aviso_deuda_borrada` con el verbo de esa acción) para quien pregunta. Claves:
+    # 'corregir', 'pagar', 'registrar_pago' y 'anular'; solo las que ese usuario puede
+    # oprimir. Vacío en toda fila sin deuda borrada. Lo llena el router
+    # (`avisos_deuda_borrada` en el servicio).
+    avisos_deuda_borrada: dict[str, str] = {}
+    # POR QUÉ PAGAR REBOTA CUANDO LA DEUDA DE LA QUINCENA PASADA SE LLEVÓ EL NETO: el 422 de
+    # Pagar (`_no_sale_un_peso_por_la_deuda`) sobre esta fila, o None si Pagar no rebota
+    # por eso (o rebota antes por otra cosa). Con él la pantalla esconde "Marcar pagada" y
+    # dice el porqué sin copiar las tres condiciones. Lo llena el router.
+    aviso_sin_un_peso_por_la_deuda: str | None = None
+    # ¿SALIÓ PLATA POR PAGOS CONTRA ESTA QUINCENA? La pregunta detrás de la palabra
+    # "abono" (`Liquidacion.con_abonos`): la corregida que quedó 'parcial' sin un solo
+    # pago no tiene ningún abono, aunque su estado diga 'parcial'.
+    con_abonos: bool = False
+    # POR QUÉ ESTA 'pagada' QUEDÓ CERRADA SIN QUE SE REGISTRARA UN PAGO, con la frase que
+    # el servidor dice en el 422 de sus observaciones, en sus días y en su anticipo
+    # (`cerrada_sin_pago` en el servicio). None en las demás, y en la pagada que de verdad
+    # se pagó. Lo llena el router.
+    cerrada_sin_pago: str | None = None
     # CUÁNTAS VECES SE EMITIÓ ESTE COMPROBANTE. 1 en todos los que nunca se corrigieron
     # —o sea, casi todos—. Desde 2, la pantalla pinta la banda de "corregido" y el folio
     # sale con el sufijo, porque hay un papel viejo circulando con otra cifra.
@@ -391,6 +418,18 @@ class LiquidacionRead(TenantRead):
     deuda_trasladada_a_id: uuid.UUID | None = None
     deuda_trasladada_a: LiquidacionReferencia | None = None
     deudas_cobradas: list[DeudaCobradaRead] = []
+    # MIENTRAS LA DEUDA ESTÉ COBRADA EN OTRA, EL PORQUÉ DE CADA BOTÓN QUE ESO TRABA, con
+    # el texto exacto del 422 para quien pregunta. Claves: 'anular', 'corregir',
+    # 'recalcular', 'precio' y 'eliminar_pago'; y 'pagar' y 'registrar_pago' cuando esa
+    # deuda cobrada YA NO CUADRA entre las dos quincenas (en cualquiera de las dos puntas:
+    # las filas que dejó el borrado de pagos de antes). Las cinco primeras, solo las que
+    # ese usuario puede oprimir; 'pagar' y 'registrar_pago', a todo el que lee la fila,
+    # porque el descuadre es un hecho de ella (su consejo sí va dicho para quien
+    # pregunta). Vacío en todas las demás filas. La
+    # pantalla lo pinta tal cual en vez de armar su copia, que no podía saber si la otra
+    # quincena se deja anular (ver `avisos_deuda_cobrada` en el servicio). No sale de la
+    # base sino de quien pregunta, así que lo llena el router.
+    avisos_deuda_cobrada: dict[str, str] = {}
     observaciones: str | None
     detalles: list[LiquidacionDetalleRead] = []
     pagos: list[PagoLiquidacionRead] = []
@@ -608,7 +647,16 @@ class PrevisualizacionCorreccion(BaseSchema):
     # positivo y en campos separados, porque son dos frases distintas y la pantalla no
     # tiene que deducir cuál decir a partir del signo de un saldo.
     queda_por_entregar: Decimal
+    # SOLO lo que el PDF cierra en "SE LE PAGÓ DE MÁS": la deuda entera es efectivo
+    # entregado por encima del neto (`lo_que_se_le_pago_de_mas`). Medido: corregida a
+    # neto −$50.000 con $200.000 pagados, aquí iban $250.000 y en efectivo salieron
+    # $200.000; esa deuda va en `le_queda_debiendo`, con el rótulo del papel.
     se_le_pago_de_mas: Decimal
+    # La deuda cuando la pusieron los anticipos (o la deuda de la quincena pasada), con o
+    # sin efectivo encima: el PDF la cierra en "LE QUEDA DEBIENDO". De los tres, a lo
+    # sumo uno pasa de cero, y queda_por_entregar − se_le_pago_de_mas − le_queda_debiendo
+    # = saldo_despues. Con default para no romper a quien no lo lee.
+    le_queda_debiendo: Decimal = Decimal("0")
     version_actual: int
     # Lo que el sistema sabe y el dueño no: qué pasa con el flete, que el período queda
     # reservado, y cuántas veces se ha corregido ya esta quincena. Se muestran en el

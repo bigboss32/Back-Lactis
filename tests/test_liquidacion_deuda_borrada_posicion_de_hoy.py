@@ -109,6 +109,11 @@ def test_en_cero_dice_que_no_falta_nada(client, base_datos, db_session):
     assert r.status_code == 422
     assert "El saldo dice $120.000, pero de verdad no falta entregarle nada" in _detalle(r)
     assert "le entregaría $120.000 de más" in _detalle(r)
+    # El saldo entero ($120.000) es lo borrado: son "esos" $120.000, no "los otros", que
+    # se leía como si hubiera otros $120.000 aparte. 120.000 − 120.000 = 0 por entregar.
+    assert ("no falta entregarle nada: esos $120.000 son la deuda que borró la migración"
+            in _detalle(r))
+    assert "los otros" not in _detalle(r)
 
 
 def test_con_la_deuda_ya_cobrada_en_otra_no_la_cuenta_como_pendiente(
@@ -197,7 +202,7 @@ def test_observaciones_de_la_migrada_dicen_la_deuda_borrada_y_no_mandan_a_correg
 def test_observaciones_de_la_pagada_sin_un_peso_no_dicen_ya_se_pago(
         client, base_datos, db_session):
     """100 L × $1.800 = $180.000 contra $300.000, 'pagada' por el botón de antes con
-    pagado $0: no se le entregó nada. 'Corregir esta quincena' sí sirve aquí, y se
+    pagado $0: ningún pago, solo el adelanto. 'Corregir esta quincena' sí sirve aquí, y se
     comprueba: la salida que nombra el mensaje existe."""
     h = auth_headers(client, "admin.a")
     prov, liq = _quincena(client, h, "Obs Sin Peso", "100", "300000")
@@ -206,8 +211,10 @@ def test_observaciones_de_la_pagada_sin_un_peso_no_dicen_ya_se_pago(
     r = _obs(client, h, liq)
     print(f"\n  {_detalle(r)}")
     assert r.status_code == 422
+    # Sin "sin que saliera un peso": el adelanto de $300.000 salió de la caja.
     assert _detalle(r).startswith(
-        "Esta quincena quedó cerrada como pagada sin que saliera un peso, porque el "
+        "Esta quincena quedó cerrada como pagada sin saldo por entregar, porque los "
+        "anticipos que se le aplicaron ($300.000) pasaron de su valor ($180.000) y el "
         "tercero le quedó debiendo $120.000")
     assert "ya se pagó" not in _detalle(r) and CORREGIR in _detalle(r)
     prev = client.post(f"{API}/{liq}/corregir/previsualizar", json={

@@ -608,7 +608,11 @@ def test_recalcular_el_origen_con_la_deuda_ya_cobrada_rebota_nombrando_la_otra(
     detalle = r.json()["error"]["detail"]
     print(f"  recalcular -> {r.status_code} · {detalle}")
     assert r.status_code == 422, r.text
-    assert "16/06/2026 al 30/06/2026" in detalle, detalle
+    # El botón, sobre esta quincena APROBADA, rebota por el estado: nombrar aquí la deuda
+    # mandaba a "anule primero esa liquidación y vuelva a intentarlo", y anulada la otra
+    # Recalcular volvía a rebotar por no ser borrador. La deuda la nombra el día, abajo.
+    assert "solo se puede recalcular mientras sea un borrador" in detalle, detalle
+    assert "nule primero" not in detalle, detalle
 
     # Y por el lado del día: cambiarle los litros a una recepción de esa quincena.
     r = client.put(f"{REC}/{rec['id']}", json={"cantidad_litros": "120"}, headers=h)

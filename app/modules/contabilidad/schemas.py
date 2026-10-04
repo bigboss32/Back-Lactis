@@ -86,4 +86,10 @@ class BalanceResponse(BaseSchema):
     # Y lo que los terceros le quedaron debiendo A ÉL, en positivo y aparte: no es plata
     # que tenga que sacar, se cobra descontándola de la próxima quincena del tercero.
     terceros_le_quedan_debiendo: Decimal = Decimal("0")
+    # Las quincenas con deuda borrada por la migración que NO entran en
+    # `liquidaciones_por_pagar`, contadas igual que en el tablero
+    # (`LiquidacionRepository.contar_por_reparar`). El balance no puede callarlas aunque
+    # no tengan cifra: el saldo guardado de esas quincenas no es lo que de verdad se
+    # debe. Cero por defecto.
+    quincenas_por_reparar: int = 0
     total_disponible: Decimal

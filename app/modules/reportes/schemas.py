@@ -35,6 +35,13 @@ class DashboardResponse(BaseSchema):
     # preguntas distintas y mezclarlas no contesta ninguna. Cero en la enorme mayoría
     # de las queseras; se llena cuando a alguien los anticipos le pasaron la quincena.
     terceros_le_quedan_debiendo: Decimal = Decimal("0")
+    # CUÁNTAS QUINCENAS CON DEUDA BORRADA POR LA MIGRACIÓN quedaron por fuera de
+    # `liquidaciones_por_pagar` (el servidor no deja pagarlas hasta repararlas). La
+    # pantalla lo dice al lado de esa cifra para que su $0 no se lea como "no se le debe
+    # nada a nadie". Cuenta quincenas, no pesos: ver `LiquidacionRepository.
+    # contar_por_reparar`. Cero por defecto, para que un front y un back de versiones
+    # distintas no se rompan mientras se despliegan.
+    quincenas_por_reparar: int = 0
     alertas_no_leidas: int
     litros_por_dia: list[SerieDia]
     ventas_por_dia: list[SerieDia]

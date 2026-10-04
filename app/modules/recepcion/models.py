@@ -54,6 +54,10 @@ class RecepcionLeche(TenantMixin, AuditMixin, Base):
     # dos marcas de arriba). Es la seña de siempre: sirve para avisar que al tocar
     # el día se mueve una liquidación ya generada.
     liquidacion_estado = None
+    # Si esa liquidación que manda está en 'parcial' CON plata salida por pagos. La
+    # palabra "abono" sale de aquí y no del estado: una corregida queda 'parcial' sin
+    # ningún pago.
+    liquidacion_con_abono = False
 
     # Las dos platas por separado, que es lo que hacía falta para que el candado
     # sea por CAMPO y no por fila: al proveedor se le puede haber pagado la leche

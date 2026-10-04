@@ -256,16 +256,19 @@ def build_liquidacion_pdf(
     anticipos_rows: Sequence[Sequence[Any]] = (),
     pagos_rows: Sequence[Sequence[Any]] = (),
     observaciones: str | None = None,
-    marca: str | None = None,
+    marca: str | Sequence[str] | None = None,
 ) -> bytes:
     """Comprobante de liquidación con membrete, resumen, anticipos, pagos y firmas.
-    Ajustado para caber SIEMPRE en una sola hoja.
+    Ajustado para caber SIEMPRE en una sola hoja, y eso lo mide una prueba
+    (tests/test_liquidacion_pdf_una_hoja.py) con el caso más cargado que da el sistema.
 
-    `marca` es la banda del encabezado para un comprobante que NO es lo que parece —hoy
-    solo "COMPROBANTE CORREGIDO (v2)"—. Va arriba y en grande a propósito: el sufijo del
-    folio va en letra gris de 7 puntos, así que con las dos hojas sobre la mesa (una de
-    $500.000 y otra de $680.000) se ven iguales, y la explicación queda al pie, después
-    del resumen. Quien recibe el papel tiene que enterarse antes de leerlo entero.
+    `marca` es la banda del encabezado para un comprobante que NO es lo que parece:
+    "COMPROBANTE CORREGIDO (v2)", y "PENDIENTE DE REPARAR" en la fila con deuda borrada.
+    Va arriba y en grande a propósito: el sufijo del folio va en letra gris de 7 puntos,
+    así que con las dos hojas sobre la mesa (una de $500.000 y otra de $680.000) se ven
+    iguales, y la explicación queda al pie, después del resumen. Quien recibe el papel
+    tiene que enterarse antes de leerlo entero. Puede ser una o varias, UNA POR LÍNEA: la
+    corregida con la deuda borrada es las dos cosas, y ninguna puede tapar a la otra.
     """
     buffer = io.BytesIO()
     styles = getSampleStyleSheet()
@@ -297,11 +300,12 @@ def build_liquidacion_pdf(
         Paragraph(f"Estado: <b>{_texto(estado.upper())}</b>", st_docmeta),
         Paragraph(f"Emitido: {_texto(emitido)}", st_docmeta),
     ]
-    if marca:
+    marcas = [marca] if isinstance(marca, str) else list(marca or [])
+    for i, una in enumerate(m for m in marcas if m):
         # En el color de marca y en negrita, JUSTO DEBAJO del título: es lo segundo que
         # se lee, antes que el número y que el estado.
         doc_block.insert(
-            1, Paragraph(f'<font color="{BRAND}"><b>{_texto(marca)}</b></font>', st_docmeta)
+            1 + i, Paragraph(f'<font color="{BRAND}"><b>{_texto(una)}</b></font>', st_docmeta)
         )
     logo_cell: Any = (
         RLImage(str(LOGO_PATH), width=1.2 * cm, height=1.2 * cm) if LOGO_PATH.exists() else ""
@@ -370,6 +374,12 @@ def build_liquidacion_pdf(
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 6.5),
+        # EL INTERLINEADO VA CON LA LETRA. Sin esta línea la tabla conservaba el de 12
+        # puntos que ReportLab trae para letra de 10, así que cada día de 6,5 puntos
+        # ocupaba 13 de alto: con 14 días eran 60 puntos de aire, justo lo que le faltaba
+        # al comprobante más cargado (v2, cuatro adelantos, cinco abonos y el aviso de la
+        # deuda borrada) para no partir las firmas a una segunda hoja.
+        ("LEADING", (0, 0), (-1, -1), 8),
         ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#D6E0EA")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
         ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
@@ -427,6 +437,8 @@ def build_liquidacion_pdf(
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                     ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                     ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                    # Interlineado de la letra de 7,5 y no el de 10 (ver el detalle).
+                    ("LEADING", (0, 0), (-1, -1), 9),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
                     ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
                     ("ALIGN", (1, 1), (1, -1), "RIGHT"),
@@ -451,6 +463,8 @@ def build_liquidacion_pdf(
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                     ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                     ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                    # Interlineado de la letra de 7,5 y no el de 10 (ver el detalle).
+                    ("LEADING", (0, 0), (-1, -1), 9),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E0EA")),
                     ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_LIGHT]),
                     ("ALIGN", (1, 1), (1, -1), "RIGHT"),
