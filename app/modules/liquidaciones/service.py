@@ -4083,6 +4083,169 @@ class LiquidacionService(BaseService[Liquidacion]):
         )
         return liquidacion
 
+    def actualizar_precio_varios_dias(
+        self,
+        entity_id: uuid.UUID,
+        precio_litro: Decimal,
+        detalle_ids: Sequence[uuid.UUID] | None = None,
+    ) -> Liquidacion:
+        """Le pone el MISMO precio por litro a varios días del borrador de una sola vez.
+
+        Es `actualizar_precio_detalle` para quien no tiene que corregir un día sino la
+        quincena: el precio casi siempre es el mismo en todo el período ($2.000 el litro
+        en lugar de $1.900) y una quincena trae hasta 16 días, o sea 16 veces abrir el
+        lápiz, teclear y esperar. `detalle_ids` en None son TODOS los días del comprobante;
+        con una lista, exactamente esos (los repetidos cuentan una sola vez).
+
+        TODO O NADA. Se valida todo ANTES de escribir un solo día, porque el dueño suma con
+        calculadora y una quincena con 9 días a $2.000 y 7 a $1.900 no cuadra con ningún
+        precio que él haya dicho: si el día 12 deja el neto en rojo no puede haberse
+        movido ya el día 1. Después de validar no queda nada que pueda fallar a medias: lo
+        que sigue son asignaciones, un flush y la suma.
+
+        Las MISMAS tres preguntas que el lápiz de un día (`_razon_para_no_cambiar_el_precio`:
+        borrador, de proveedor, deuda sin cobrar en otra) con los mismos textos y los mismos
+        códigos, y los mismos dos rebotes de un día: el que no es de este comprobante (404) y
+        el que no tiene su recepción (422).
+
+        CON EL CANDADO PUESTO ANTES DE PREGUNTAR, igual que Pagar, Abonar y Anular. Cambiar
+        el precio de 16 días es un cambio de plata más grande que el de uno, y la ventana
+        entre "leí que era borrador" y "escribí los 16 días" es la misma: una aprobación o
+        un pago que otro usuario confirme en el medio se llevaba el comprobante a
+        'aprobada' —con el papel ya impreso— y este endpoint seguía reescribiendo los
+        precios de una quincena que ya salió. Con el FOR UPDATE nadie confirma nada en el
+        medio y `populate_existing` relee el estado DESPUÉS de esperar, que es lo que lee
+        el guardia. Ver `_bloquear`.
+
+        EL DÍA QUE YA ESTÁ A ESE PRECIO NO SE ESCRIBE: sin cambio de recepción, de renglón
+        ni de auditoría. Si la quincena entera ya estaba a ese precio no hay nada que
+        escribir y la respuesta es la liquidación como estaba (200): oprimir "Aplicar" dos
+        veces no puede ensuciar el libro con renglones que no cambiaron nada. El precio que
+        se compara es el de la recepción, que es donde vive el verdadero, y no el del
+        renglón del comprobante, que es su copia.
+
+        SE RECALCULA UNA SOLA VEZ, al final, con todos los días ya escritos y bajados a la
+        base (la sesión no hace autoflush). Recalcular después de cada día daría el mismo
+        resultado 16 veces más caro, y a medias entre una y otra.
+
+        AUDITORÍA con la misma forma que la del día, para que el libro cuente lo mismo por
+        los dos caminos: UNA fila de la liquidación (antes/después, que es donde el dueño
+        ve el cambio) y una por cada recepción que de verdad cambió, bajo su propio módulo
+        y entidad.
+        """
+        liquidacion = self.repo.get_or_fail(entity_id)
+        # El candado va ANTES del guardia, no después: el guardia lee `estado` y la deuda
+        # cobrada, y son justo lo que otro usuario puede mover mientras esta petición
+        # espera el turno (ver el docstring).
+        liquidacion = _bloquear(self.db, liquidacion)
+        razon = _razon_para_no_cambiar_el_precio(liquidacion, self.ctx)
+        if razon is not None:
+            raise BusinessError(razon[1])
+
+        # Una lista vacía NO es "todos": es una pantalla que mandó sin ningún día marcado,
+        # y reescribirle toda la quincena a quien no eligió nada es lo contrario de lo que
+        # pidió. Se dice, no se ignora en silencio.
+        if detalle_ids is not None and len(detalle_ids) == 0:
+            raise BusinessError("Elija al menos un día para cambiarle el precio por litro")
+
+        vivos = [d for d in liquidacion.detalles if d.deleted_at is None]
+        if detalle_ids is None:
+            elegidos = vivos
+        else:
+            pedidos = set(detalle_ids)
+            if not pedidos <= {d.id for d in vivos}:
+                raise NotFoundError("Ese día no pertenece a la liquidación")
+            # En el orden del comprobante (por fecha) y no en el que llegaron, para que el
+            # primer rebote sea siempre el mismo día y no dependa de cómo se marcó.
+            elegidos = [d for d in vivos if d.id in pedidos]
+        if not elegidos:
+            raise BusinessError("Esta liquidación no tiene días a los que cambiarles el precio")
+
+        # Las recepciones SON LAS MISMAS QUE SUMA EL RECÁLCULO (`_recepciones_de`, solo las
+        # activas): escribirle el precio a una apagada haría desaparecer ese día del
+        # comprobante en vez de corregirlo.
+        recepcion_del_dia = {r.fecha: r for r in self._recepciones_de(liquidacion)}
+        precio = _centavos(precio_litro)
+
+        cambios: list[tuple[RecepcionLeche, Decimal, Decimal]] = []
+        en_rojo: list[date] = []
+        for detalle in elegidos:
+            recepcion = recepcion_del_dia.get(detalle.fecha)
+            if recepcion is None:
+                # Se NOMBRA el día: con 16 en la mano, "ese día" no dice cuál es. Y el consejo
+                # es anular, que pide 'administrar': a quien solo edita (Compras) se le dice
+                # a quién pedírselo, no se le manda a un botón que el servidor le rebota.
+                salida = (
+                    "anule la liquidación y vuelva a generarla"
+                    if _puede(self.ctx, "administrar")
+                    else "pídale a un Administrador de la empresa que la anule y la vuelva a generar"
+                )
+                raise BusinessError(
+                    f"No se encontró la recepción del día {detalle.fecha.strftime('%d/%m/%Y')}; "
+                    f"{salida}"
+                )
+            if Decimal(recepcion.precio_litro) == precio:
+                continue
+            nuevo_bruto = _centavos(Decimal(recepcion.cantidad_litros) * precio)
+            nuevo_neto = (
+                nuevo_bruto + Decimal(recepcion.bonificaciones) - Decimal(recepcion.descuentos)
+            )
+            if nuevo_neto < CERO:
+                en_rojo.append(detalle.fecha)
+            cambios.append((recepcion, nuevo_bruto, nuevo_neto))
+
+        if en_rojo:
+            # Se NOMBRA el día —o los días—: con 16 en la mano, "queda negativo" a secas
+            # manda a revisar los descuentos de toda la quincena para encontrar el que es.
+            fechas = [f.strftime("%d/%m/%Y") for f in en_rojo]
+            if len(fechas) == 1:
+                cuales = f"del día {fechas[0]}"
+            elif len(fechas) <= 5:
+                cuales = f"de los días {', '.join(fechas[:-1])} y {fechas[-1]}"
+            else:
+                cuales = f"de los días {', '.join(fechas[:5])} y {len(fechas) - 5} más"
+            raise BusinessError(
+                f"Con ese precio el valor {cuales} queda negativo: revise los descuentos"
+            )
+
+        if not cambios:
+            return liquidacion
+
+        antes_liquidacion = serialize_entity(liquidacion)
+        antes_recepciones = {r.id: serialize_entity(r) for r, _, _ in cambios}
+
+        for recepcion, nuevo_bruto, nuevo_neto in cambios:
+            recepcion.precio_litro = precio
+            recepcion.valor_bruto = nuevo_bruto
+            recepcion.valor_neto = nuevo_neto
+            recepcion.updated_by = self.ctx.user_id
+        # Sin este flush el recálculo volvería a consultar las recepciones y podría
+        # releerlas con el precio viejo (la sesión no hace autoflush).
+        self.db.flush()
+
+        self._recalcular_desde_recepciones(liquidacion)
+        liquidacion.updated_by = self.ctx.user_id
+        self.db.flush()
+
+        from app.modules.auditoria.models import Auditoria
+
+        self._audit("editar", liquidacion.id, antes_liquidacion, serialize_entity(liquidacion))
+        for recepcion, _, _ in cambios:
+            self.db.add(
+                Auditoria(
+                    empresa_id=self.ctx.empresa_id,
+                    usuario_id=self.ctx.user_id,
+                    ip=self.ctx.ip,
+                    modulo="recepcion",
+                    accion="editar",
+                    entidad="RecepcionLeche",
+                    entidad_id=recepcion.id,
+                    antes=antes_recepciones[recepcion.id],
+                    despues=serialize_entity(recepcion),
+                )
+            )
+        return liquidacion
+
     # =====================================================================
     # CORREGIR UNA QUINCENA QUE YA SE PAGÓ
     # =====================================================================

@@ -1,9 +1,9 @@
 import uuid
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.common.schemas import BaseSchema, TenantRead
 
@@ -702,6 +702,34 @@ class LiquidacionDetallePrecioUpdate(BaseSchema):
     # validación serializa el contexto del error a JSON tal cual, y un Decimal
     # ahí revienta la respuesta con un 500 en vez de devolver el 422.
     precio_litro: Decimal = Field(gt=0, le=1_000_000)
+
+    @field_validator("precio_litro")
+    @classmethod
+    def _al_menos_un_centavo(cls, valor: Decimal) -> Decimal:
+        """Un precio que redondea a $0,00 deja el día en cero. `gt=0` mira el número tal como
+        llegó y 0,004 pasa, pero el servicio lo guarda a centavos (`_centavos`): $0,00 el litro.
+        Con el precio de todos los días en una sola llamada, eso era toda la quincena en cero.
+        Se rechaza con la misma cuenta que usa el servicio al guardar."""
+        if valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) <= 0:
+            raise ValueError("El precio por litro tiene que ser de al menos un centavo")
+        return valor
+
+
+class LiquidacionPreciosUpdate(LiquidacionDetallePrecioUpdate):
+    """El MISMO precio por litro para varios días de la quincena de una sola vez.
+
+    Hereda `precio_litro` de la corrección de un día, con su tope de cordura, para que las
+    dos puertas reboten exactamente los mismos precios y con los mismos textos: dos copias
+    de la regla terminan diciendo cosas distintas.
+
+    `detalle_ids` en `null` (o sin mandarlo) son TODOS los días del comprobante, que es el
+    caso de siempre: el precio casi nunca cambia a mitad de quincena. Con una lista, solo
+    esos días. Una lista vacía NO se reinterpreta como "todos": la rechaza el servicio con
+    un mensaje, porque reescribir toda la quincena a quien no marcó ningún día es lo
+    contrario de lo que pidió.
+    """
+
+    detalle_ids: list[uuid.UUID] | None = None
 
 
 class AnticipoCreate(BaseSchema):

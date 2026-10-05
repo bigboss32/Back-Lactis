@@ -19,6 +19,7 @@ from app.modules.liquidaciones.schemas import (
     GenerarLiquidaciones,
     GenerarLiquidacionesResultado,
     LiquidacionDetallePrecioUpdate,
+    LiquidacionPreciosUpdate,
     LiquidacionRead,
     LiquidacionUpdate,
     PagoLiquidacionCreate,
@@ -200,6 +201,32 @@ def actualizar_precio_detalle(
     return _to_read(
         LiquidacionService(db, ctx).actualizar_precio_detalle(
             entity_id, detalle_id, payload.precio_litro
+        ),
+        ctx,
+    )
+
+
+@router.post(
+    "/{entity_id}/precios",
+    response_model=LiquidacionRead,
+    summary="Ponerle el mismo precio por litro a varios días del borrador de una vez",
+)
+def actualizar_precios(
+    entity_id: uuid.UUID,
+    payload: LiquidacionPreciosUpdate,
+    db: DbSession,
+    # El mismo permiso que el lápiz de un día: cambiar el precio de 16 días es editar la
+    # quincena, no administrarla.
+    ctx: RequestContext = Depends(require_permission("liquidaciones", "editar")),
+) -> LiquidacionRead:
+    """`detalle_ids` en null son todos los días del comprobante; con una lista, esos.
+
+    Todo o nada: o cambian todos los días pedidos o no cambia ninguno (ver
+    `actualizar_precio_varios_dias`). El `POST /{id}/precios` no se cruza con
+    `PUT /{id}/detalles/{detalle_id}`: son otro verbo y otra ruta."""
+    return _to_read(
+        LiquidacionService(db, ctx).actualizar_precio_varios_dias(
+            entity_id, payload.precio_litro, payload.detalle_ids
         ),
         ctx,
     )
