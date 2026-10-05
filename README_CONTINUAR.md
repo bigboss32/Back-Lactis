@@ -1,28 +1,24 @@
 # Continuar: las quincenas que ya existen y el rótulo "pagada · quedó debiendo"
 
-> Nota de traspaso escrita el 27/09/2026 y puesta al día el 04/10/2026, después de la revisión final (vuelta 5).
+> Nota de traspaso escrita el 27/09/2026 y puesta al día el 04/10/2026: la vuelta 5 (revisión final) ya está en producción; la vuelta 6 (precio para varios días, filtros y grilla escribible) está sin commit.
 > Está igual en **Back-Lactis** y en **Front-Lactis** porque el cambio toca los dos.
 
 ## En una mirada
 
-- **La revisión final ya se hizo** (vuelta 5, 30/09–04/10/2026). Encontró 15 defectos confirmados y 10 menores. Uno es **crítico y ya está en producción** (viene de `main`): ver C0 abajo. Todos quedaron arreglados con prueba, salvo una decisión del dueño (L8).
-- **Nada de la vuelta 5 tiene commit.** Está en el árbol de trabajo de la rama `wip/quincenas-existentes` de los dos repos, encima de los commits `wip(...)`.
-- **Antes de desplegar hay que correr tres consultas de solo lectura en Render** (sección "Lo que falta", punto 1), y el orden del despliegue es **primero el backend, después el frontend** (punto 3).
+- **La revisión final (vuelta 5, 30/09–04/10/2026) ya está en `main` y en producción.** Encontró 15 defectos confirmados y 10 menores, uno de ellos **crítico** (C0, abajo). Todos quedaron arreglados con prueba, salvo una decisión del dueño (L8).
+- **La vuelta 6 (04/10/2026) NO tiene commit.** Está en el árbol de trabajo de la rama `wip/quincenas-existentes` de los dos repos: sección "Vuelta 6" abajo. Hace falta el visto bueno del usuario para el commit y el despliegue.
+- **Las tres consultas de solo lectura en Render siguen pendientes** (sección "Lo que falta", punto 1). El orden del despliegue es **primero el backend, después el frontend** (punto 3), y después Ctrl+F5 a quien tenga Lactis abierto.
 
 ## Dónde está el código
 
 | | Back-Lactis | Front-Lactis |
 |---|---|---|
 | Rama con el trabajo | `wip/quincenas-existentes` | `wip/quincenas-existentes` |
-| `origin/main` (lo que está en producción) | `0274078` | `f853705` |
+| `origin/main` (lo que está en producción) | `0ba84ae` | `2e06ea0` |
 
-- **El rótulo ya está en `main`, y por lo tanto en producción.** `0274078` y `f853705` los subió otra sesión el 27/09/2026, junto con el respaldo antes de formatear el equipo. Render despliega el backend desde `main` y Cloudflare el frontend.
-- **Lo demás no está desplegado.** La vuelta 4 son los commits `wip(...)` de la rama; la vuelta 5 está sin commit en el árbol de trabajo.
-- **Mientras la rama no se despliegue, producción tiene tres problemas que la rama arregla:**
-  1. La tarjeta "Le quedaron debiendo a la quesera" pierde deudas cuando hay más de 200 quincenas pagadas.
-  2. "Corregir esta quincena" sobre una pagada de julio con la deuda borrada puede mandar a pagarle a alguien que debe.
-  3. **(C0, crítico)** Borrarle el pago a una quincena cuya deuda ya se cobró en la siguiente se acepta: la quincena vuelve a quedar "por pagar" y la siguiente sigue descontando la deuda. Medido: $700.000 de leche contra $600.000 de plata, y ninguna pantalla lo muestra.
-- **No hay migraciones nuevas**: `alembic/versions` no se tocó, así que desplegar no cambia el esquema.
+- **Hasta la vuelta 5 todo está en `main`, y por lo tanto en producción** (se subió el 04/10/2026, primero el backend y después el frontend; Render despliega el backend desde `main` y Cloudflare el frontend). Eso incluye el rótulo "pagada · quedó debiendo", la vuelta 4 y la revisión final, y con ellas el arreglo de C0 (borrarle el pago a una quincena cuya deuda ya se cobró en la siguiente se aceptaba y dejaba $700.000 de leche contra $600.000 de plata).
+- **La vuelta 6 solo existe en el árbol de trabajo** de los dos repos.
+- **No hay migraciones nuevas** en ninguna de las dos: `alembic/versions` no se tocó, así que desplegar no cambia el esquema.
 
 ## Contexto que hay que saber antes de tocar nada
 
@@ -125,6 +121,42 @@
 - `GET /anticipos` ya no hace una consulta por quincena cobrada (L9). El listado de liquidaciones pasó de 57 a 8 consultas por página (R11).
 - Pagar, anular, el PUT de observaciones y la vista previa de Corregir deciden bajo `_bloquear` (L6, R8), así un abono concurrente no hace rebotar una quincena normal con el aviso de la migración.
 
+## Vuelta 6: precio para varios días, filtros y grilla escribible (sin commit, 04/10/2026)
+
+Salió de lo que pidió el usuario después del despliegue de la vuelta 5. Cada pieza se probó con la suite y **en un navegador real** contra un backend local con datos de prueba.
+
+### Backend (solo `liquidaciones`)
+
+- **`POST /api/v1/liquidaciones/{id}/precios`** (permiso `liquidaciones:editar`) con `{precio_litro, detalle_ids}`; `detalle_ids` vacío o ausente = todos los días. Es **todo o nada**: si algún día quedaría con el valor negativo, no cambia ninguno y el 422 nombra los días (hasta 5 y "y N más").
+  - Mismas reglas del lápiz de un día (`_razon_para_no_cambiar_el_precio`: solo borradores, nada con deuda cobrada, etc.), `_bloquear` (FOR UPDATE), UN recálculo y una auditoría por día cambiado más una de la liquidación.
+  - Reescribe `precio_litro`, `valor_bruto` y `valor_neto` de cada `RecepcionLeche` y recalcula con `_recalcular_desde_recepciones`. Los días que ya tienen ese precio no se tocan.
+  - Un precio que **redondea a $0,00** (0,004) se rechaza en las dos puertas, la de un día y la masiva ("al menos un centavo"); `gt=0` solo miraba el número tal como llegó.
+  - Si falta la recepción de un día, el 422 la nombra y el consejo respeta el permiso: a un Administrador se le dice que anule y regenere, a quien solo edita (Compras) que se lo pida a un Administrador.
+- Pruebas: `tests/test_liquidacion_precio_varios_dias.py` (36). Se les hicieron 6 mutaciones y todas murieron.
+
+### Frontend
+
+- **Liquidaciones, listado.** Se quitaron Entidad, Desde, Hasta y los chips "Rápido". Ahora: el **selector de quincena** (`shared/selector-quincena.ts`, el mismo de "Generar quincena": el mes con flechas y los botones 1.ª y 2.ª) y **Estado y Tipo en botones** (`shared/filtro-por-opciones.ts`). Consecuencia que se le dijo al usuario: solo se ve **una quincena o todo**; ya no hay vista de mes entero ni de rango suelto ("Todo el mes" sería fácil de agregar). Las fechas guardadas de la sesión anterior que no son una quincena se descartan al abrir. La lista y las tarjetas llevan un turno por consulta (la respuesta vieja no pisa la nueva).
+- **Recepción, listado.** Igual: selector de quincena y la **Ruta en botones**; siguen el buscador de proveedor y el desplegable de Proveedor. Arranca en la quincena de hoy **entera** (antes "del 1 hasta hoy"). Mismo descarte de fechas sueltas guardadas; "sin fechas" elegido a propósito se conserva. Mismos turnos por consulta.
+- **Detalle de la liquidación, rediseñado** (`liquidacion-detail.dialog.*`): el resumen va primero y en dos columnas (el desglose a la izquierda; a la derecha, del valor total al saldo; una columna cuando la tarjeta mide menos de 600 px), la tabla más compacta, el pie con botones de texto y el paso a paso del estado en una sola línea. El diálogo mide hasta 760 px (`panelClass: 'dialogo-detalle'`: Material 3 ignora `width` y lo limita a 560).
+  - **Mismo precio para varios días:** el campo "Precio por litro de todos los días" con su botón ("Poner $ 2.000 a los 15 días": el botón dice **cómo se leyó el precio**, y si queda a más de 3 veces o menos de la tercera parte del de hoy se pide confirmación) y el **cuadrito de cada precio, que se arrastra** hacia abajo o arriba para copiarlo a las filas por las que pasa. El borde de la tabla la hace correr sola, pero **espera 250 ms, arranca despacio y solo si el puntero ya se movió**; la barra se queda pegada arriba mientras se arrastra para que se vea "Suelte para copiar $X a N días". Solo botón principal y primer puntero. No hay cuadrito en los días de $0.
+  - **Una sola escritura a la vez** (`ocupado()`): mientras se guarda un precio no se puede aprobar, recalcular, anular, pagar ni abrir otro lápiz. Antes Aprobar podía salir con el PUT del precio todavía en vuelo.
+  - **Arreglo de plata que ya existía:** al abrir el lápiz de un precio con decimales (1750,5) y salir sin tocar nada, se leía "1750.5" como 17.505. `precioComoSeEscribe` lo escribe con coma; se arregló también en Corregir quincena.
+- **Recepción, grilla de quincena: cada celda es un campo de texto** (`recepcion-grilla.tab.*`, `litros-escritos.ts`). Se pidió para escribir **con el lápiz digital de la tablet Samsung**: la escritura a mano a texto de Chrome en Android 13+ solo funciona sobre un `<input>` de verdad, y eso es lo que son ahora (un botón o un cuadro no la reciben). **No se pudo probar con el S Pen**: está probado con teclado y con texto insertado como lo entrega un reconocedor, pero conviene que el usuario lo pruebe en la tablet.
+  - Se escribe encima y se guarda con Enter (baja a la celda de abajo), al pasar a otra celda o al tocar fuera; Esc deshace; flechas arriba y abajo se mueven; Alt+Enter o F2 abren el día. Lo escrito y sin guardar se ve en ámbar.
+  - **Solo se guardan los litros** (`PUT` parcial con `cantidad_litros`; para un día nuevo, `POST` con fecha, proveedor y litros; el precio sale del proveedor). Lo que no se entiende ("abc"), el cero, el vacío o lo que no cambió **no se manda**; dejar una celda con registro en blanco **no lo borra** (se dice cómo quitarlo). Se leen a la colombiana: `52,5` y `52.5` son 52 litros y medio, `1.500` es mil quinientos, `1,500` se rechaza por ambiguo.
+  - **Paridad con el diálogo del día:** antes de escribir se vuelve a pedir el día entero y se le pregunta al servidor (`campos_bloqueados`, `candado_aviso` tal cual). Si el día está en una liquidación **aprobada** se pide confirmación antes, con las mismas palabras de la advertencia del diálogo; después se dice qué le pasó a las liquidaciones (`avisoDelGuardado`). Después de cada guardado se vuelve a pedir la grilla: los totales son los del servidor.
+  - Los días con **cifras en firme (candado) siguen siendo el botón** de siempre. El ícono ⤢ de la esquina de la celda (solo con el mouse encima o enfocada) abre el día completo: transportador, precio, observaciones y eliminar. Un clic en él justo después de escribir espera a que termine el guardado.
+- Otros: presupuesto de estilos por componente de 8 kB a 12 kB en `angular.json` (el diálogo de detalle ya mide más); `shared/quincena.ts` gana `quincenaDeLaFecha`; `cifras-de-la-quincena.ts` gana `precioComoSeEscribe`.
+
+### Cómo se revisó
+
+- Dos revisiones independientes de solo lectura, con lentes distintos y un escéptico por hallazgo que intentaba refutarlo, y dos rondas de **pruebas de mutación** sobre copias aisladas (se rompe el código a propósito y se mide si alguna prueba lo nota). La del diálogo de detalle confirmó 16 hallazgos; la de la grilla, el listado y los arreglos, 36 (muchos repetidos entre lentes). **Todos se arreglaron con prueba**, entre ellos los que tocan plata: con el filtro de transportador o con un proveedor retirado las celdas vacías ya no son campos (el servidor rebota ahí); un "5" a medias ya no se guarda cuando un diálogo o otra ventana se lleva el foco; tras un guardado fallido o de resultado incierto la grilla se vuelve a pedir; F2 / Alt+Enter guardan antes de abrir el día; `52 5` ya no se lee 525 ni `0.500` quinientos; el listado de Recepción ya no deja la lista vieja bajo un filtro nuevo cuando la consulta falla. Los sobrevivientes de la mutación se convirtieron en pruebas. Quedan como descartados, a propósito, los hallazgos que pedían avisar de lo que ya no se puede hacer en el listado (día suelto, mes entero).
+- **Deudas conocidas de esta vuelta:**
+  - `aprobar`, `recalcular` y `recuadrar` no toman el mismo candado (`_bloquear`) que el precio masivo, y el PUT del precio de **un** día (`actualizar_precio_detalle`) no lo toma. El front ya no deja solapar las escrituras, pero un segundo usuario sí podría.
+  - Las fechas escritas a mano en los calendarios de toda la app se leen como mes/día/año (ya salió la tarea aparte para arreglarlo).
+  - Las celdas de la grilla miden unos 40 px en la tablet: se mantuvo la cuadrícula compacta para que entre la quincena. Si el lápiz se siente apretado, es lo primero que hay que subir.
+
 ## Cómo verificar
 
 Montar el entorno (el equipo se formateó; esto se hizo el 30/09/2026):
@@ -150,9 +182,9 @@ npx ng build
 npx ng test --watch=false --browsers=ChromeHeadless
 ```
 
-Resultado el 04/10/2026, con los archivos de auditoría de la rama ya borrados:
-- **Backend, suite completa y sin excluir nada:** **2.968 pasan, 0 fallan**, 22 skipped y 16 xfailed (los mismos de siempre). La advertencia de `DecompressionBombWarning` es de pruebas de soportes y es intencional. Al empezar la vuelta 5 eran 2.828: las nuevas son las de cada arreglo, con las cifras del dueño.
-- **Frontend:** compila limpio (solo los dos avisos de presupuesto de estilos que ya existían). **589 specs, 0 fallan.**
+Resultado el 04/10/2026 (vuelta 6), sin excluir nada:
+- **Backend, suite completa:** **3.004 pasan, 0 fallan**, 22 skipped y 16 xfailed (los mismos de siempre). La advertencia de `DecompressionBombWarning` es de pruebas de soportes y es intencional. Eran 2.968 al terminar la vuelta 5.
+- **Frontend:** compila limpio y **sin avisos** (el presupuesto de estilos por componente quedó en 12 kB). **863 specs, 0 fallan** (eran 589 al terminar la vuelta 5).
 
 Si `ng test` o `ng build` fallan con un `SyntaxError` *dentro de* `node_modules`, reinstalar con `npm ci`. El 04/10/2026 `node_modules/typescript/lib/typescript.js` apareció con un bit cambiado (`returo siogleOrMany` por `return singleOrMany`) sin que nadie lo hubiera escrito: el disco reporta buena salud, así que la sospecha es la RAM del equipo. `git fsck` y una búsqueda de palabras con un bit cambiado en todo lo editado no encontraron nada en los repos.
 
@@ -208,7 +240,7 @@ Si `ng test` o `ng build` fallan con un `SyntaxError` *dentro de* `node_modules`
    - **Textos nuevos que el dueño debería leer:** el de C3 ("…quedó cerrada como pagada sin saldo por entregar, porque los anticipos que se le aplicaron ($80.000) y lo que el tercero quedó debiendo de la quincena pasada ($120.000) cubrieron exacto su valor ($200.000)"); el de C9 ("…todavía no tiene pagos registrados, y al anularla sus anticipos ($300.000) vuelven a quedar pendientes"); los 422 de "los dos comprobantes ya no cuadran"; el consejo del candado del anticipo; el 422 de Pagar en la quincena en $0; el aviso de la vista previa "Le queda debiendo $X: ya se le habían entregado $P…".
    - **El PDF:** el de la fila migrada sin tocar sigue diciendo "Estado: PAGADA" en el encabezado (`estado_visible` no mira la deuda borrada), con la marca "PENDIENTE DE REPARAR" encima. Y las tablas quedaron un poco más apretadas en todos los comprobantes de liquidación, para que el caso denso siga cabiendo en una hoja: conviene que el dueño lo vea impreso.
    - **Cambios fuera de lo pedido, para revisar:** Anular se oculta en `version > 1`; Recalcular se oculta en un borrador cuya deuda ya se cobró; aparece "Se recalculó la liquidación de este día" en borradores; una anulada con deuda borrada sigue ofreciendo compartir; el 422 de un día ofrece Corregir (solo para el precio) en toda quincena de leche que Corregir acepta.
-3. **Desplegar, solo con el visto bueno del usuario y después de hacer commit:**
+3. **Desplegar la vuelta 6, solo con el visto bueno del usuario y después de hacer commit** (la vuelta 5 ya está en producción):
    1. **Primero el backend** (Render). Con el back nuevo y el front viejo no se arriesga plata: los guardias están en el servidor.
    2. Comprobar que `GET /api/v1/liquidaciones/resumen` responde 200.
    3. **Después el frontend** (Cloudflare). Al revés, el front nuevo contra el back viejo deja la lista sin tarjetas hasta que llegue el backend.
