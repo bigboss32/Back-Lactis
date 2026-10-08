@@ -1,23 +1,23 @@
 # Continuar: las quincenas que ya existen y el rótulo "pagada · quedó debiendo"
 
-> Nota de traspaso escrita el 27/09/2026 y puesta al día el 04/10/2026: la vuelta 5 (revisión final) ya está en producción; la vuelta 6 (precio para varios días, filtros y grilla escribible) está sin commit.
+> Nota de traspaso escrita el 27/09/2026 y puesta al día el 04/10/2026: las vueltas 5 (revisión final) y 6 (precio para varios días, filtros y grilla escribible) están en producción desde el 07/10/2026.
 > Está igual en **Back-Lactis** y en **Front-Lactis** porque el cambio toca los dos.
 
 ## En una mirada
 
 - **La revisión final (vuelta 5, 30/09–04/10/2026) ya está en `main` y en producción.** Encontró 15 defectos confirmados y 10 menores, uno de ellos **crítico** (C0, abajo). Todos quedaron arreglados con prueba, salvo una decisión del dueño (L8).
-- **La vuelta 6 (04/10/2026) NO tiene commit.** Está en el árbol de trabajo de la rama `wip/quincenas-existentes` de los dos repos: sección "Vuelta 6" abajo. Hace falta el visto bueno del usuario para el commit y el despliegue.
-- **Las tres consultas de solo lectura en Render siguen pendientes** (sección "Lo que falta", punto 1). El orden del despliegue es **primero el backend, después el frontend** (punto 3), y después Ctrl+F5 a quien tenga Lactis abierto.
+- **La vuelta 6 (04/10/2026) ya está en `main` y en producción** (subida el 07/10/2026 a pedido del usuario: back `c584694`, front `2cb59f4`; primero el backend, y solo cuando Render ya mostraba `/precios` en su `openapi.json`, el frontend; Cloudflare sirve archivos idénticos byte a byte a los del build local). Ver la sección "Vuelta 6" abajo.
+- **Las tres consultas de solo lectura en Render siguen pendientes** (sección "Lo que falta", punto 1), y falta que el usuario pruebe la grilla con el lápiz S Pen en la tablet. A quien tenga Lactis abierto hay que pedirle Ctrl+F5.
 
 ## Dónde está el código
 
 | | Back-Lactis | Front-Lactis |
 |---|---|---|
 | Rama con el trabajo | `wip/quincenas-existentes` | `wip/quincenas-existentes` |
-| `origin/main` (lo que está en producción) | `0ba84ae` | `2e06ea0` |
+| `origin/main` (lo que está en producción) | `c584694` | `2cb59f4` |
 
 - **Hasta la vuelta 5 todo está en `main`, y por lo tanto en producción** (se subió el 04/10/2026, primero el backend y después el frontend; Render despliega el backend desde `main` y Cloudflare el frontend). Eso incluye el rótulo "pagada · quedó debiendo", la vuelta 4 y la revisión final, y con ellas el arreglo de C0 (borrarle el pago a una quincena cuya deuda ya se cobró en la siguiente se aceptaba y dejaba $700.000 de leche contra $600.000 de plata).
-- **La vuelta 6 solo existe en el árbol de trabajo** de los dos repos.
+- **La vuelta 6 también está en `main`** (ver arriba). Si esta nota aparece con un commit más en la rama `wip` que en `main`, ese commit es solo esta actualización del texto: se dejó sin desplegar a propósito para no reiniciar producción por un cambio de documentación.
 - **No hay migraciones nuevas** en ninguna de las dos: `alembic/versions` no se tocó, así que desplegar no cambia el esquema.
 
 ## Contexto que hay que saber antes de tocar nada
@@ -121,7 +121,7 @@
 - `GET /anticipos` ya no hace una consulta por quincena cobrada (L9). El listado de liquidaciones pasó de 57 a 8 consultas por página (R11).
 - Pagar, anular, el PUT de observaciones y la vista previa de Corregir deciden bajo `_bloquear` (L6, R8), así un abono concurrente no hace rebotar una quincena normal con el aviso de la migración.
 
-## Vuelta 6: precio para varios días, filtros y grilla escribible (sin commit, 04/10/2026)
+## Vuelta 6: precio para varios días, filtros y grilla escribible (en producción desde el 07/10/2026)
 
 Salió de lo que pidió el usuario después del despliegue de la vuelta 5. Cada pieza se probó con la suite y **en un navegador real** contra un backend local con datos de prueba.
 
@@ -240,7 +240,7 @@ Si `ng test` o `ng build` fallan con un `SyntaxError` *dentro de* `node_modules`
    - **Textos nuevos que el dueño debería leer:** el de C3 ("…quedó cerrada como pagada sin saldo por entregar, porque los anticipos que se le aplicaron ($80.000) y lo que el tercero quedó debiendo de la quincena pasada ($120.000) cubrieron exacto su valor ($200.000)"); el de C9 ("…todavía no tiene pagos registrados, y al anularla sus anticipos ($300.000) vuelven a quedar pendientes"); los 422 de "los dos comprobantes ya no cuadran"; el consejo del candado del anticipo; el 422 de Pagar en la quincena en $0; el aviso de la vista previa "Le queda debiendo $X: ya se le habían entregado $P…".
    - **El PDF:** el de la fila migrada sin tocar sigue diciendo "Estado: PAGADA" en el encabezado (`estado_visible` no mira la deuda borrada), con la marca "PENDIENTE DE REPARAR" encima. Y las tablas quedaron un poco más apretadas en todos los comprobantes de liquidación, para que el caso denso siga cabiendo en una hoja: conviene que el dueño lo vea impreso.
    - **Cambios fuera de lo pedido, para revisar:** Anular se oculta en `version > 1`; Recalcular se oculta en un borrador cuya deuda ya se cobró; aparece "Se recalculó la liquidación de este día" en borradores; una anulada con deuda borrada sigue ofreciendo compartir; el 422 de un día ofrece Corregir (solo para el precio) en toda quincena de leche que Corregir acepta.
-3. **Desplegar la vuelta 6, solo con el visto bueno del usuario y después de hacer commit** (la vuelta 5 ya está en producción):
+3. **Cómo se despliega** (la vuelta 6 ya se desplegó así el 07/10/2026; sirve para la próxima, siempre con el visto bueno del usuario y después de hacer commit):
    1. **Primero el backend** (Render). Con el back nuevo y el front viejo no se arriesga plata: los guardias están en el servidor.
    2. Comprobar que `GET /api/v1/liquidaciones/resumen` responde 200.
    3. **Después el frontend** (Cloudflare). Al revés, el front nuevo contra el back viejo deja la lista sin tarjetas hasta que llegue el backend.
