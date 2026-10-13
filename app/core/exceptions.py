@@ -5,10 +5,22 @@ from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 
 from app.core.logging_config import get_logger
 
 logger = get_logger("exceptions")
+
+# LOS DOS CÓDIGOS DE POSTGRES QUE QUIEREN DECIR "OTRA PERSONA HACÍA LO MISMO Y ESTA PETICIÓN
+# PERDIÓ": 40P01 (deadlock detectado: dos peticiones se esperaban entre sí y Postgres tumba
+# a una) y 40001 (fallo de serialización). En los dos la transacción se revierte entera, así
+# que NO queda nada a medias; lo único que hay que hacer es volver a intentar. Salían como
+# un 500 "Error interno del servidor", que no dice eso y asusta.
+CODIGOS_DE_CONCURRENCIA = frozenset({"40P01", "40001"})
+MENSAJE_DE_CONCURRENCIA = (
+    "Otra persona estaba cambiando lo mismo en el mismo momento y esta vez no se alcanzó a "
+    "guardar. No se perdió ni se movió nada: vuelva a intentarlo."
+)
 
 
 class AppException(Exception):
@@ -88,3 +100,18 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": {"code": "internal_error", "detail": "Error interno del servidor"}},
         )
+
+    @app.exception_handler(DBAPIError)
+    async def database_exception_handler(request: Request, exc: DBAPIError) -> JSONResponse:
+        """Un abrazo mortal (o un fallo de serialización) es un 409 que dice qué hacer; cualquier
+        otro error de la base de datos sigue siendo el mismo 500 de siempre."""
+        if getattr(exc.orig, "pgcode", None) in CODIGOS_DE_CONCURRENCIA:
+            logger.warning(
+                "Conflicto de concurrencia (%s) en %s %s",
+                exc.orig.pgcode, request.method, request.url.path,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={"error": {"code": "concurrency_conflict", "detail": MENSAJE_DE_CONCURRENCIA}},
+            )
+        return await unhandled_exception_handler(request, exc)

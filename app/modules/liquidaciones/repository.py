@@ -586,19 +586,81 @@ class AnticipoRepository(BaseRepository[Anticipo]):
             )
         return stmt
 
-    def pendientes_de(self, proveedor_id: uuid.UUID, hasta: date) -> list[Anticipo]:
+    def _consulta_de_sueltos(
+        self, tercero: Any, hasta: date, para_marcar: bool
+    ) -> Any:
+        """La consulta de los anticipos de un tercero que todavía no se le han descontado a
+        ninguna quincena (`liquidacion_id` en nulo) y son de `hasta` hacia atrás.
+
+        `para_marcar` es la diferencia entre MIRAR y COBRAR, y no es un adorno:
+
+        · Para mirar (la pre-liquidación, el aviso de la pantalla) basta leer, y leer sin
+          candado es lo correcto: no se debe frenar a nadie por pintar una cifra.
+        · Para COBRAR —generar la quincena, o aprobar/recalcular un borrador que barre los
+          anticipos nuevos— lo que sigue a la lectura es marcar estas filas y restarlas en
+          el total, y sin candado dos peticiones a la vez leen el MISMO anticipo como suelto
+          y lo restan las dos. Medido en un Postgres de verdad (`herramientas/
+          carrera_de_candados.py`): Aprobar la quincena de julio mientras otra persona
+          Generaba la de agosto, con un anticipo de $500.000 sin descontar: julio quedó con
+          $500.000 de anticipos y agosto con otros $500.000, $1.000.000 restados por
+          $500.000 entregados, y a un productor se le habría pagado de menos. La marca
+          queda apuntando a la última que escribió, así que después no hay ni rastro de la
+          otra. Pasa en los dos sentidos (la que entra primero o la que entra después).
+
+        Con `FOR UPDATE` la segunda petición ESPERA a que la primera termine y, al soltarse,
+        Postgres vuelve a evaluar el WHERE: el anticipo ya no cumple `liquidacion_id IS
+        NULL` y no vuelve a salir. Es la misma jugada de `deudas_sin_cobrar` (la deuda
+        trasladada) y de `_bloquear`.
+
+        Lo que hace falta para que el candado sirva:
+        · `ORDER BY fecha, id`: dos peticiones que piden anticipos que se traslapan los
+          bloquean en el MISMO orden, así que no se abrazan entre ellas (la de una quincena
+          vieja pide un prefijo de lo que pide la siguiente, con el mismo orden);
+        · `lazyload` en las tres relaciones: `proveedor`, `transportador` y `empleado` son
+          lazy="joined" sobre llaves anulables y Postgres RECHAZA un `SELECT ... FOR UPDATE`
+          que traiga un LEFT JOIN (0A000). Es la misma trampa que ya costó caro con las
+          liquidaciones (ver `_bloquear` en el servicio);
+        · `populate_existing`: si la fila ya estaba en la sesión (otra consulta de la misma
+          petición), sin esto se queda con lo que traía y no con lo que otra persona acaba de
+          dejar (el valor, la fecha) mientras esta esperaba el turno.
+
+        SQLite descarta el `FOR UPDATE` en silencio, así que la suite no delata si falta: lo
+        fijan las pruebas de `tests/test_anticipos_candado_al_marcar.py` (la consulta, vista
+        en el dialecto de Postgres) y lo prueba contra Postgres de verdad la herramienta.
+        """
         stmt = self.base_query().where(
-            Anticipo.proveedor_id == proveedor_id,
+            tercero,
             Anticipo.liquidacion_id.is_(None),
             Anticipo.fecha <= hasta,
         )
+        if para_marcar:
+            stmt = (
+                stmt.order_by(Anticipo.fecha, Anticipo.id)
+                .options(
+                    lazyload(Anticipo.proveedor),
+                    lazyload(Anticipo.transportador),
+                    lazyload(Anticipo.empleado),
+                )
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+        return stmt
+
+    def pendientes_de(
+        self, proveedor_id: uuid.UUID, hasta: date, *, para_marcar: bool = False
+    ) -> list[Anticipo]:
+        """Los anticipos sueltos de un proveedor. `para_marcar=True` los bloquea: ver
+        `_consulta_de_sueltos`."""
+        stmt = self._consulta_de_sueltos(Anticipo.proveedor_id == proveedor_id, hasta, para_marcar)
         return list(self.db.scalars(stmt).all())
 
-    def pendientes_transportador(self, transportador_id: uuid.UUID, hasta: date) -> list[Anticipo]:
-        stmt = self.base_query().where(
-            Anticipo.transportador_id == transportador_id,
-            Anticipo.liquidacion_id.is_(None),
-            Anticipo.fecha <= hasta,
+    def pendientes_transportador(
+        self, transportador_id: uuid.UUID, hasta: date, *, para_marcar: bool = False
+    ) -> list[Anticipo]:
+        """Los anticipos sueltos de un transportador. `para_marcar=True` los bloquea: ver
+        `_consulta_de_sueltos`."""
+        stmt = self._consulta_de_sueltos(
+            Anticipo.transportador_id == transportador_id, hasta, para_marcar
         )
         return list(self.db.scalars(stmt).all())
 

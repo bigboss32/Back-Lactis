@@ -3089,7 +3089,13 @@ class LiquidacionService(BaseService[Liquidacion]):
             # quincena y el saldo quede negativo: ver la nota "EL SALDO NEGATIVO ES LA
             # VERDAD" en `_aplicar_anticipos_pendientes`. Un anticipo que se soltara por
             # no caber es plata que sale dos veces.
-            anticipos = anticipos_repo.pendientes_de(prov_id, fin)
+            # Primero la liquidación que le deja la deuda y DESPUÉS los anticipos: ver
+            # `_candado_de_las_deudas_primero`.
+            self._candado_de_las_deudas_primero(TIPO_PROVEEDOR, prov_id, inicio)
+            # `para_marcar`: los marca más abajo y los resta en el total, así que se leen con
+            # candado (ver `_consulta_de_sueltos`): sin él, aprobar la quincena anterior al
+            # mismo tiempo los restaba también y el anticipo se descontaba dos veces.
+            anticipos = anticipos_repo.pendientes_de(prov_id, fin, para_marcar=True)
             total_anticipos = sum((Decimal(a.valor) for a in anticipos), CERO)
 
             liquidacion = Liquidacion(
@@ -3245,7 +3251,11 @@ class LiquidacionService(BaseService[Liquidacion]):
             # Igual que en la de proveedor: TODOS los anticipos pendientes, completos.
             # Ver la nota "EL SALDO NEGATIVO ES LA VERDAD" en
             # `_aplicar_anticipos_pendientes`.
-            anticipos = anticipos_repo.pendientes_transportador(trans_id, fin)
+            # Primero el candado de la deuda y después el de los anticipos (ver
+            # `_candado_de_las_deudas_primero`), y con candado por lo mismo que en proveedores
+            # (ver `_consulta_de_sueltos`).
+            self._candado_de_las_deudas_primero(TIPO_TRANSPORTADOR, trans_id, inicio)
+            anticipos = anticipos_repo.pendientes_transportador(trans_id, fin, para_marcar=True)
             total_anticipos = sum((Decimal(a.valor) for a in anticipos), CERO)
 
             liquidacion = Liquidacion(
@@ -4008,8 +4018,17 @@ class LiquidacionService(BaseService[Liquidacion]):
 
         Las tres preguntas y su orden están en `_razon_para_no_cambiar_el_precio`, la
         misma que lee la pantalla para el lápiz (`avisos_deuda_cobrada`).
+
+        CON EL CANDADO PUESTO ANTES DE PREGUNTAR, igual que `actualizar_precio_varios_dias`.
+        Sin él, este camino leía el estado y los totales de la fila sin FOR UPDATE y
+        escribía encima de otro usuario: con la aprobación o el Recalcular de otra persona
+        a medias, el precio se cambiaba en una quincena que ya había salido ("aprobada",
+        con el papel impreso) o los totales se sumaban con el precio de antes mientras la
+        recepción ya decía el de ahora, y el desglose dejaba de sumar la cifra grande.
+        Ver `_bloquear`.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
+        liquidacion = _bloquear(self.db, liquidacion)
         razon = _razon_para_no_cambiar_el_precio(liquidacion, self.ctx)
         if razon is not None:
             raise BusinessError(razon[1])
@@ -4303,7 +4322,9 @@ class LiquidacionService(BaseService[Liquidacion]):
         )
         return list(self.db.scalars(stmt).all())
 
-    def _anticipos_sueltos_del_periodo(self, liquidacion: Liquidacion) -> list[Anticipo]:
+    def _anticipos_sueltos_del_periodo(
+        self, liquidacion: Liquidacion, *, para_marcar: bool = False
+    ) -> list[Anticipo]:
         """Los adelantos de ese tercero que NO se le han descontado a nadie todavía.
 
         Misma pregunta que usa `_aplicar_anticipos_pendientes` al generar —la de
@@ -4320,10 +4341,12 @@ class LiquidacionService(BaseService[Liquidacion]):
         """
         repo = AnticipoRepository(self.db, self.ctx.empresa_id)
         if liquidacion.tipo == TIPO_PROVEEDOR:
-            sueltos = repo.pendientes_de(liquidacion.proveedor_id, liquidacion.periodo_fin)
+            sueltos = repo.pendientes_de(
+                liquidacion.proveedor_id, liquidacion.periodo_fin, para_marcar=para_marcar
+            )
         else:
             sueltos = repo.pendientes_transportador(
-                liquidacion.transportador_id, liquidacion.periodo_fin
+                liquidacion.transportador_id, liquidacion.periodo_fin, para_marcar=para_marcar
             )
         # Los de nómina no entran acá ni por casualidad: se descuentan en un pago de
         # empleado, que no tiene estados ni saldo, y mezclarlos sería descontarle al
@@ -4453,6 +4476,7 @@ class LiquidacionService(BaseService[Liquidacion]):
         anticipos_a_soltar: list[uuid.UUID] | None = None,
         valores_de_anticipos: list[Any] | None = None,
         anticipos_a_borrar: list[uuid.UUID] | None = None,
+        bloquear_los_sueltos: bool = False,
     ) -> "_Simulacion":
         """Calcula cómo quedarían las cifras SIN escribir nada, y valida de paso.
 
@@ -4549,7 +4573,16 @@ class LiquidacionService(BaseService[Liquidacion]):
 
         # ---------------------------------------------------------- los anticipos
         aplicados = {a.id: a for a in self._anticipos_de(liquidacion)}
-        sueltos_anticipo = {a.id: a for a in self._anticipos_sueltos_del_periodo(liquidacion)}
+        # `bloquear_los_sueltos` solo lo pide la corrección de VERDAD y solo cuando se va a
+        # incluir algún adelanto: lo que sigue es marcarlo y restarlo, y sin candado generar la
+        # quincena siguiente al mismo tiempo lo restaba también (ver `_consulta_de_sueltos`). La
+        # previsualización solo MIRA y no frena a nadie.
+        sueltos_anticipo = {
+            a.id: a
+            for a in self._anticipos_sueltos_del_periodo(
+                liquidacion, para_marcar=bloquear_los_sueltos
+            )
+        }
 
         # SIN REPETIDOS, por lo mismo que los días: un id mandado dos veces haría que el
         # diálogo prometiera un descuento que el botón no escribe.
@@ -4881,11 +4914,12 @@ class LiquidacionService(BaseService[Liquidacion]):
         from app.modules.liquidaciones.models import CorreccionLiquidacion
 
         # (1) y (2): la liquidación, y el candado ANTES de mirarle una cifra.
-        # `_bloquear` (FOR UPDATE) es obligatorio y aquí no se puede ahorrar: `recalcular`
-        # y `recuadrar` se lo ahorran porque exigen borrador, y a un borrador nadie le
-        # está registrando un pago al mismo tiempo. Esta operación corre justamente sobre
-        # documentos vivos que sí reciben pagos: sin el candado, una corrección y un pago
-        # simultáneos leen el mismo `pagado` y el segundo escribe encima del primero.
+        # `_bloquear` (FOR UPDATE) es obligatorio y aquí no se puede ahorrar. (Antes se decía que
+        # `recalcular` y `recuadrar` se lo ahorraban porque exigen borrador; ya no: toman su propio
+        # candado, porque entre "leí que era borrador" y "escribí" otra persona puede aprobarlo.)
+        # Esta operación corre justamente sobre documentos vivos que sí reciben pagos: sin el
+        # candado, una corrección y un pago simultáneos leen el mismo `pagado` y el segundo
+        # escribe encima del primero.
         liquidacion = self.repo.get_or_fail(entity_id)
         liquidacion = _bloquear(self.db, liquidacion)
 
@@ -4924,6 +4958,7 @@ class LiquidacionService(BaseService[Liquidacion]):
             liquidacion, recepciones_a_incluir, precios,
             anticipos_a_incluir, anticipos_a_soltar, valores_de_anticipos,
             anticipos_a_borrar,
+            bloquear_los_sueltos=bool(anticipos_a_incluir),
         )
         entran, nuevos_precios = sim.entran, sim.precios
 
@@ -5251,17 +5286,22 @@ class LiquidacionService(BaseService[Liquidacion]):
         if liquidacion.estado != ESTADO_BORRADOR:
             return Decimal(liquidacion.anticipos)
 
+        # CON CANDADO (`para_marcar`): lo que sigue es marcarlos y restarlos. Sin él, generar la
+        # quincena siguiente al mismo tiempo leía el MISMO anticipo suelto y los dos lo
+        # restaban (ver `_consulta_de_sueltos`).
         anticipos_repo = AnticipoRepository(self.db, self.ctx.empresa_id)
         if liquidacion.tipo == TIPO_PROVEEDOR:
             pendientes = (
-                anticipos_repo.pendientes_de(liquidacion.proveedor_id, liquidacion.periodo_fin)
+                anticipos_repo.pendientes_de(
+                    liquidacion.proveedor_id, liquidacion.periodo_fin, para_marcar=True
+                )
                 if liquidacion.proveedor_id
                 else []
             )
         else:
             pendientes = (
                 anticipos_repo.pendientes_transportador(
-                    liquidacion.transportador_id, liquidacion.periodo_fin
+                    liquidacion.transportador_id, liquidacion.periodo_fin, para_marcar=True
                 )
                 if liquidacion.transportador_id
                 else []
@@ -5299,6 +5339,27 @@ class LiquidacionService(BaseService[Liquidacion]):
     # `deuda_trasladada_a_id` apuntando a la que se lo cobró, y la consulta que busca
     # deudas (`deudas_sin_cobrar`) no vuelve a mirar a los marcados. Es el mismo
     # idioma que ya usan las recepciones y los anticipos.
+    def _candado_de_las_deudas_primero(self, tipo: str, tercero_id: uuid.UUID, inicio: date) -> None:
+        """Toma el candado de las liquidaciones que le dejaron deuda al tercero ANTES de tomar el
+        de sus anticipos sueltos, que es el orden en que los toman todos los demás.
+
+        Aprobar, Recalcular, Recuadrar, Corregir y editar un anticipo piden primero la
+        liquidación (`_bloquear`) y después los anticipos. Generar hacía al revés: leía los
+        anticipos (ahora con candado, ver `_consulta_de_sueltos`) y solo después, en
+        `_cobrar_deudas_anteriores`, pedía la liquidación de donde sale la deuda. Con una
+        quincena anterior que ya DEBE (un borrador que quedó por debajo de cero) y un anticipo
+        suelto de esa misma quincena, las dos peticiones se esperaban entre sí: abrazo mortal de
+        Postgres (40P01). Medido con `herramientas/carrera_de_candados.py`: una de las dos
+        salía con el 409 de "Otra persona estaba cambiando lo mismo" (sin perder nada: la
+        transacción se revierte y reintentar sale bien). Con este orden la que llega segunda
+        espera ANTES de tener nada, y no hay ciclo.
+
+        Es la misma consulta que hace `_cobrar_deudas_anteriores` un poco después (con el mismo
+        candado): las filas ya están tomadas, así que esa segunda vuelta no espera. Lo que se
+        devuelve no se usa; este llamado existe por su efecto, que es el candado.
+        """
+        self.repo.deudas_sin_cobrar(tipo, tercero_id, antes_de=inicio)
+
     def _cobrar_deudas_anteriores(self, liquidacion: Liquidacion) -> Decimal:
         """Le cobra a esta liquidación lo que el tercero quedó debiendo antes.
 
@@ -5441,8 +5502,18 @@ class LiquidacionService(BaseService[Liquidacion]):
         El neto y el saldo sí quedan al día —los rearma `_refrescar_saldo`, que ya
         resta esa columna—, así que la igualdad que el dueño verifica a mano sigue
         exacta después de recalcular.
+
+        CON EL CANDADO PUESTO ANTES DE PREGUNTAR. Recalcular vuelve a sumar las recepciones y
+        escribe el total, el neto y el saldo; si otra persona cambia el precio de un día entre
+        que esta petición lee las recepciones y escribe la suma, la liquidación queda con la
+        suma del precio de antes y la recepción con el de ahora. Con el FOR UPDATE el que llega
+        segundo espera y relee el estado DESPUÉS (`populate_existing`). El recuadre en cascada
+        (`recuadrar`) también pasa por aquí, ya con el candado que tomó él mismo al empezar (ver
+        `recuadrar`): volver a pedirlo en la misma transacción no cuesta nada, y ya se bajó
+        (flush) todo lo que había pendiente, así que releer no pierde ningún cambio.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
+        liquidacion = _bloquear(self.db, liquidacion)
         # Solo un borrador, y si la deuda de esta ya se cobró en otra, tampoco: cambiarle
         # el total le cambiaría el descuento a un comprobante ya emitido. Este es el
         # camino por el que de verdad llega —el recuadre automático de una recepción
@@ -5622,8 +5693,19 @@ class LiquidacionService(BaseService[Liquidacion]):
 
         Devuelve True si hubo que devolverla a borrador, para poder avisarle al
         usuario que la tiene que revisar y aprobar otra vez.
+
+        CON EL CANDADO PUESTO ANTES DE DECIDIR NADA. Casi todos los llamadores ya la traen
+        bloqueada (el PUT del día en Recepción, mover un anticipo), y entonces pedirlo otra vez
+        no cuesta nada: en la misma transacción el FOR UPDATE no espera y ya se bajó (flush)
+        todo lo pendiente, así que releer no pierde ningún cambio. Pero NO todos: cuando
+        corregirle el transportador a un día lo mete a un comprobante de flete que ya cobraba
+        ese viaje (`_volver_al_viaje_ya_cobrado`), ese comprobante se lee en Recepción sin
+        candado. Sin el de aquí, `recuadrar` preguntaba "¿tiene pagos?" con la foto vieja —
+        un abono que otra persona confirmaba justo entonces no se veía—, la devolvía a
+        borrador encima del 'parcial' y la recalculaba contra plata ya entregada.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
+        liquidacion = _bloquear(self.db, liquidacion)
         # PRIMERO EL GUARDIA DE LA DEUDA TRASLADADA, antes de tocar el estado: si se
         # dejara para el `recalcular` del final, la liquidación ya habría pasado a
         # borrador (y quedado en la bitácora) para rebotar un renglón después. Rebota
@@ -5700,8 +5782,17 @@ class LiquidacionService(BaseService[Liquidacion]):
 
         Aprobar en sí no cambia ninguna cifra, así que se deja pasar: es solo el visto
         bueno del dueño sobre unas cuentas que ya están en firme.
+
+        CON EL CANDADO PUESTO ANTES DE LEER EL ESTADO, y este es el camino que más lo necesitaba:
+        al barrer los anticipos, `_aplicar_anticipos_pendientes` escribe el neto y el saldo con
+        el `valor_total` que tiene en la mano. Si otra persona acaba de cambiarle el precio a un
+        día (o de recalcular), ese total está viejo y el saldo quedaba restado contra una cifra
+        que ya no existe: el desglose dejaba de sumar la cifra grande, justo en el comprobante
+        que enseguida se paga. Con el FOR UPDATE espera su turno y `populate_existing` relee el
+        total nuevo. Ver `_bloquear`.
         """
         liquidacion = self.repo.get_or_fail(entity_id)
+        liquidacion = _bloquear(self.db, liquidacion)
         if liquidacion.estado == ESTADO_BORRADOR and not liquidacion.deuda_ya_cobrada:
             self._aplicar_anticipos_pendientes(liquidacion)
         return self._transicionar(entity_id, (ESTADO_BORRADOR,), ESTADO_APROBADA)
